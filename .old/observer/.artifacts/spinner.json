@@ -1,0 +1,1 @@
+{ "directory": "/home/pablo/documents/systems/server/observer", "file": ".artifacts/spinner.pcm", "output": ".artifacts/spinner.o", "arguments": ["/usr/bin/clang++", "-xpcm", ".artifacts/spinner.pcm", "-o", ".artifacts/spinner.o", "--driver-mode=g++", "-std=c++23", "-c", "--target=x86_64-pc-linux-gnu"]},

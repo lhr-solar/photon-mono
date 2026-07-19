@@ -1,0 +1,12 @@
+client/client
+server/server
+source/source
+observer/observer
+observer/.artifacts
+compile_commands.json
+go/main
+tui/tui
+observer/tui
+server/main
+canp/test/source_test
+canp/test/sink_test

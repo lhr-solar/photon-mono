@@ -1,0 +1,5 @@
+#!/bin/sh
+
+rm -rf server
+g++ main.cpp -o server
+./server
