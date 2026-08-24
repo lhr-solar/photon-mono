@@ -1,0 +1,42 @@
+# Build
+.artifacts/
+.artifacts-web/
+.external/
+build/
+build-*/
+out/
+cmake-build-*/
+
+# Compilers / tooling
+.cache/
+.clangd
+.compile_commands.json
+compile_commands.json
+.vscode/
+.idea/
+*.user
+CMakeUserPresets.json
+
+# Binaries / objects
+*.exe
+*.obj
+*.o
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.dll
+*.so
+*.dylib
+*.out
+
+# CTest
+Testing/
+CTestTestfile.cmake
+DartConfiguration.tcl
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
