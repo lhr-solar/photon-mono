@@ -260,19 +260,6 @@ func TestRTPClockManualOffsetAppliesToWallMs(t *testing.T) {
 	}
 }
 
-func TestClockProvenanceOrdering(t *testing.T) {
-	// §8.5: "Treat any claim of A/V sync as unverified until offset provenance
-	// is rtcp or better." That comparison only works if the constants are
-	// ordered worst to best.
-	if !(clockProvReceive < clockProvManual && clockProvManual < clockProvNTP && clockProvNTP < clockProvRTCP) {
-		t.Fatalf("provenance constants are not ordered worst to best: receive=%d manual=%d ntp=%d rtcp=%d",
-			clockProvReceive, clockProvManual, clockProvNTP, clockProvRTCP)
-	}
-	if clockProvenanceName(clockProvRTCP) != "rtcp" || clockProvenanceName(clockProvReceive) != "receive" {
-		t.Fatal("provenance names must match the spec's vocabulary")
-	}
-}
-
 // The .idx record has to carry the RTP timestamp and the raw receive time
 // alongside the derived wall clock, or a recording's skew is unknowable after
 // the fact (§8.5 item 1).

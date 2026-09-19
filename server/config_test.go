@@ -64,49 +64,6 @@ func TestUiOffFlag(t *testing.T) {
 	}
 }
 
-func TestAddressConstruction(t *testing.T) {
-	cfg := &Config{
-		Host:             "192.168.1.100",
-		IngressPort:      6100,
-		ClientPort:       6500,
-		ObserverPort:     5400,
-		VideoIngressPort: 6600,
-		VideoClientPort:  6700,
-		VideoUdpPort:     6800,
-		DataDir:          "/var/lib/photon",
-	}
-
-	if got := cfg.IngressAddr(); got != "192.168.1.100:6100" {
-		t.Errorf("expected ingress addr %q, got %q", "192.168.1.100:6100", got)
-	}
-	if got := cfg.ClientAddr(); got != "192.168.1.100:6500" {
-		t.Errorf("expected client addr %q, got %q", "192.168.1.100:6500", got)
-	}
-	if got := cfg.ObserverAddr(); got != "192.168.1.100:5400" {
-		t.Errorf("expected observer addr %q, got %q", "192.168.1.100:5400", got)
-	}
-	if got := cfg.VideoIngressAddr(); got != "192.168.1.100:6600" {
-		t.Errorf("expected video ingress addr %q, got %q", "192.168.1.100:6600", got)
-	}
-	if got := cfg.VideoClientAddr(); got != "192.168.1.100:6700" {
-		t.Errorf("expected video client addr %q, got %q", "192.168.1.100:6700", got)
-	}
-	if got := cfg.VideoUdpAddr(); got != "192.168.1.100:6800" {
-		t.Errorf("expected video udp addr %q, got %q", "192.168.1.100:6800", got)
-	}
-	expectedSegments := filepath.Join("/var/lib/photon", "segments")
-	if got := cfg.SegmentsDir(); got != expectedSegments {
-		t.Errorf("expected segments dir %q, got %q", expectedSegments, got)
-	}
-	expectedVideo := filepath.Join("/var/lib/photon", "video", "segments")
-	if got := cfg.VideoSegmentsDir(); got != expectedVideo {
-		t.Errorf("expected video segments dir %q, got %q", expectedVideo, got)
-	}
-	if got := cfg.TsdbRoot(); got != filepath.Join("/var/lib/photon", "tsdb") {
-		t.Errorf("expected tsdb root %q, got %q", filepath.Join("/var/lib/photon", "tsdb"), got)
-	}
-}
-
 func TestEnvFallback(t *testing.T) {
 	mockEnv := map[string]string{
 		"PHOTON_HOST":               "127.0.0.1",

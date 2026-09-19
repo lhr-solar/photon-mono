@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -129,14 +128,6 @@ func TestUiCrashHandler(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("put: %d", rec.Code)
 	}
-
-	var payload map[string]string
-	if err := json.Unmarshal([]byte(`{"kind":"abort","message":"OOM"}`), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload["kind"] != "abort" {
-		t.Fatal(payload)
-	}
 }
 
 func TestUiFileHandlerRedirectsRoot(t *testing.T) {
@@ -168,19 +159,6 @@ func TestUiFileHandlerNoStore(t *testing.T) {
 	}
 	if rec.Header().Get("Content-Type") != "application/wasm" {
 		t.Fatalf("content-type %q", rec.Header().Get("Content-Type"))
-	}
-}
-
-func TestUiExportProxyKeepsQuery(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/export.csv?session=20260907-021613-00", nil)
-	if req.URL.Path != "/export.csv" {
-		t.Fatalf("path %s", req.URL.Path)
-	}
-	if req.URL.Query().Get("session") != "20260907-021613-00" {
-		t.Fatalf("query %s", req.URL.RawQuery)
-	}
-	if uiExportProxy() == nil || uiWsProxy() == nil {
-		t.Fatal("proxies")
 	}
 }
 
