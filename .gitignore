@@ -1,6 +1,8 @@
 # Build
 .artifacts/
 .artifacts-*/
+artifacts/
+artifacts-*/
 .external/
 build/
 build-*/
