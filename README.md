@@ -1,34 +1,48 @@
 # photon-next
 
-Rewrite of Longhorn Racing Solar's Photon telemetry stack: a native backend daemon owns hardware, network, files, DBC decode, arena storage, and TX safety. A Dear ImGui/ImPlot WASM page talks to that daemon over localhost WebSocket.
+Rewrite of Longhorn Racing Solar's Photon telemetry stack: a native backend daemon owns hardware, network, files, DBC decode, arena storage, and TX safety. A Dear ImGui/ImPlot UI (WASM page or native `photon-ui.exe`) talks to that daemon over localhost WebSocket.
 
-This repository is **milestone 2**: shared wire protocol, backend daemon, and the WASM UI. The existing native client (`F:\lhr\Photon`) is not modified. The Go ingest server (`F:\lhr\photon-server`) owns Saturday storage and starts `photon-index --live-fanout` on the PC.
+This repository is organized as Photon-style **system libraries** under `photon/`. The existing native client (`F:\lhr\Photon`) is not modified. The Go ingest server (`F:\lhr\photon-server`) owns Saturday storage and starts `photon-index --live-fanout` on the PC.
 
 ```
 PCAN / DAQ TCP / log replay
                 │
                 ▼
-     photon-backend (this repo)
+     photon-backend (photon/daemon)
        sockets, CANP, sources,
        TX arm stub, protocol v1
                 │  WebSocket 127.0.0.1:8765
                 ▼
-     ImGui WASM UI  frontend/  (.artifacts-web/photon.html)
+     ImGui UI  photon/ui
+       WASM: .artifacts-web/photon.html
+       native: .artifacts/photon-ui.exe
 ```
 
 `photon-server` is the ingest server on the **PC**. Oracle is a pipe to it. On the PC it also starts a **local UI** (`photon-backend` + `http://127.0.0.1:8080/photon.html`) aimed at its own fan-out — that is the console when you are not on USB PCAN or another host. The **laptop** runs its own `photon-backend` for a different source (`--daq-host <pc>` or `--source pcan`). Both clients pass `--no-live-tail`; `photon-index --live-fanout` writes `data/tsdb` on the PC.
 
 ## Layout
 
-| Path | Role |
-| --- | --- |
-| `core/` | Shared protocol library. No UI, GPU, or socket server. |
-| `backend/` | Native daemon: WebSocket server, session controller, sources. |
-| `frontend/` | Dear ImGui + ImPlot WASM client (Emscripten). |
-| `tests/` | CTest target for encode/decode, CANP, WS accept-key. |
-| `.artifacts/` | Native build directory (same convention as Photon). |
-| `.artifacts-web/` | Emscripten build directory (`photon.html` / `.js` / `.wasm`). |
-| `.external/` | Fetched emsdk, imgui, implot (gitignored). |
+| Path | Library / target | Role |
+| --- | --- | --- |
+| `photon/base` | `photon_base` | JSON, endian (shared primitives) |
+| `photon/wire` | `photon_wire` | protocol v1, control plane, CANP, video framing |
+| `photon/decode` | `photon_decode` | DBC parse/decode, interp |
+| `photon/store` | `photon_store` | TSDB, VSD1, video index, log sessions |
+| `photon/net` | `photon_net` | sockets, WebSocket, SHA-1/Base64, client auth (`net.cpp` / `websocket.cpp` native-only) |
+| `photon/hw` | `photon_hw` | PCAN (native-only) |
+| `photon/synth` | `photon_synth` | track-sim solver |
+| `photon/daemon` | `photon_daemon` + `photon-backend` + `photon-index` | native daemon and indexer |
+| `photon/ui` | sources + `photon-ui` / `photon-frontend` | ImGui client (native exe / WASM `photon.html`) |
+| `photon-core` | INTERFACE umbrella | links the system libs (except `photon_ui`) |
+| `web/` | — | `shell.html` + Emscripten build/serve scripts |
+| `tools/` | `photon-export` (+ lib), `qa/`, `data/`, `charge_model/` | export, protocol/browser QA, log analysis |
+| `tests/` | `photon-tests` | CTest; links `photon-core`, `photon_daemon`, `photon-export-lib` |
+| `assets/` | — | `dbc/`, `fonts/`, `models/`, `tracks/`, `maps3d.html`+`js` |
+| `.artifacts/` | — | native build directory (same convention as Photon) |
+| `.artifacts-web/` | — | Emscripten build directory (`photon.html` / `.js` / `.wasm`) |
+| `.external/` | — | Fetched emsdk, imgui, implot (gitignored) |
+
+Dependency edges: `base` → (none); `synth` → `base`; `wire` → `base`, `synth`; `decode` → `base`; `store` → `decode`, `wire`, `base`, `net` (SHA-1); `net` → `base`, `wire`; `hw` → `wire`, `base`; `daemon` → everything except `ui`; `ui` → `photon-core` + imgui/tinygltf (+ `net` native).
 
 ## Build
 
@@ -40,7 +54,17 @@ cmake --build .artifacts
 ctest --test-dir .artifacts --output-on-failure
 ```
 
-The backend binary is `.artifacts/backend/photon-backend.exe` (Ninja multi-folder layout) or `.artifacts/photon-backend` depending on generator.
+Ninja multi-folder layout:
+
+| Binary | Path |
+| --- | --- |
+| `photon-backend` | `.artifacts/photon/daemon/photon-backend.exe` |
+| `photon-index` | `.artifacts/photon/daemon/photon-index.exe` |
+| `photon-ui` | `.artifacts/photon-ui.exe` |
+| `photon-export` | `.artifacts/tools/photon-export/photon-export.exe` |
+| `photon-tests` | `.artifacts/tests/photon-tests.exe` |
+
+Optional: `cmake --build .artifacts --target format` / `format-check` (needs `clang-format`; skipped if missing).
 
 ## Frontend (ImGui WASM)
 
@@ -65,12 +89,12 @@ cd .external/emsdk
 cd ..\..
 ```
 
-Or: `.\frontend\scripts\setup-emsdk.ps1`
+Or: `.\web\scripts\setup-emsdk.ps1`
 
 ### Build the page
 
 ```powershell
-.\frontend\scripts\build.ps1
+.\web\scripts\build.ps1
 ```
 
 Equivalent manual steps:
@@ -89,8 +113,8 @@ Do **not** mix this tree with the native `.artifacts/` configure (`PHOTON_FRONTE
 On the **PC**, `photon-server` starts this UI itself (`http://127.0.0.1:8080/photon.html`). You only start these two processes by hand on a **laptop** (or any other source: `--source pcan`).
 
 ```powershell
-.\.artifacts\backend\photon-backend.exe --ws-port 8765 --no-live-tail --daq-host <pc-ip>
-.\frontend\scripts\serve.ps1
+.\.artifacts\photon\daemon\photon-backend.exe --ws-port 8765 --no-live-tail --daq-host <pc-ip>
+.\web\scripts\serve.ps1
 ```
 
 Open **http://127.0.0.1:8080/photon.html**. Do not open `photon.html` as `file://`. The UI sends `hello`, then follows the backend's active source. Heartbeat is every 1 s; reconnect backoff is 200 ms / 500 ms / 1 s / 2 s.
@@ -100,7 +124,7 @@ Optional: `emrun .artifacts-web/photon.html --no_browser` (emrun is on PATH afte
 Headless protocol check (backend must be running):
 
 ```powershell
-python .\frontend\scripts\smoke_ws.py
+python .\web\scripts\smoke_ws.py
 ```
 
 ### Screens
@@ -108,6 +132,7 @@ python .\frontend\scripts\smoke_ws.py
 | Tab | Status |
 | --- | --- |
 | Pit (default) | Vitals tiles, 32-cell heatmap, alarm strip, 3D + Live View dock tiles |
+| Dashboard | Extra pit/debug tiles |
 | Plots | ImPlot time-series, catalog checkboxes, live window, pause + zoom |
 | Dynamics | MPH / steer / G / wheel-slip tiles + G-G and slip plots |
 | Live View | WebCodecs H.264 → GLES texture |
@@ -115,14 +140,27 @@ python .\frontend\scripts\smoke_ws.py
 | Track Sim | Catalog + solve + speed/elevation plots |
 | CAN | Live `CanMonitorBatch` table (id, dlc, hex, Hz, count), sortable |
 | Network | Source picker + control-plane log |
+| Analysis | Workbook / compute overlay |
 
 Navigation is a **top tab bar** only (no sidebar). Titlebar right: connection dot, source, timeline mode/cursor, Live/Pause transport.
+
+## Native UI (`photon-ui`)
+
+Same ImGui sources as the WASM page, built as `.artifacts/photon-ui.exe` when `PHOTON_NATIVE_UI` is ON (default). Speaks protocol v1 to `photon-backend` (`--ws`, `--password`, `--shared`/`--private`, `--screen`). `--quit-after-ms` is the smoke-test hook.
+
+## Indexer (`photon-index`)
+
+Native-only, built next to the daemon. Historical path: `--logs DIR --out DIR` indexes VSD1 into a TSDB session. Live PC ingest: `--live-fanout HOST:PORT --out DIR` writes `data/tsdb` from photon-server CANP fan-out. Also hosts `--bench` / `--retention` helpers; see `--help`.
+
+## Export (`photon-export`)
+
+Reads a TSDB session and writes Parquet (`--store DIR --session ID --out FILE --signals LIST` or `--all-signals`). Library is `photon-export-lib` (also linked by the daemon CSV path and tests).
 
 ## Run
 
 ```powershell
 # Laptop / other source. The PC UI is started by photon-server.
-.\.artifacts\backend\photon-backend.exe --no-live-tail --daq-host <pc-ip>
+.\.artifacts\photon\daemon\photon-backend.exe --no-live-tail --daq-host <pc-ip>
 ```
 
 Flags:
@@ -140,7 +178,7 @@ Connect a WebSocket client, send a JSON `hello`, then `select_source` / `subscri
 
 ## JSON dependency
 
-Control-plane JSON is an in-repo recursive-descent parser/stringifier (`core/src/json.cpp`): objects, arrays, strings, numbers, bools, null. No third-party JSON library and no link-time dependency. SHA-1 and Base64 used for the WebSocket handshake are also in-repo (`core/src/sha1.cpp`, `core/src/base64.cpp`).
+Control-plane JSON is an in-repo recursive-descent parser/stringifier (`photon/base` `json.cpp`): objects, arrays, strings, numbers, bools, null. No third-party JSON library and no link-time dependency. SHA-1 and Base64 used for the WebSocket handshake are also in-repo (`photon/net` `sha1.cpp`, `base64.cpp`).
 
 ## Protocol v1
 
@@ -194,7 +232,7 @@ TX arm is a stub: per-client armed flag, auto-disarm on disconnect or 3 s withou
 
 ## DBC + VSD1
 
-`core/dbc` parses text DBC (`BO_` / `SG_`; multiplexed signals skipped) and decodes CAN frames with the same Intel/Motorola bit walk as legacy Photon. `core/vsd1` indexes on-disk VSD1 frames (`magic 0x56534431`, 24-byte big-endian header, CANP payload). CRC is not required.
+`photon/decode` parses text DBC (`BO_` / `SG_`; multiplexed signals skipped) and decodes CAN frames with the same Intel/Motorola bit walk as legacy Photon. `photon/store` (`vsd1`) indexes on-disk VSD1 frames (`magic 0x56534431`, 24-byte big-endian header, CANP payload). CRC is not required.
 
 ## CANP (daq_tcp)
 
@@ -213,7 +251,7 @@ The Go observer also understands v2 (21-byte packets). This daemon follows the C
 
 ## Track Sim (speed-profile solver)
 
-Native strategy helper in `core/` (`photon/tracksim.hpp`). No I/O in the library: tracks load from JSON text via the in-repo parser. Example course: `assets/tracks/hill_loop.json` (closed loop with a climb, descent, and curved return). The backend lists `assets/tracks/*.json` and runs solves on a worker thread.
+Native strategy helper in `photon/synth` (`photon/tracksim.hpp`). No I/O in the library: tracks load from JSON text via the in-repo parser. Example course: `assets/tracks/hill_loop.json` (closed loop with a climb, descent, and curved return). The backend lists `assets/tracks/*.json` and runs solves on a worker thread.
 
 `hello_ack.features` includes `track_sim`. New control messages stay on the JSON plane (protocol v1, additive). No new binary `msgType`.
 

@@ -1,8 +1,35 @@
 # photon-next cleanup plan: systems layout modeled on Photon `main`
 
 **Date:** 2026-09-19
-**Status:** proposed, not started
+**Status:** in progress — systems layout landed; god-file / service splits still open
 **Scope:** `F:\lhr\photon-next` only. `F:\lhr\Photon` (legacy) and `F:\lhr\photon-server` (Go ingest) are read-only references.
+
+## Progress (2026-09-19)
+
+### DONE
+
+| Item | Commit |
+| --- | --- |
+| Baseline (month of WIP before restructure) | `aac24d6` (earlier snapshot `fbd7c0a`) |
+| Restructure into `photon/<system>` libraries (move-only + CMake) | `9f62824` |
+| WASM frontend build + script paths after restructure | `f3911cb` |
+| Scripts triage (`backend/scripts` → `tools/qa`, `tools/data`, `tools/charge_model`) | `9f62824` |
+| Scratch deletion (root `_*.ps1`, `opencode_*`, agent one-offs) | `9f62824` |
+| `.clang-format` + `format` / `format-check` targets | this commit (ColumnLimit **110** after measuring the tree) |
+| README rewrite for systems layout + per-system READMEs | this commit |
+
+§2 below is the **pre-`9f62824` audit** (`core/` / `backend/` / `frontend/` paths). The tree is now `photon/{base,wire,decode,store,net,hw,synth,daemon,ui}`.
+
+### OPEN
+
+- SessionHub service split (`session.cpp` → `Daemon` + per-concern services)
+- Client / App UI split (`client.cpp`, `app.cpp`)
+- `custom_view.cpp` / `tsdb.cpp` god-file splits
+- `web/shell.html` JS extraction
+- Per-system test executables
+- `Platform` interface (web vs native)
+
+The rest of this file is the forward plan.
 
 ## 1. Why
 
@@ -171,26 +198,28 @@ Rules:
 
 Each phase ends green: native configure+build, `ctest`, WASM build, `photon-ui --quit-after-ms 2500` prints `timed quit` / `shutdown ok`. Move-only commits are separate from behavior/refactor commits so `git log --follow` and review stay tractable. Use `git mv`.
 
-### Phase 0 — Freeze and baseline (½ day)
+### Phase 0 — Freeze and baseline (½ day) — **DONE** `aac24d6` / scratch+triage in `9f62824`
 
-1. Fix `.gitignore`: `.artifacts*/`, `__pycache__/`, `*.pyc`, `.qa-scratch*/`.
-2. Delete root scratch (`_*.ps1`, `_probe_locate.py`) and agent one-offs (`tools/photon-export/_mut.py`, `frontend/scripts/_dismiss-gpu.ps1`, `tests/revert_check_video_index.ps1`, `tools/photon-export/revert_check.py`). Anything with lasting value (`_hotfix_blank.ps1` → deploy script; `_probe_locate.py` → `tools/qa/`) is re-homed in Phase 1, not deleted.
-3. Commit the WIP as-is in reviewable slices: `core`, `backend`, `frontend`, `tools`, `tests`, `assets/docs`. This is the baseline every later diff is measured against.
+1. Fix `.gitignore`: `.artifacts*/`, `__pycache__/`, `*.pyc`, `.qa-scratch*/`. **DONE**
+2. Delete root scratch (`_*.ps1`, `_probe_locate.py`) and agent one-offs (`tools/photon-export/_mut.py`, `frontend/scripts/_dismiss-gpu.ps1`, `tests/revert_check_video_index.ps1`, `tools/photon-export/revert_check.py`). Anything with lasting value (`_hotfix_blank.ps1` → deploy script; `_probe_locate.py` → `tools/qa/`) is re-homed in Phase 1, not deleted. **DONE** (`9f62824`; `_probe_locate.py` → `tools/qa/probe_video_locate.py`)
+3. Commit the WIP as-is in reviewable slices: `core`, `backend`, `frontend`, `tools`, `tests`, `assets/docs`. This is the baseline every later diff is measured against. **DONE** `aac24d6`
 4. Record baseline: `ctest` pass list, `photon.wasm`/`photon.js`/`photon.data` sizes, native `photon-ui` smoke, `photon-backend --help`.
 
 ### Phase 1 — Hygiene and tooling (1 day)
 
-1. Add `.clang-format` (Google base, `ColumnLimit: 100`, `IndentWidth: 4`, `PointerAlignment: Left`, `SortIncludes: true`, `NamespaceIndentation: None`). Add `format` / `format-check` targets like Photon's root `CMakeLists.txt`. Run once as a standalone "format" commit.
-2. Triage `backend/scripts/`:
+1. Add `.clang-format` (Google base, `ColumnLimit: 110` measured, `IndentWidth: 4`, `PointerAlignment: Left`, `SortIncludes: true`, `NamespaceIndentation: None`). Add `format` / `format-check` targets like Photon's root `CMakeLists.txt`. Run once as a standalone "format" commit. **DONE** (targets + style file this commit; do **not** `clang-format -i` the tree until a dedicated format commit)
+2. Triage `backend/scripts/`: **DONE** `9f62824` (`smoke_ws.py` landed in `web/scripts/`)
    - keep → `tools/qa/`: `smoke_ws.py`, `check_pcan_ws.py`, `check_replay_ws.py`, `check_video_ws.py`, `show_*`, `capture_console.py`, `screenshot_*`, `click_*`, `shot_after_click.py`, `_probe_locate.py`
    - keep → `tools/data/`: `log_coverage.py`, `extract_on_track.py`, `export_comp_timeseries.py`, `dump_critical_signals.py`
    - decide → `tools/charge_model/` or a separate repo: `charge_model/` (ML training, has its own README)
    - delete: `opencode_*.py`, `vsd1_read_probe.cpp` (superseded by `tests/test_vsd1.cpp`)
-3. Move `assets/maps3d.{html,js}` → `web/js/maps3d.js` + markup into `web/shell.html`; update `native_maps.cpp` / WebView2 host path and the WASM asset URL.
-4. `scripts/ci.ps1`: configure+build native, `ctest --output-on-failure`, WASM build, `format-check`. This is the gate for every later phase.
-5. Unify target naming: libraries `photon_<system>`, executables `photon-<name>`. Third-party wrappers `photon_imgui`, `photon_tinygltf`.
+3. Move `assets/maps3d.{html,js}` → `web/js/maps3d.js` + markup into `web/shell.html`; update `native_maps.cpp` / WebView2 host path and the WASM asset URL. **OPEN**
+4. `scripts/ci.ps1`: configure+build native, `ctest --output-on-failure`, WASM build, `format-check`. This is the gate for every later phase. **OPEN**
+5. Unify target naming: libraries `photon_<system>`, executables `photon-<name>`. Third-party wrappers `photon_imgui`, `photon_tinygltf`. **Partial** (`9f62824`; `photon-core` / `photon-imgui` / `photon-tinygltf` still hyphenated)
 
 ### Phase 2 — Build system and layering fix (1–2 days)
+
+Move-only library split: **DONE** `9f62824`. Remaining: cmake modules, embed_assets, tests link-only, `photon-ws` leftover cleanup if any.
 
 1. Create `cmake/{warnings,deps,emscripten,embed_assets}.cmake`; root `CMakeLists.txt` becomes project options + `add_subdirectory(assets)` + `add_subdirectory(photon)` + tests, mirroring Photon's root.
 2. Move `backend/src/{net,websocket}.cpp` + `core/src/{ws_handshake,sha1,base64}.cpp` + `client_auth` → `photon/net/` as `photon_net`. Split `websocket.cpp` into `ws/server.cpp` (accept, upgrade, per-connection state) and `ws/client.cpp` (what `frontend/src/client.cpp` uses on native). Frontend links `photon_net`; the `photon-ws` hack in `frontend/CMakeLists.txt` goes away.
@@ -201,14 +230,14 @@ Each phase ends green: native configure+build, `ctest`, WASM build, `photon-ui -
 
 ### Phase 3 — Core split into `wire` / `decode` / `store` / `synth` (1–2 days)
 
-Move-only, then targeted splits:
+Move-only into systems: **DONE** `9f62824`. Targeted god-file splits below: **OPEN** (`tsdb.cpp`, `control.cpp`, `DecodeBuffer`, analysis/tile_* still in `ui`).
 
 - `control.cpp` (47 KB) → `wire/control/messages.hpp` (structs), `wire/control/encode.cpp`, `wire/control/decode.cpp`; one table of `type` strings.
 - `tsdb.cpp` (102 KB) → `store/tsdb/{format,store,query,compact}.cpp` + existing `live.cpp`; keep `tsdb_internal.hpp` as the only private header.
 - `DecodeBuffer` + `SignalRing` (backend `source.hpp`) → `decode/decode_buffer.{hpp,cpp}`.
 - `frontend/src/analysis_{runtime,workbook,eval}.cpp`, `tile_cache.cpp`, `tile_store.cpp` → `synth/analysis/`, `synth/history/`. `HistoryIO` interface moves with them; `idb_tile_store.cpp` stays in `ui/platform/web` as the web implementation.
 
-### Phase 4 — Daemon decomposition (3–4 days)
+### Phase 4 — Daemon decomposition (3–4 days) — **OPEN** (SessionHub service split)
 
 `SessionHub` (92 KB, ~90 private methods) becomes a `Daemon` facade with one object per concern. Each extraction is one commit; `SessionHub` shrinks until it is renamed `Daemon`.
 
@@ -232,7 +261,7 @@ Move-only, then targeted splits:
 
 Acceptance: `tests/daemon/` covers router dispatch, credit flow, tx watchdog, live recorder recovery with the existing `test_session_history`, `test_log_switch`, `test_replay_views`, `test_live_fanout` cases relocated, unchanged in assertions.
 
-### Phase 5 — UI decomposition (4–5 days)
+### Phase 5 — UI decomposition (4–5 days) — **OPEN** (Client/App split, `custom_view` split, Platform interface)
 
 1. **`Platform` interface** (`ui/platform/platform.hpp`): `nowMs`, `assetPath`, `pageParam`, `wsUrl`, `openUrl`, `copyToClipboard`, `persistKV`, `videoSupported`, `mapsHost`. Two implementations: `platform/web/*.cpp` (all `EM_JS`/`EM_ASM`/`extern "C"` glue consolidated here — today spread across `idb_tile_store`, `gl3d/scene`, `video_decoder`, `custom_view`, `page_url`, `screens/analysis`, `theme`, `log_drawer`, `app`) and `platform/native/*.cpp` (`platform.cpp`, `gl_loader`, `native_maps`, `native_video`, crash handler from `main.cpp`). `UI` takes a `Platform&`; screens never `#ifdef __EMSCRIPTEN__`.
 2. **`transport/`**: split `Client` (43 KB) into `Connection` (socket, reconnect backoff, heartbeat), `Hello` (ack, features, source adoption), `Interest` (subscribe/unsubscribe/CAN/video wanted sets, `begin/commitInterest`), `ControlHandlers` (one function per inbound `type`), `HistoryTransport` (`requestHistory`/`cancelHistory`, catalog). Drive-day heuristics (`maybeAdoptDriveDay`, `bestCatalogForYmd`) move to `state/catalog`.
@@ -243,13 +272,13 @@ Acceptance: `tests/daemon/` covers router dispatch, credit flow, tx watchdog, li
 7. **`video/`**: `video_decoder.cpp` → `decoder.hpp` interface, `web_codecs_decoder.cpp`, `mf_decoder.cpp` (native), `release.cpp` (pacing), `hud.cpp`.
 8. `photon_ui` becomes a library; `photon-ui` (native) and `photon-frontend` (WASM) are thin `main.cpp`s that construct `UI` with the right `Platform`.
 
-### Phase 6 — Web shell (1 day)
+### Phase 6 — Web shell (1 day) — **OPEN** (`shell.html` JS extraction; `frontend/scripts` already → `web/scripts` in `9f62824` / `f3911cb`)
 
 1. `frontend/shell.html` → `web/shell.html` markup + `web/js/{module,crash,fetch_remap,tilecache,maps3d,video}.js` loaded by `<script src>` (or `--pre-js` for `Module`). Version stamp (`photon.js?v=<git-sha>`) generated by CMake, not hand-edited.
 2. `web/scripts/deploy-to-photon-server.ps1` replaces `_hotfix_blank.ps1` + `_verify_wasm_ui.ps1`: copies `photon.{html,js,wasm,data}` + `models/` to `photon-server/ui/`, prints the version it shipped.
 3. WASM build becomes a CMake preset (`CMakePresets.json`: `native-debug`, `native-release`, `web-release`) so `frontend/scripts/build.ps1` is a one-liner.
 
-### Phase 7 — Tests and CI (1 day)
+### Phase 7 — Tests and CI (1 day) — **OPEN** (per-system test executables)
 
 1. One test executable per system under `tests/<system>/`, shared `harness.hpp`, `add_test` with `LABELS`. `tools/photon-export/test_export.cpp` → `tests/tools/`.
 2. `ctest -L wire|store|daemon|ui` runs in `scripts/ci.ps1`; e2e Python (`smoke_ws.py`, `check_*_ws.py`, `test_video_webcodecs.cjs`) under `tests/e2e/` with a `--backend` flag, not auto-run.
@@ -257,10 +286,10 @@ Acceptance: `tests/daemon/` covers router dispatch, credit flow, tx watchdog, li
 
 ### Phase 8 — Docs (½ day)
 
-1. `README.md` rewritten in Photon's style: a systems glyph table (`wire / decode / store / net / hw / synth / daemon / ui / web`), build presets, run matrix (PC console vs laptop vs browser). Protocol tables move to `docs/protocol.md` and are completed from `control.hpp`.
-2. `docs/architecture.md`: §3 of this file + the daemon tick order and the UI frame order.
-3. Per-system `README.md` (5–10 lines: what it owns, what it may link).
-4. Update `.memory/context/2026-08-18-photon-next-rewrite-state.md` layout section or supersede it.
+1. `README.md` rewritten in Photon's style: a systems glyph table (`wire / decode / store / net / hw / synth / daemon / ui / web`), build presets, run matrix (PC console vs laptop vs browser). Protocol tables move to `docs/protocol.md` and are completed from `control.hpp`. **Partial** (root README + systems table this commit; `docs/protocol.md` still **OPEN**)
+2. `docs/architecture.md`: §3 of this file + the daemon tick order and the UI frame order. **OPEN**
+3. Per-system `README.md` (5–10 lines: what it owns, what it may link). **DONE** this commit
+4. Update `.memory/context/2026-08-18-photon-next-rewrite-state.md` layout section or supersede it. **OPEN**
 
 ## 5. Order and effort
 

@@ -46,6 +46,46 @@ function(photon_apply_warnings target)
     )
 endfunction()
 
+find_program(CLANG_FORMAT_EXE NAMES clang-format HINTS "C:/Program Files/LLVM/bin")
+if(CLANG_FORMAT_EXE)
+    file(GLOB_RECURSE PHOTON_FORMAT_FILES
+        "${CMAKE_SOURCE_DIR}/photon/*.cpp"
+        "${CMAKE_SOURCE_DIR}/photon/*.hpp"
+        "${CMAKE_SOURCE_DIR}/photon/*.h"
+    )
+    file(GLOB PHOTON_FORMAT_TEST_FILES
+        "${CMAKE_SOURCE_DIR}/tests/*.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/*.hpp"
+    )
+    file(GLOB PHOTON_FORMAT_EXPORT_FILES
+        "${CMAKE_SOURCE_DIR}/tools/photon-export/*.cpp"
+        "${CMAKE_SOURCE_DIR}/tools/photon-export/*.hpp"
+    )
+    file(GLOB PHOTON_FORMAT_INDEX_FILES
+        "${CMAKE_SOURCE_DIR}/tools/photon-index/*.cpp"
+        "${CMAKE_SOURCE_DIR}/tools/photon-index/*.hpp"
+    )
+    list(APPEND PHOTON_FORMAT_FILES
+        ${PHOTON_FORMAT_TEST_FILES}
+        ${PHOTON_FORMAT_EXPORT_FILES}
+        ${PHOTON_FORMAT_INDEX_FILES}
+    )
+    add_custom_target(format
+        COMMAND "${CLANG_FORMAT_EXE}" -i ${PHOTON_FORMAT_FILES}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Formatting photon-next source files"
+        VERBATIM
+    )
+    add_custom_target(format-check
+        COMMAND "${CLANG_FORMAT_EXE}" --dry-run --Werror ${PHOTON_FORMAT_FILES}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Checking photon-next source formatting"
+        VERBATIM
+    )
+else()
+    message(STATUS "clang-format not found; format and format-check targets skipped")
+endif()
+
 if(PHOTON_FRONTEND)
     if(NOT EMSCRIPTEN)
         message(FATAL_ERROR
