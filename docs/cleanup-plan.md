@@ -15,14 +15,16 @@
 | WASM frontend build + script paths after restructure | `f3911cb` |
 | Scripts triage (`backend/scripts` → `tools/qa`, `tools/data`, `tools/charge_model`) | `9f62824` |
 | Scratch deletion (root `_*.ps1`, `opencode_*`, agent one-offs) | `9f62824` |
-| `.clang-format` + `format` / `format-check` targets | this commit (ColumnLimit **110** after measuring the tree) |
-| README rewrite for systems layout + per-system READMEs | this commit |
+| `.clang-format` + `format` / `format-check` targets | `dfcd75c` (ColumnLimit **110** after measuring the tree) |
+| README rewrite for systems layout + per-system READMEs | `dfcd75c` |
+| `source.cpp` → `sources/{synthetic,daq_tcp,log_replay,pcan_source,source_hub}.cpp`; `DecodeBuffer` → `photon_decode` | `9f411d2` |
+| `session.cpp` → `session{,_control,_stream,_video,_history,_live,_jobs}.cpp` + `session_internal.hpp` (mechanical TU split; `session.hpp` unchanged) | `e74a944` |
 
 §2 below is the **pre-`9f62824` audit** (`core/` / `backend/` / `frontend/` paths). The tree is now `photon/{base,wire,decode,store,net,hw,synth,daemon,ui}`.
 
 ### OPEN
 
-- SessionHub service split (`session.cpp` → `Daemon` + per-concern services)
+- `Daemon` facade + true service objects (the TU split in `e74a944` is mechanical; `SessionHub` is still one class)
 - Client / App UI split (`client.cpp`, `app.cpp`)
 - `custom_view.cpp` / `tsdb.cpp` god-file splits
 - `web/shell.html` JS extraction
