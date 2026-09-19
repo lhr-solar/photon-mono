@@ -2,7 +2,7 @@
 
 photon-next is the client stack: a native daemon (`photon-backend`) owns sources, DBC decode, and local storage; a Dear ImGui/ImPlot UI (WASM page or native `photon-ui`) talks to that daemon over a localhost WebSocket. The existing native client (`Photon`) is not modified. The Go ingest server (`photon-server`) owns Saturday storage and starts `photon-index --live-fanout` on the PC.
 
-On the **PC**, photon-server starts this UI itself (`photon-backend` + `http://127.0.0.1:8080/photon.html`) aimed at loopback fan-out. The **laptop** runs its own `photon-backend` for a different source (`--daq-host <pc>` or `--source pcan`). Both clients pass `--no-live-tail`. Wire format is protocol v1 — see [docs/protocol.md](docs/protocol.md).
+On the **PC**, photon-server starts this UI itself (`photon-backend` + `http://127.0.0.1:8080/photon.html`) aimed at loopback fan-out. The **laptop** runs its own `photon-backend` for a different source (`--daq-host <pc>` or `--source pcan`). Both clients pass `--no-live-tail`. Wire format is protocol v1: [docs/protocol.md](docs/protocol.md).
 
 ## Architecture
 

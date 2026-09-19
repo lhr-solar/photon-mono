@@ -29,7 +29,7 @@ Binary WebSocket payloads carry a **12-byte little-endian header** plus `payload
 | `hello_ack` | backend → UI | `protocol_version`, `server`, `features`, `dbc` `{id, path, bundled[]}` |
 | `select_source` | UI → backend | `source`: `pcan` \| `daq_tcp` `{host,port}` \| `log_replay` `{path}` |
 | `select_dbc` | UI → backend | `path` (filesystem) **or** bundled `id` / `dbc_id` (stem under `assets/dbc/`). Network screen; no restart. |
-| `signal_catalog` | backend → UI | `signals`, `dbc_id` — after `hello_ack` and on DBC change |
+| `signal_catalog` | backend → UI | `signals`, `dbc_id` (after `hello_ack` and on DBC change) |
 | `subscribe_signals` | UI → backend | `signal_ids` |
 | `unsubscribe_signals` | UI → backend | `signal_ids` |
 | `timeline_control` | UI → backend | `mode`, `cursor_ms`, optional `speed` (replay multiplier, default 1) |
@@ -40,12 +40,12 @@ Binary WebSocket payloads carry a **12-byte little-endian header** plus `payload
 
 TX arm is a stub: per-client armed flag, auto-disarm on disconnect or 3 s without a control message. Heartbeat is every 1 s; UI reconnect backoff is 200 ms / 500 ms / 1 s / 2 s.
 
-Control-plane JSON, SHA-1, and Base64 are in-repo (`photon/base`, `photon/net`) — no third-party dependency.
+Control-plane JSON, SHA-1, and Base64 are in-repo (`photon/base`, `photon/net`). No third-party dependency.
 
 ## Sources
 
 - **daq_tcp** (default): TCP client of photon-server CANP fan-out (`:6500`). Parses CANP v3, forwards frames as `CanMonitorBatch`, and decodes subscribed DBC signals into `TelemetryBatch` when a DBC is loaded. Video is a separate TCP client of photon-server `:6700`.
-- **log_replay**: local VSD1 `.log` file or directory of segments (nested `logs/` / `segments/` accepted). Payloads are CANP v3; replay honors inter-frame timestamps, `timeline_control` play/pause/seek (`cursor_ms` ≠ 0), and `speed`. `.zip` is not supported — extract first. `TimelineStatus` reports the archive min/max/cursor.
+- **log_replay**: local VSD1 `.log` file or directory of segments (nested `logs/` / `segments/` accepted). Payloads are CANP v3; replay honors inter-frame timestamps, `timeline_control` play/pause/seek (`cursor_ms` ≠ 0), and `speed`. `.zip` is not supported; extract first. `TimelineStatus` reports the archive min/max/cursor.
 - **pcan**: USB PCAN on this machine (channel / baud / listen-only).
 
 `hello_ack.features` includes `daq_tcp`, `log_replay`, `pcan`, `dbc`, and `track_sim`. Bundled DBC: `assets/dbc/carcan_telemcan.dbc`. `signalId` is FNV-1a-32 of `MessageName.SignalName` (never 0; collisions increment).
@@ -62,7 +62,7 @@ Mirrored from `photon-server/canp/canp.h` + `canp.c` (version 3). Wire is **big-
 | --- | --- | --- |
 | magic | `uint32` | `0x43414E31` `"CAN1"` |
 | version | `uint16` | `3` |
-| count | `uint16` | 1–64 packets |
+| count | `uint16` | 1-64 packets |
 | seq | `uint32` | |
 | timestamp | `uint64` | unix milliseconds |
 | packet | 29 bytes × count | `uint32 can_id`, `uint8 dlc`, `uint8 data[8]`, `uint16 dt[8]` (per-byte δt) |
