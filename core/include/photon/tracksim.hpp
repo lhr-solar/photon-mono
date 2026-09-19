@@ -82,6 +82,29 @@ struct Car {
     double latAccelMaxMps2 = 3.0;
 };
 
+// Rolling stats from the live decode buffer (log replay / DAQ). Used to seed
+// the solver from measured SOC, array power, and speed instead of defaults.
+struct MeasuredDrive {
+    bool have = false;
+    int samples = 0;
+    double windowS = 0.0;
+    double speedMpsMean = 0.0;
+    double speedMpsMax = 0.0;
+    double packVMean = 0.0;
+    double packIMean = 0.0;
+    double electricalWMean = 0.0;
+    double arrayWMean = 0.0;
+    double socEst = 0.0;
+    double cdaEst = 0.0;
+    bool haveSpeed = false;
+    bool havePackV = false;
+    bool haveArray = false;
+    bool haveCda = false;
+};
+
+// Steady-speed QSS invert: P_whl ≈ ½ ρ CdA v³ + Crr m g v.
+// Uses default mass/Crr; only trusted when v is high enough and power is motoring.
+
 struct CarOverride {
     std::optional<double> massKg;
     std::optional<double> cdaM2;
@@ -189,5 +212,12 @@ std::string stringifyTrack(const Track& track);
 CarOverride carOverrideFromValue(const json::Value& value);
 json::Value carOverrideToValue(const CarOverride& o);
 bool carOverrideEmpty(const CarOverride& o);
+
+// 32S Li-ion estimate matching frontend SignalMap::estimatePackSoc.
+double estimatePackSoc(double packVoltage);
+void fitCarFromMeasured(MeasuredDrive& m, const Car& car = {});
+CarOverride carOverrideFromMeasured(const MeasuredDrive& m);
+json::Value measuredDriveToValue(const MeasuredDrive& m);
+MeasuredDrive measuredDriveFromValue(const json::Value& value);
 
 }  // namespace photon::tracksim

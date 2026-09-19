@@ -1,6 +1,6 @@
 # Build
 .artifacts/
-.artifacts-web/
+.artifacts-*/
 .external/
 build/
 build-*/
@@ -35,6 +35,10 @@ CMakeUserPresets.json
 Testing/
 CTestTestfile.cmake
 DartConfiguration.tcl
+
+# Python
+__pycache__/
+*.pyc
 
 # OS
 .DS_Store

@@ -33,6 +33,7 @@ enum class MapScreen : unsigned {
     Pit = 1u << 0,
     Dynamics = 1u << 1,
     Scene3d = 1u << 2,
+    Dashboard = 1u << 3,
     Both = Pit | Dynamics,
 };
 
@@ -144,6 +145,8 @@ public:
 
     bool cellsMapped() const;
     const ResolvedMux* mux(std::string_view role) const;
+    void collectMappedIds(std::vector<std::uint32_t>& ids) const;
+    void collectMappedKeys(std::vector<std::string>& keys, MapScreen screen = MapScreen::Both) const;
     void fillCells(ClientArena& arena) const;
     static CellCallout cellCallout(const std::vector<float>& voltages);
 

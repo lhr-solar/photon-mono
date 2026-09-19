@@ -687,4 +687,102 @@ bool carOverrideEmpty(const CarOverride& o) {
            !o.latAccelMaxMps2;
 }
 
+double estimatePackSoc(double packVoltage) {
+    const double ratio = (packVoltage - 83.2) / 51.2;
+    if (!(ratio > 0.0)) {
+        return 0.0;
+    }
+    double soc = std::pow(ratio, 0.55);
+    if (soc < 0.0) {
+        return 0.0;
+    }
+    if (soc > 1.0) {
+        return 1.0;
+    }
+    return soc;
+}
+
+void fitCarFromMeasured(MeasuredDrive& m, const Car& carIn) {
+    const Car car = sanitizeCar(carIn);
+    m.haveCda = false;
+    m.cdaEst = 0.0;
+    if (!m.haveSpeed || !(m.speedMpsMean >= 3.0) || !std::isfinite(m.speedMpsMean)) {
+        return;
+    }
+    if (!(m.electricalWMean > 20.0) || !std::isfinite(m.electricalWMean)) {
+        return;
+    }
+    const double v = m.speedMpsMean;
+    double pBatt = m.electricalWMean;
+    if (m.haveArray && m.arrayWMean > 0.0 && std::isfinite(m.arrayWMean)) {
+        pBatt += m.arrayWMean;
+    }
+    const double pWhl = pBatt * car.driveEff;
+    const double pRoll = car.crr * car.massKg * kG * v;
+    const double pAero = pWhl - pRoll;
+    const double denom = 0.5 * car.rhoKgpm3 * v * v * v;
+    if (!(pAero > 10.0) || !(denom > 1.0)) {
+        return;
+    }
+    const double cda = pAero / denom;
+    if (cda > 0.04 && cda < 0.45 && std::isfinite(cda)) {
+        m.cdaEst = cda;
+        m.haveCda = true;
+    }
+}
+
+CarOverride carOverrideFromMeasured(const MeasuredDrive& m) {
+    CarOverride o;
+    if (m.haveArray && m.arrayWMean > 1.0 && std::isfinite(m.arrayWMean)) {
+        o.solarW = m.arrayWMean;
+    }
+    if (m.haveCda && m.cdaEst > 0.04 && m.cdaEst < 0.45 && std::isfinite(m.cdaEst)) {
+        o.cdaM2 = m.cdaEst;
+    }
+    return o;
+}
+
+json::Value measuredDriveToValue(const MeasuredDrive& m) {
+    json::Object obj;
+    obj.emplace("have", json::Value(m.have));
+    obj.emplace("samples", json::Value(m.samples));
+    obj.emplace("window_s", json::Value(m.windowS));
+    obj.emplace("speed_mps_mean", json::Value(m.speedMpsMean));
+    obj.emplace("speed_mps_max", json::Value(m.speedMpsMax));
+    obj.emplace("pack_v_mean", json::Value(m.packVMean));
+    obj.emplace("pack_i_mean", json::Value(m.packIMean));
+    obj.emplace("electrical_w_mean", json::Value(m.electricalWMean));
+    obj.emplace("array_w_mean", json::Value(m.arrayWMean));
+    obj.emplace("soc_est", json::Value(m.socEst));
+    obj.emplace("cda_est", json::Value(m.cdaEst));
+    obj.emplace("have_speed", json::Value(m.haveSpeed));
+    obj.emplace("have_pack_v", json::Value(m.havePackV));
+    obj.emplace("have_array", json::Value(m.haveArray));
+    obj.emplace("have_cda", json::Value(m.haveCda));
+    return json::Value(std::move(obj));
+}
+
+MeasuredDrive measuredDriveFromValue(const json::Value& value) {
+    MeasuredDrive m;
+    if (!value.isObject()) {
+        return m;
+    }
+    m.have = value["have"].asBool();
+    m.samples = static_cast<int>(value["samples"].asInt());
+    m.windowS = value["window_s"].asNumber();
+    m.speedMpsMean = value["speed_mps_mean"].asNumber();
+    m.speedMpsMax = value["speed_mps_max"].asNumber();
+    m.packVMean = value["pack_v_mean"].asNumber();
+    m.packIMean = value["pack_i_mean"].asNumber();
+    m.electricalWMean = value["electrical_w_mean"].asNumber();
+    m.arrayWMean = value["array_w_mean"].asNumber();
+    m.socEst = value["soc_est"].asNumber();
+    m.cdaEst = value["cda_est"].asNumber();
+    m.haveSpeed = value["have_speed"].asBool();
+    m.havePackV = value["have_pack_v"].asBool();
+    m.haveArray = value["have_array"].asBool();
+    m.haveCda = value["have_cda"].asBool();
+    return m;
+}
+
 }  // namespace photon::tracksim

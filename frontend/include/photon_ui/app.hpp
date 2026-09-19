@@ -3,6 +3,7 @@
 #include "imgui.h"
 #include "photon_ui/arena.hpp"
 #include "photon_ui/client.hpp"
+#include "photon_ui/log_drawer.hpp"
 #include "photon_ui/screen.hpp"
 
 #include <memory>
@@ -28,6 +29,7 @@ private:
     bool running_ = true;
     SDL_Window* window_ = nullptr;
     SDL_GLContext gl_ = nullptr;
+    LogDrawer logDrawer_{};
 
     void drawShell();
     void drawTitlebar(ImVec2 size);

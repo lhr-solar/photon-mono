@@ -1,9 +1,14 @@
 #include "photon/dbc.hpp"
 #include "test_harness.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
+
+#ifndef PHOTON_ASSETS_DIR
+#define PHOTON_ASSETS_DIR ""
+#endif
 
 void runDbcTests();
 
@@ -133,4 +138,24 @@ void runDbcTests() {
     CHECK(cat[0].message == "EngineData");
     CHECK(cat[0].name == "RPM");
     CHECK(cat[0].unit == "rpm");
+
+    photon::dbc::Signal wide;
+    wide.length = 64;
+    wide.isSigned = false;
+    wide.valueType = photon::dbc::ValueType::Integer;
+    wide.factor = 1.0;
+    wide.offset = 0.0;
+    const std::uint64_t highBit = 1ull << 63;
+    const auto rawHigh = photon::dbc::rawInteger(wide, highBit);
+    const double physHigh = photon::dbc::physicalFromRaw(wide, rawHigh);
+    CHECK(physHigh > 0.0);
+    CHECK(near(physHigh, 9223372036854775808.0));
+    const auto rawMax = photon::dbc::rawInteger(wide, ~0ull);
+    const double physMax = photon::dbc::physicalFromRaw(wide, rawMax);
+    CHECK(physMax > physHigh);
+
+    const auto bundled = photon::dbc::listBundledIds(PHOTON_ASSETS_DIR);
+    CHECK(!bundled.empty());
+    CHECK(std::find(bundled.begin(), bundled.end(), "carcan_telemcan") != bundled.end());
+    CHECK(photon::dbc::listBundledIds("").empty());
 }

@@ -33,6 +33,19 @@ enum class Type {
     VideoSubscribe,
     VideoStop,
     VideoStatus,
+    HistoryQuery,
+    HistoryResult,
+    HistoryCancel,
+    HistoryCredit,
+    VideoLocate,
+    VideoClock,
+    AnalysisComputeRequest,
+    AnalysisComputeResult,
+    AnalysisComputeCancel,
+    CatalogList,
+    CatalogResult,
+    SubscribeCan,
+    UnsubscribeCan,
 };
 
 enum class SourceKind {
@@ -57,6 +70,7 @@ enum class VideoMode {
 
 struct CatalogSignal {
     std::uint32_t id = 0;
+    std::uint32_t messageId = 0;
     std::string message;
     std::string name;
     std::string unit;
@@ -107,9 +121,12 @@ struct Message {
     double dEdT = 0.0;
     std::vector<tracksim::SegmentResult> trackSegments;
     std::vector<tracksim::TrackInfo> tracks;
+    tracksim::MeasuredDrive measured;
 
-    // select_dbc / signal_catalog (additive, protocol v1)
+    // select_dbc / signal_catalog / hello_ack.dbc (additive, protocol v1)
     std::string dbcId;
+    std::string dbcPath;
+    std::vector<std::string> dbcs;
     std::vector<CatalogSignal> catalog;
 
     // hello_ack active_source (additive, protocol v1)
@@ -120,6 +137,35 @@ struct Message {
         std::string path;
     };
     ActiveSource activeSource;
+
+    // hello_ack drive_days (additive, protocol v1): clickable on-track days
+    struct DriveSession {
+        std::string id;
+        std::string path;
+        std::uint64_t startMs = 0;
+        double durationS = 0.0;
+        double speedMaxMps = 0.0;
+    };
+    struct DriveDay {
+        std::string date;
+        std::string path;
+        int sessionCount = 0;
+        double durationS = 0.0;
+        std::vector<DriveSession> sessions;
+    };
+    std::vector<DriveDay> driveDays;
+
+    // catalog_list / catalog_result (additive, protocol v1): TSDB catalog.json rows
+    struct CatalogSession {
+        std::string id;
+        std::string path;
+        std::uint64_t minMs = 0;
+        std::uint64_t maxMs = 0;
+        std::string dbcHash;
+        std::uint64_t sampleCount = 0;
+        bool hasVideo = false;
+    };
+    std::vector<CatalogSession> catalogSessions;
 
     // select_source pcan (additive): channel 1-8, baud 125k/250k/500k/1M, listen-only default true
     int channel = 1;
@@ -136,6 +182,63 @@ struct Message {
     std::uint64_t lastTsMs = 0;
     std::uint64_t videoFrames = 0;
     std::uint64_t videoDropped = 0;
+    std::uint8_t videoStreamId = 0;
+    std::uint16_t videoPrefetchGops = 4;
+    std::int64_t videoClockOffsetMs = 0;
+
+    struct HistoryPoint {
+        std::uint64_t t = 0;
+        double v = 0.0;
+        bool present = false;
+    };
+    struct HistorySeries {
+        std::uint32_t signalId = 0;
+        int level = 0;
+        std::uint32_t bucketMs = 0;
+        std::uint32_t points = 0;
+        std::uint64_t tMin = 0;
+        std::uint64_t tMax = 0;
+        std::uint32_t chunks = 0;
+        HistoryPoint prior;
+        HistoryPoint next;
+    };
+
+    std::uint32_t queryId = 0;
+    std::string sessionId;
+    std::uint64_t fromMs = 0;
+    std::uint64_t toMs = 0;
+    std::uint32_t maxPoints = 2000;
+    std::vector<std::string> fields;
+    bool includeVideo = false;
+    std::uint64_t creditBytes = 4 * 1024 * 1024;
+    int historyLevel = 0;
+    std::uint32_t bucketMs = 0;
+    bool truncated = false;
+    std::vector<HistorySeries> historySeries;
+
+    // analysis_compute_* (additive, protocol v1). No new binary MsgType.
+    // Sidecar is loopback HTTP; these JSON fields stay on the control object.
+    std::string jobId;
+    std::string dbcHash;
+    std::uint64_t t0Ms = 0;
+    std::uint64_t t1Ms = 0;
+    std::string prompt;
+    std::string recipeId;
+    std::string computeKind;
+    std::string computeStatus;
+    std::string summary;
+    struct DerivedChannel {
+        std::string name;
+        std::string unit;
+        std::string pointsRef;
+    };
+    std::vector<DerivedChannel> derived;
+    struct ComputeEvent {
+        std::uint64_t tMs = 0;
+        std::string name;
+        std::string message;
+    };
+    std::vector<ComputeEvent> events;
 };
 
 std::string_view typeName(Type type);
@@ -155,6 +258,8 @@ Message helloAck(std::vector<std::string> features, Message::ActiveSource active
 Message selectSource(SourceKind kind);
 Message subscribe(std::vector<std::uint32_t> ids);
 Message unsubscribe(std::vector<std::uint32_t> ids);
+Message subscribeCan();
+Message unsubscribeCan();
 Message timelineControl(TimelineMode mode, std::uint64_t cursorMs, double speed = 1.0);
 Message selectDbc(std::string pathOrId, bool bundledId = false);
 Message signalCatalog(std::vector<CatalogSignal> catalog);
@@ -171,5 +276,22 @@ Message videoSubscribe(VideoMode mode, std::uint64_t startMs = 0);
 Message videoStop();
 Message videoStatus(bool connected, std::string host, std::uint16_t port, VideoMode mode,
                     std::uint64_t lastTsMs, std::uint64_t frames, std::uint64_t dropped);
+Message historyQuery(std::uint32_t queryId, std::string sessionId, std::uint64_t fromMs, std::uint64_t toMs,
+                     std::vector<std::uint32_t> signalIds, std::uint32_t maxPoints = 2000,
+                     std::uint64_t creditBytes = 4 * 1024 * 1024);
+Message historyResult(std::uint32_t queryId, int level, std::uint32_t bucketMs, std::uint64_t fromMs,
+                      std::uint64_t toMs, std::vector<Message::HistorySeries> series, bool truncated = false);
+Message historyCancel(std::uint32_t queryId);
+Message historyCredit(std::uint32_t queryId, std::uint64_t creditBytes);
+Message videoLocate(std::uint64_t atMs, std::uint8_t streamId = 0, std::uint16_t prefetchGops = 4);
+Message videoClock(std::int64_t offsetMs);
+Message analysisComputeRequest(std::string jobId, std::string sessionId, std::uint64_t t0Ms, std::uint64_t t1Ms,
+                               std::vector<std::uint32_t> signalIds, std::string recipeId = "summarize_window",
+                               std::uint32_t maxPoints = 2000);
+Message analysisComputeResult(std::string jobId, std::string status, std::string summary = {},
+                              std::string code = {}, std::string message = {});
+Message analysisComputeCancel(std::string jobId);
+Message catalogList();
+Message catalogResult(std::vector<Message::CatalogSession> sessions);
 
 }  // namespace photon::ctrl

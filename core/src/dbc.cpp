@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <locale>
 #include <sstream>
@@ -338,10 +339,49 @@ std::optional<Database> loadFile(const std::string& path, std::string* error) {
     auto db = parse(ss.str(), error);
     if (db) {
         db->path = path;
-        const auto slash = path.find_last_of("/\\");
-        db->label = slash == std::string::npos ? path : path.substr(slash + 1);
+        db->label = std::filesystem::path(path).stem().string();
     }
     return db;
+}
+
+namespace {
+
+bool safeBundledId(std::string_view id) {
+    if (id.empty() || id.size() > 96) {
+        return false;
+    }
+    for (char c : id) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (!std::isalnum(uc) && c != '_' && c != '-') {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+std::vector<std::string> listBundledIds(const std::string& assetsDir) {
+    std::vector<std::string> ids;
+    if (assetsDir.empty()) {
+        return ids;
+    }
+    std::error_code ec;
+    const auto dir = std::filesystem::path(assetsDir) / "dbc";
+    if (!std::filesystem::is_directory(dir, ec)) {
+        return ids;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file(ec) || entry.path().extension() != ".dbc") {
+            continue;
+        }
+        const auto stem = entry.path().stem().string();
+        if (safeBundledId(stem)) {
+            ids.push_back(stem);
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    return ids;
 }
 
 bool extractRaw(const Signal& sig, const std::uint8_t data[8], std::uint8_t dlc, std::uint64_t& raw) {
@@ -371,33 +411,58 @@ bool extractRaw(const Signal& sig, const std::uint8_t data[8], std::uint8_t dlc,
     return true;
 }
 
-bool decodeSignal(const Signal& sig, const std::uint8_t data[8], std::uint8_t dlc, double& value) {
-    std::uint64_t raw = 0;
-    if (!extractRaw(sig, data, dlc, raw)) {
-        return false;
-    }
+std::int64_t rawInteger(const Signal& sig, std::uint64_t bits) {
     switch (sig.valueType) {
         case ValueType::Float:
-            if (sig.length != 32) {
-                return false;
-            }
-            value = static_cast<double>(std::bit_cast<float>(static_cast<std::uint32_t>(raw))) * sig.factor +
-                    sig.offset;
-            return true;
         case ValueType::Double:
-            if (sig.length != 64) {
-                return false;
-            }
-            value = std::bit_cast<double>(raw) * sig.factor + sig.offset;
-            return true;
+            return static_cast<std::int64_t>(bits);
         case ValueType::Integer:
-        default: {
-            const double parsed =
-                sig.isSigned ? static_cast<double>(signExtend(raw, sig.length)) : static_cast<double>(raw);
-            value = parsed * sig.factor + sig.offset;
-            return true;
-        }
+        default:
+            return sig.isSigned ? signExtend(bits, sig.length) : static_cast<std::int64_t>(bits);
     }
+}
+
+double physicalFromRaw(const Signal& sig, std::int64_t raw) {
+    switch (sig.valueType) {
+        case ValueType::Float: {
+            const auto bits = static_cast<std::uint32_t>(static_cast<std::uint64_t>(raw));
+            return static_cast<double>(std::bit_cast<float>(bits)) * sig.factor + sig.offset;
+        }
+        case ValueType::Double: {
+            const auto bits = static_cast<std::uint64_t>(raw);
+            return std::bit_cast<double>(bits) * sig.factor + sig.offset;
+        }
+        case ValueType::Integer:
+        default:
+            if (!sig.isSigned) {
+                return static_cast<double>(static_cast<std::uint64_t>(raw)) * sig.factor + sig.offset;
+            }
+            return static_cast<double>(raw) * sig.factor + sig.offset;
+    }
+}
+
+bool extractRawInt(const Signal& sig, const std::uint8_t data[8], std::uint8_t dlc, std::int64_t& raw) {
+    std::uint64_t bits = 0;
+    if (!extractRaw(sig, data, dlc, bits)) {
+        return false;
+    }
+    raw = rawInteger(sig, bits);
+    return true;
+}
+
+bool decodeSignal(const Signal& sig, const std::uint8_t data[8], std::uint8_t dlc, double& value) {
+    std::int64_t raw = 0;
+    if (!extractRawInt(sig, data, dlc, raw)) {
+        return false;
+    }
+    if (sig.valueType == ValueType::Float && sig.length != 32) {
+        return false;
+    }
+    if (sig.valueType == ValueType::Double && sig.length != 64) {
+        return false;
+    }
+    value = physicalFromRaw(sig, raw);
+    return true;
 }
 
 std::vector<DecodedSample> decodeFrame(const Database& db, std::uint32_t canId, const std::uint8_t data[8],
@@ -412,6 +477,29 @@ std::vector<DecodedSample> decodeFrame(const Database& db, std::uint32_t canId, 
         double value = 0.0;
         if (decodeSignal(sig, data, dlc, value)) {
             out.push_back(DecodedSample{sig.signalId, value});
+        }
+    }
+    return out;
+}
+
+std::vector<RawDecodedSample> decodeFrameRaw(const Database& db, std::uint32_t canId, const std::uint8_t data[8],
+                                             std::uint8_t dlc) {
+    std::vector<RawDecodedSample> out;
+    const Message* msg = db.findMessage(canId);
+    if (msg == nullptr) {
+        return out;
+    }
+    out.reserve(msg->signals.size());
+    for (const auto& sig : msg->signals) {
+        std::int64_t raw = 0;
+        if (extractRawInt(sig, data, dlc, raw)) {
+            if (sig.valueType == ValueType::Float && sig.length != 32) {
+                continue;
+            }
+            if (sig.valueType == ValueType::Double && sig.length != 64) {
+                continue;
+            }
+            out.push_back(RawDecodedSample{sig.signalId, raw});
         }
     }
     return out;

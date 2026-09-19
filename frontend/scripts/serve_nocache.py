@@ -1,8 +1,8 @@
-"""Dev server for .artifacts-web that disables browser caching.
+"""Dev server for .artifacts-web.
 
-Plain `python -m http.server` sends no Cache-Control headers, so browsers
-heuristically cache photon.js/photon.wasm and keep running stale builds
-after a rebuild. This variant forces revalidation on every load.
+photon.html / photon.js / photon.wasm / photon.data stay no-store so a rebuild
+is never served from a stale browser cache. GLB models under /models/ are
+cacheable — they are large and change rarely.
 
 Usage: python serve_nocache.py [port]
 """
@@ -10,6 +10,7 @@ Usage: python serve_nocache.py [port]
 import http.server
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 WEB_ROOT = Path(__file__).resolve().parents[2] / ".artifacts-web"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
@@ -20,8 +21,12 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-store, must-revalidate")
-        self.send_header("Expires", "0")
+        path = unquote(urlparse(self.path).path).replace("\\", "/").lower()
+        if path.startswith("/models/"):
+            self.send_header("Cache-Control", "public, max-age=86400")
+        else:
+            self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Expires", "0")
         super().end_headers()
 
 

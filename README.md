@@ -2,10 +2,10 @@
 
 Rewrite of Longhorn Racing Solar's Photon telemetry stack: a native backend daemon owns hardware, network, files, DBC decode, arena storage, and TX safety. A Dear ImGui/ImPlot WASM page talks to that daemon over localhost WebSocket.
 
-This repository is **milestone 2**: shared wire protocol, backend daemon, and the WASM UI. The existing native client (`F:\lhr\Photon`) and Go CANP fan-out (`F:\lhr\photon-server` on `:6500`) are not modified.
+This repository is **milestone 2**: shared wire protocol, backend daemon, and the WASM UI. The existing native client (`F:\lhr\Photon`) is not modified. The Go ingest server (`F:\lhr\photon-server`) owns Saturday storage and starts `photon-index --live-fanout` on the PC.
 
 ```
-PCAN / DAQ TCP / log replay / synthetic
+PCAN / DAQ TCP / log replay
                 │
                 ▼
      photon-backend (this repo)
@@ -16,7 +16,7 @@ PCAN / DAQ TCP / log replay / synthetic
      ImGui WASM UI  frontend/  (.artifacts-web/photon.html)
 ```
 
-`photon-server` stays as-is. `daq_tcp` is a TCP **client** of its CANP fan-out (default `127.0.0.1:6500`).
+`photon-server` is the ingest server on the **PC**. Oracle is a pipe to it. On the PC it also starts a **local UI** (`photon-backend` + `http://127.0.0.1:8080/photon.html`) aimed at its own fan-out — that is the console when you are not on USB PCAN or another host. The **laptop** runs its own `photon-backend` for a different source (`--daq-host <pc>` or `--source pcan`). Both clients pass `--no-live-tail`; `photon-index --live-fanout` writes `data/tsdb` on the PC.
 
 ## Layout
 
@@ -84,23 +84,16 @@ cmake --build .artifacts-web
 Outputs: `.artifacts-web/photon.html`, `.artifacts-web/photon.js`, `.artifacts-web/photon.wasm`, `.artifacts-web/photon.data` (preloaded fonts).
 Do **not** mix this tree with the native `.artifacts/` configure (`PHOTON_FRONTEND` defaults OFF).
 
-### Run the synthetic demo
+### Run against photon-server (daq_tcp)
 
-Terminal 1 — native backend (build it first with the clang/Ninja commands above):
-
-```powershell
-.\.artifacts\backend\photon-backend.exe --ws-port 8765
-```
-
-Terminal 2 — static file server (do not open `photon.html` as `file://`; the browser must be on localhost for `ws://127.0.0.1:8765`):
+On the **PC**, `photon-server` starts this UI itself (`http://127.0.0.1:8080/photon.html`). You only start these two processes by hand on a **laptop** (or any other source: `--source pcan`).
 
 ```powershell
+.\.artifacts\backend\photon-backend.exe --ws-port 8765 --no-live-tail --daq-host <pc-ip>
 .\frontend\scripts\serve.ps1
 ```
 
-Or: `python -m http.server 8080 --directory .artifacts-web`
-
-Open **http://127.0.0.1:8080/photon.html**. The UI sends `hello`, `select_source synthetic`, and `subscribe_signals` for rpm/speed/soc/temp (ids 1–4). Heartbeat is every 1 s; reconnect backoff is 200 ms / 500 ms / 1 s / 2 s.
+Open **http://127.0.0.1:8080/photon.html**. Do not open `photon.html` as `file://`. The UI sends `hello`, then follows the backend's active source. Heartbeat is every 1 s; reconnect backoff is 200 ms / 500 ms / 1 s / 2 s.
 
 Optional: `emrun .artifacts-web/photon.html --no_browser` (emrun is on PATH after `emsdk_env.ps1`).
 
@@ -128,7 +121,8 @@ Navigation is a **top tab bar** only (no sidebar). Titlebar right: connection do
 ## Run
 
 ```powershell
-.\.artifacts\backend\photon-backend.exe --ws-port 8765 --daq-host 127.0.0.1 --daq-port 6500
+# Laptop / other source. The PC UI is started by photon-server.
+.\.artifacts\backend\photon-backend.exe --no-live-tail --daq-host <pc-ip>
 ```
 
 Flags:
@@ -138,6 +132,9 @@ Flags:
 | `--ws-port` | `8765` | WebSocket listen port (always bound to `127.0.0.1`) |
 | `--daq-host` | `127.0.0.1` | Default CANP fan-out host for `select_source daq_tcp` |
 | `--daq-port` | `6500` | Default CANP fan-out port |
+| `--source` | `daq_tcp` | `daq_tcp` (photon-server), `log_replay`, or `pcan` |
+| `--no-live-tail` | off | Do not write a TSDB (PC `photon-index` owns the store) |
+| `--password` | `PHOTON_PASSWORD` | Shared secret for photon-server fan-out / video / observer |
 
 Connect a WebSocket client, send a JSON `hello`, then `select_source` / `subscribe_signals`. Binary frames are photon-wire v1.
 
@@ -173,10 +170,10 @@ JSON **text** frames are the control plane (`type` field):
 | `type` | Direction | Fields |
 | --- | --- | --- |
 | `hello` | UI → backend | `protocol_version` (must be 1), optional `client` |
-| `hello_ack` | backend → UI | `protocol_version`, `server`, `features` |
-| `select_source` | UI → backend | `source`: `pcan` \| `daq_tcp` `{host,port}` \| `log_replay` `{path}` \| `synthetic` |
-| `select_dbc` | UI → backend | `path` (filesystem) **or** bundled `id` / `dbc_id` (stem under `assets/dbc/`) |
-| `signal_catalog` | backend → UI | `signals`: `[{id, message, name, unit, min, max}]` — after `hello_ack` and on DBC change |
+| `hello_ack` | backend → UI | `protocol_version`, `server`, `features`, `dbc` `{id, path, bundled[]}` |
+| `select_source` | UI → backend | `source`: `pcan` \| `daq_tcp` `{host,port}` \| `log_replay` `{path}` |
+| `select_dbc` | UI → backend | `path` (filesystem) **or** bundled `id` / `dbc_id` (stem under `assets/dbc/`). Network screen; no restart. |
+| `signal_catalog` | backend → UI | `signals`, `dbc_id` — after `hello_ack` and on DBC change |
 | `subscribe_signals` | UI → backend | `signal_ids` |
 | `unsubscribe_signals` | UI → backend | `signal_ids` |
 | `timeline_control` | UI → backend | `mode`, `cursor_ms`, optional `speed` (replay multiplier, default 1) |
@@ -189,12 +186,11 @@ TX arm is a stub: per-client armed flag, auto-disarm on disconnect or 3 s withou
 
 ### Sources (this milestone)
 
-- **synthetic**: four sine/step signals (`rpm` 1, `speed` 2, `soc` 3, `temp` 4) at ~100 Hz into an in-memory ring. Streamed as `TelemetryBatch` at ~30 Hz to subscribers, `CanMonitorBatch` bursts at 10 Hz, `TimelineStatus` at 1 Hz.
-- **daq_tcp**: TCP client of photon-server CANP fan-out. Parses CANP v3, forwards frames as `CanMonitorBatch`, and decodes subscribed DBC signals into `TelemetryBatch` when a DBC is loaded.
+- **daq_tcp** (default): TCP client of photon-server CANP fan-out (`:6500`). Parses CANP v3, forwards frames as `CanMonitorBatch`, and decodes subscribed DBC signals into `TelemetryBatch` when a DBC is loaded. Video is a separate TCP client of photon-server `:6700`.
 - **log_replay**: local VSD1 `.log` file or directory of segments (nested `logs/` / `segments/` accepted). Payloads are CANP v3; replay honors inter-frame timestamps, `timeline_control` play/pause/seek (`cursor_ms` ≠ 0), and `speed`. Live mode is a no-op. `.zip` is not supported — extract first. `TimelineStatus` reports the archive min/max/cursor.
-- **pcan**: rejected with `error_alert` / `not_implemented`.
+- **pcan**: USB PCAN on this machine (channel / baud / listen-only).
 
-`hello_ack.features` includes `synthetic`, `daq_tcp`, `log_replay`, `dbc`, and `track_sim`. Bundled DBC: `assets/dbc/carcan_telemcan.dbc` (the CARCan+TelemCAN file the legacy DAQ preset loads first). `signalId` is FNV-1a-32 of `MessageName.SignalName` (never 0; collisions increment).
+`hello_ack.features` includes `daq_tcp`, `log_replay`, `pcan`, `dbc`, and `track_sim`. Bundled DBC: `assets/dbc/carcan_telemcan.dbc` (the CARCan+TelemCAN file the legacy DAQ preset loads first). `signalId` is FNV-1a-32 of `MessageName.SignalName` (never 0; collisions increment).
 
 ## DBC + VSD1
 

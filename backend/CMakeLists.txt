@@ -1,5 +1,8 @@
 add_executable(photon-backend
+    src/analysis_compute.cpp
     src/cli.cpp
+    src/csv_export.cpp
+    src/history_remote.cpp
     src/main.cpp
     src/net.cpp
     src/session.cpp
@@ -14,7 +17,7 @@ target_include_directories(photon-backend
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-target_link_libraries(photon-backend PRIVATE photon-core)
+target_link_libraries(photon-backend PRIVATE photon-core photon-export-lib)
 
 if(WIN32)
     target_link_libraries(photon-backend PRIVATE ws2_32)
@@ -30,3 +33,17 @@ add_custom_command(TARGET photon-backend POST_BUILD
 )
 
 photon_apply_warnings(photon-backend)
+
+add_executable(photon-index
+    ${CMAKE_SOURCE_DIR}/tools/photon-index/main.cpp
+    ${CMAKE_SOURCE_DIR}/tools/photon-index/live_fanout.cpp
+)
+target_include_directories(photon-index PRIVATE ${CMAKE_SOURCE_DIR}/tools/photon-index)
+target_link_libraries(photon-index PRIVATE photon-core)
+if(WIN32)
+    target_link_libraries(photon-index PRIVATE ws2_32)
+endif()
+if(CMAKE_BUILD_TYPE)
+    target_compile_definitions(photon-index PRIVATE PHOTON_BUILD_TYPE=${CMAKE_BUILD_TYPE})
+endif()
+photon_apply_warnings(photon-index)

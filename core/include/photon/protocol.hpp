@@ -27,7 +27,20 @@ enum class MsgType : std::uint8_t {
     CanMonitorBatch = 0x02,
     VideoFrame = 0x04,
     TimelineStatus = 0x05,
+    HistoryChunk = 0x06,
+    VideoLocateReply = 0x07,
 };
+
+inline constexpr std::uint8_t kHistMin = 1 << 0;
+inline constexpr std::uint8_t kHistMax = 1 << 1;
+inline constexpr std::uint8_t kHistMean = 1 << 2;
+inline constexpr std::uint8_t kHistFirst = 1 << 3;
+inline constexpr std::uint8_t kHistLast = 1 << 4;
+inline constexpr std::uint8_t kHistCount = 1 << 5;
+inline constexpr std::uint8_t kHistRaw = 1 << 6;
+inline constexpr std::uint16_t kHistFinal = 1 << 0;
+inline constexpr std::uint16_t kHistDense = 1 << 1;
+inline constexpr std::size_t kHistoryChunkHeaderSize = 36;
 
 inline constexpr std::uint8_t kVideoFlagKeyframe = 1 << 0;
 inline constexpr std::uint8_t kVideoFlagConfig = 1 << 1;
@@ -137,6 +150,8 @@ std::optional<std::vector<TelemetryBlock>> decodeTelemetryBatch(std::span<const 
 
 std::vector<std::uint8_t> encodeCanMonitorBatch(std::span<const CanMonitorItem> items);
 std::optional<std::vector<CanMonitorItem>> decodeCanMonitorBatch(std::span<const std::uint8_t> payload);
+// Keep the last frame per CAN id so a busy bus still reports every message.
+std::vector<CanMonitorItem> latestCanPerId(std::span<const CanMonitorItem> items, std::size_t cap = 256);
 
 std::vector<std::uint8_t> encodeTimelineStatus(const TimelineStatus& status);
 std::optional<TimelineStatus> decodeTimelineStatus(std::span<const std::uint8_t> payload);
@@ -153,5 +168,30 @@ inline bool videoConfig(std::uint8_t flags) { return (flags & kVideoFlagConfig) 
 
 std::vector<std::uint8_t> encodeVideoFrame(const VideoFrame& frame);
 std::optional<VideoFrame> decodeVideoFrame(std::span<const std::uint8_t> payload);
+
+struct HistoryChunk {
+    std::uint32_t queryId = 0;
+    std::uint32_t signalId = 0;
+    std::uint8_t level = 0;
+    std::uint8_t fields = 0;
+    std::uint16_t flags = 0;
+    std::uint32_t chunkSeq = 0;
+    std::uint64_t baseMs = 0;
+    std::uint32_t bucketMs = 0;
+    std::uint32_t slotCount = 0;
+    std::uint32_t valueCount = 0;
+    std::vector<std::uint8_t> presence;
+    std::vector<double> timestamps;
+    std::vector<float> minV;
+    std::vector<float> maxV;
+    std::vector<float> meanV;
+    std::vector<float> firstV;
+    std::vector<float> lastV;
+    std::vector<float> countV;
+    std::vector<float> rawV;
+};
+
+std::vector<std::uint8_t> encodeHistoryChunk(const HistoryChunk& chunk);
+std::optional<HistoryChunk> decodeHistoryChunk(std::span<const std::uint8_t> payload);
 
 }  // namespace photon::proto

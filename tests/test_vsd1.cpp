@@ -150,5 +150,23 @@ void runVsd1Tests() {
     CHECK(!zipErr.has_value());
     CHECK(error.find("unzip") != std::string::npos);
 
+    const auto dayDir = tmpDir / "day";
+    fs::create_directories(dayDir, ec);
+    fs::copy_file(fileA, dayDir / "run.log", fs::copy_options::overwrite_existing, ec);
+    fs::copy_file(fileB, dayDir / "session-01.log", fs::copy_options::overwrite_existing, ec);
+    const auto dayFiles = photon::vsd1::listLogFiles(dayDir);
+    CHECK(dayFiles.size() == 1);
+    CHECK(dayFiles[0].filename() == "run.log");
+
+    auto once = photon::vsd1::indexPath(dayDir, &error);
+    CHECK(once.has_value());
+    CHECK(once->batches.size() == 2);
+    CHECK(photon::vsd1::tryLoadIndexCache(once->files).has_value());
+    auto cached = photon::vsd1::indexPath(dayDir, &error);
+    CHECK(cached.has_value());
+    CHECK(cached->batches.size() == once->batches.size());
+    CHECK(cached->minTimeMs == once->minTimeMs);
+    CHECK(cached->maxTimeMs == once->maxTimeMs);
+
     fs::remove_all(tmpDir, ec);
 }

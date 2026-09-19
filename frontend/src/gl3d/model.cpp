@@ -68,6 +68,28 @@ DynamicPart classifyHardName(const std::string& name) {
     if (name == "empty_188") {
         return DynamicPart::SteeringRack;
     }
+    // The diagonal pushrod tubes only. End joints stay on the rocker (shock)
+    // and upright (corner) — the rod IK-spans those two already-moving parts.
+    if (name == "empty_147") {
+        return DynamicPart::PushrodFl;
+    }
+    if (name == "empty_144") {
+        return DynamicPart::PushrodFr;
+    }
+    // Long A-arm tubes: two per corner, chassis hinge next to the white/red
+    // rocker-shock deck → gray upright ball.
+    if (name == "empty_19" || name == "empty_20") {
+        return DynamicPart::UpperWishboneFl;
+    }
+    if (name == "empty_6" || name == "empty_7") {
+        return DynamicPart::UpperWishboneFr;
+    }
+    if (name == "empty_17" || name == "empty_18") {
+        return DynamicPart::LowerWishboneFl;
+    }
+    if (name == "empty_8" || name == "empty_9") {
+        return DynamicPart::LowerWishboneFr;
+    }
     return DynamicPart::None;
 }
 
@@ -91,8 +113,13 @@ DynamicPart classifySpatial(Vec3 center, Vec3 extent) {
     // leave the inboard white rocker.
     const bool isShock = atFrontAxle && lateral > 0.50f && lateral < 1.22f && center.y > 1.00f &&
                          center.y < 1.60f && center.z > -0.08f && center.z < 0.18f;
-    const bool isPushrod = atFrontAxle && !isShock && lateral > 1.0f && lateral < 1.53f && center.y > 0.42f &&
-                           center.y < 1.00f && center.z > 0.025f && center.z < 0.11f;
+    // Only the long diagonal tube (span ~0.66 m). The spherical bearings and
+    // the upright clevis/bolt sit on the white rocker and blue upright already;
+    // tagging those as Pushrod split the joint (one plate on the rod, one on
+    // the corner) so the pin visibly opened.
+    const bool isPushrod = atFrontAxle && !isShock && lateral > 1.12f && lateral < 1.42f && center.y > 0.55f &&
+                           center.y < 0.95f && center.z > 0.02f && center.z < 0.08f &&
+                           std::max(extent.x, extent.y) > 0.30f;
     const bool isTieRod = atFrontAxle && lateral > 0.55f && lateral < 1.56f && center.y > 0.43f &&
                           center.y < 0.56f && center.z > -0.22f && center.z < -0.07f;
     const bool isUpperWishbone = atFrontAxle && !isPushrod && !isShock && lateral > 0.55f &&
@@ -654,12 +681,17 @@ unsigned uploadImage(Renderer& renderer, const tinygltf::Image& img) {
 Kinematics defaultKinematics() {
     Kinematics k{};
     auto fill = [](SideKinematics& s, float side) {
-        s.upperPivot = {side * 0.88f, 0.93f, 0.0f};
-        s.upperTip = {side * 1.50f, 0.98f, 0.0f};
-        s.lowerPivot = {side * 0.66f, 0.375f, 0.0f};
-        s.lowerTip = {side * 1.50f, 0.40f, 0.0f};
-        s.pushAnchor = {side * 1.06f, 1.03f, 0.05f};
-        s.pushTip = {side * 1.48f, 0.47f, 0.05f};
+        // Inboard = mean of the two A-arm chassis pickups on the nose deck
+        // beside the white/red rocker-shock; outboard = gray upright ball
+        // (empty_19/20 and empty_17/18).
+        s.upperPivot = {side * 0.922f, 0.906f, 0.0f};
+        s.upperTip = {side * 1.475f, 0.982f, -0.054f};
+        s.lowerPivot = {side * 0.779f, 0.386f, 0.0f};
+        s.lowerTip = {side * 1.460f, 0.385f, 0.008f};
+        // Measured from empty_144/147 PCA: rocker-side (smaller |x|) and
+        // upright-side (larger |x|). Matches the white lobe and blue upright tabs.
+        s.pushAnchor = {side * 1.075f, 1.018f, 0.058f};
+        s.pushTip = {side * 1.460f, 0.484f, 0.040f};
         s.tieAnchor = {side * 0.69f, 0.49f, -0.13f};
         s.tieTip = {side * 1.51f, 0.50f, -0.17f};
         s.shockPivot = {side * 0.71f, 1.34f, 0.05f};
@@ -684,20 +716,51 @@ void overlayCenter(Vec3& dest, const std::vector<const DrawItem*>& items) {
     dest = sum * (1.0f / static_cast<float>(items.size()));
 }
 
+void overlayPushrod(SideKinematics& s, const std::vector<const DrawItem*>& items) {
+    const DrawItem* best = nullptr;
+    float bestSpan = -1.0f;
+    for (const DrawItem* d : items) {
+        const float span = length(d->tip - d->anchor);
+        if (span > bestSpan) {
+            bestSpan = span;
+            best = d;
+        }
+    }
+    if (best == nullptr || bestSpan < 0.20f) {
+        return;
+    }
+    if (std::fabs(best->anchor.x) < std::fabs(best->tip.x)) {
+        s.pushAnchor = best->anchor;
+        s.pushTip = best->tip;
+    } else {
+        s.pushAnchor = best->tip;
+        s.pushTip = best->anchor;
+    }
+}
+
 Kinematics buildKinematics(const std::vector<DrawItem>& draws) {
-    // Front attach points stay Photon's measured new_dyn joints. Overlaying AABB
-    // centroids moved the rocker pivot onto the linpot body, so the red damper
-    // walked off the white rocker instead of staying flush.
+    // A-arm hinges stay Photon's measured nose-deck pickups (beside the
+    // white/red rocker-shock). Only the pushrod endpoints come from the mesh
+    // so the rod spans the white lobe and the upright tab. Overlaying shock
+    // or wishbone AABBs walks those joints off the deck — do not do that.
     Kinematics kin = defaultKinematics();
     std::vector<const DrawItem*> rearWheels;
+    std::vector<const DrawItem*> pushFl;
+    std::vector<const DrawItem*> pushFr;
     for (const DrawItem& d : draws) {
         if (hasPart(d.parts, DynamicPart::WheelRl) || hasPart(d.parts, DynamicPart::WheelRr)) {
             rearWheels.push_back(&d);
         }
+        if (hasPart(d.parts, DynamicPart::PushrodFl)) {
+            pushFl.push_back(&d);
+        }
+        if (hasPart(d.parts, DynamicPart::PushrodFr)) {
+            pushFr.push_back(&d);
+        }
     }
     overlayCenter(kin.rearPivot, rearWheels);
-    std::fprintf(stderr, "[gl3d] kin Photon front joints; rear (%+.3f,%+.3f,%+.3f)\n", kin.rearPivot.x,
-                 kin.rearPivot.y, kin.rearPivot.z);
+    overlayPushrod(kin.fl, pushFl);
+    overlayPushrod(kin.fr, pushFr);
     return kin;
 }
 
@@ -873,7 +936,7 @@ void summarizeBinds(LoadedModel& model) {
     const std::string fr = collect(DynamicPart::WheelFr);
     const std::string rear = collect(DynamicPart::WheelRl);
     if (model.rigid) {
-        model.bindNote = "rigid display mesh — no articulated nodes";
+        model.bindNote = "rigid display mesh, no articulated nodes";
         model.bindNodes = model.gpu.draws.empty() ? "" : model.gpu.draws.front().nodeName;
     } else {
         char buf[192];
@@ -1038,21 +1101,36 @@ Mat4 itemModel(const DrawItem& item, const Kinematics& kin, float steerDeg, floa
         const Vec3 movedMidpoint = (movedUpper + movedLower) * 0.5f;
         const float camber = std::atan2(movedUpper.y - movedLower.y, movedUpper.x - movedLower.x) -
                              std::atan2(side.upperTip.y - side.lowerTip.y, side.upperTip.x - side.lowerTip.x);
-        Mat4 result = translate(movedMidpoint) * rotate(camber, {0.0f, 0.0f, 1.0f}) * translate(-baseMidpoint);
-        result = result * translate(side.wheelPivot) * rotate(radians(steering), {0.0f, 1.0f, 0.0f});
-        if (spinWheel) {
-            result = result * rotate(radians(wheelRotation), {1.0f, 0.0f, 0.0f});
+        const Mat4 jounce =
+            translate(movedMidpoint) * rotate(camber, {0.0f, 0.0f, 1.0f}) * translate(-baseMidpoint);
+        // Steer the gray upright about the kingpin (line through the two outer
+        // balls), not the tire center — otherwise the balls orbit off the A-arms.
+        const Vec3 kingRest = baseMidpoint;
+        Vec3 kingAxis = side.upperTip - side.lowerTip;
+        if (length(kingAxis) < 1e-4f) {
+            kingAxis = {0.0f, 1.0f, 0.0f};
+        } else {
+            kingAxis = normalize(kingAxis);
         }
-        return result * translate(-side.wheelPivot);
+        const Vec3 kingMoved = transformPoint(jounce, kingRest);
+        Mat4 result = rotateAt(kingMoved, radians(steering), kingAxis) * jounce;
+        if (spinWheel) {
+            result = result * rotateAt(side.wheelPivot, radians(wheelRotation), {1.0f, 0.0f, 0.0f});
+        }
+        return result;
     };
 
+    // A-arm is a rigid hinge on the two chassis pickups beside the white/red
+    // rocker-shock deck. It only jounces — the ball joint absorbs steer. Do
+    // not stretch the tubes toward the steered upright (that scaled the arms
+    // off the shock mounts).
     // Inboard follows the rocker; outboard follows the upright.
-    const auto pushrodTransform = [&](const SideKinematics& side, float sideSign, float suspension) {
+    const auto pushrodTransform = [&](const SideKinematics& side, float sideSign, float suspension, float steering) {
         const Vec3 movedAnchor =
             transformPoint(rotateAt(side.shockPivot, rockerAngle(sideSign, suspension), {0.0f, 0.0f, 1.0f}),
                            side.pushAnchor);
         const Vec3 movedTip =
-            transformPoint(frontCornerTransform(side, suspension, 0.0f, 0.0f, false), side.pushTip);
+            transformPoint(frontCornerTransform(side, suspension, steering, 0.0f, false), side.pushTip);
         return linkTransform(side.pushAnchor, side.pushTip, movedAnchor, movedTip);
     };
 
@@ -1079,10 +1157,10 @@ Mat4 itemModel(const DrawItem& item, const Kinematics& kin, float steerDeg, floa
         return wishboneTransform(kin.fr.lowerPivot, kin.fr.lowerTip, suspFr);
     }
     if (hasPart(parts, DynamicPart::PushrodFl)) {
-        return pushrodTransform(kin.fl, -1.0f, suspFl);
+        return pushrodTransform(kin.fl, -1.0f, suspFl, steerDeg);
     }
     if (hasPart(parts, DynamicPart::PushrodFr)) {
-        return pushrodTransform(kin.fr, 1.0f, suspFr);
+        return pushrodTransform(kin.fr, 1.0f, suspFr, steerDeg);
     }
     if (hasPart(parts, DynamicPart::TieRodFl)) {
         return tieRodTransform(kin.fl, suspFl, steerDeg);

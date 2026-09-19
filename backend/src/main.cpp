@@ -1,4 +1,5 @@
 #include "photon/cli.hpp"
+#include "photon/history_remote.hpp"
 #include "photon/net.hpp"
 #include "photon/session.hpp"
 
@@ -39,9 +40,10 @@ int main(int argc, char** argv) {
     }
 
     std::fprintf(stdout, "[photon-backend] photon-next backend v0.1 (protocol v1)\n");
-    std::fprintf(stdout, "[photon-backend] flags --ws-port %u --daq-host %s --daq-port %u --video-host %s --video-port %u --source %s",
+    std::fprintf(stdout, "[photon-backend] flags --ws-port %u --daq-host %s --daq-port %u --video-host %s --video-port %u --video-udp-port %u --source %s",
                  static_cast<unsigned>(opt.wsPort), opt.daqHost.c_str(), static_cast<unsigned>(opt.daqPort),
                  opt.videoHost.c_str(), static_cast<unsigned>(opt.videoPort),
+                 static_cast<unsigned>(opt.videoUdpPort),
                  std::string(photon::ctrl::sourceName(opt.source)).c_str());
     if (!opt.logPath.empty()) {
         std::fprintf(stdout, " --log-path %s", opt.logPath.c_str());
@@ -49,7 +51,38 @@ int main(int argc, char** argv) {
     std::fprintf(stdout, "\n");
 
     photon::SessionHub hub(opt.wsPort, opt.daqHost, opt.daqPort, opt.assetsDir, opt.videoHost, opt.videoPort,
-                           opt.source, opt.logPath);
+                           opt.source, opt.logPath, opt.tsdbDir, opt.videoUdpPort);
+    hub.setWriteLiveTail(opt.writeLiveTail);
+    hub.setClientPassword(opt.password);
+    if (!opt.videoUdpHost.empty()) {
+        hub.setVideoUdpHost(opt.videoUdpHost);
+        std::fprintf(stdout, "[photon-backend] video udp host %s\n", opt.videoUdpHost.c_str());
+    }
+    std::fprintf(stdout, "[photon-backend] client auth %s\n", opt.password.empty() ? "off" : "on");
+    hub.setAnalysisCompute(opt.analysisCompute);
+    std::string historyHost;
+    std::uint16_t historyPort = 0;
+    if (opt.historyRemote.empty()) {
+        if (!photon::hostIsLoopback(opt.daqHost)) {
+            historyHost = opt.daqHost;
+            historyPort = 8080;
+        }
+    } else if (!photon::parseHostPort(opt.historyRemote, historyHost, historyPort)) {
+        std::fprintf(stderr, "[photon-backend] --history-remote must be HOST:PORT or off\n");
+        return 2;
+    }
+    if (!historyHost.empty()) {
+        hub.setHistoryRemote(historyHost, historyPort, "/ws", opt.password);
+        std::fprintf(stdout, "[photon-backend] history-remote %s:%u/ws\n", historyHost.c_str(),
+                     static_cast<unsigned>(historyPort));
+    } else {
+        std::fprintf(stdout, "[photon-backend] history-remote off\n");
+    }
+    if (opt.analysisCompute.empty()) {
+        std::fprintf(stdout, "[photon-backend] analysis-compute off\n");
+    } else {
+        std::fprintf(stdout, "[photon-backend] analysis-compute %s\n", opt.analysisCompute.c_str());
+    }
     if (!hub.start()) {
         return 1;
     }

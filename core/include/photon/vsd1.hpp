@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -42,6 +43,7 @@ struct Archive {
     std::vector<IndexedBatch> batches;
     std::uint64_t minTimeMs = 0;
     std::uint64_t maxTimeMs = 0;
+    bool complete = true;
 
     bool empty() const { return batches.empty(); }
 };
@@ -57,6 +59,16 @@ std::optional<Archive> indexBytes(std::span<const std::uint8_t> bytes, std::stri
 // `cancel` is polled between frames; when set, returns nullopt with an error.
 std::optional<Archive> indexPath(const std::filesystem::path& path, std::string* error = nullptr,
                                  std::atomic<bool>* cancel = nullptr);
+
+// Sidecar next to a single .log (`file.log.photon-idx`) or `.photon-idx` in a
+// directory. Validated against each file's size + mtime.
+std::optional<Archive> tryLoadIndexCache(const std::vector<std::filesystem::path>& files);
+bool saveIndexCache(const Archive& archive);
+void finishArchive(Archive& archive);
+
+// Stream each CANP batch without keeping payloads. Used for early playback.
+bool walkLogFiles(const std::vector<std::filesystem::path>& files, std::atomic<bool>* cancel,
+                  std::string* error, const std::function<void(IndexedBatch&&)>& visit);
 
 // Cheap directory listing (no payload read). Resolves nested logs/ or segments/.
 std::vector<std::filesystem::path> listLogFiles(const std::filesystem::path& path);

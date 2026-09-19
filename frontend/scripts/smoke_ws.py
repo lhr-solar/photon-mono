@@ -110,7 +110,7 @@ def main() -> int:
         saw_telem = False
         saw_can = False
         saw_tl = False
-        send_json(sock, {"type": "select_source", "source": "synthetic", "protocol_version": 1})
+        send_json(sock, {"type": "select_source", "source": "daq_tcp", "protocol_version": 1})
         send_json(sock, {"type": "subscribe_signals", "signal_ids": [1, 2, 3, 4], "protocol_version": 1})
         while time.time() < deadline:
             sock.settimeout(max(0.1, deadline - time.time()))

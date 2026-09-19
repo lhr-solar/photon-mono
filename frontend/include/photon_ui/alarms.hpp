@@ -20,7 +20,7 @@ class ClientArena;
 inline constexpr double kStaleWarnMs = 15000.0;
 inline constexpr double kStaleAlarmMs = 45000.0;
 inline constexpr std::size_t kRecentClearedCap = 20;
-inline constexpr float kAlarmStripH = 40.0f;
+inline constexpr float kAlarmStripH = 36.0f;
 inline constexpr int kStaleChipKeyBase = 1000;
 
 enum class EcuHealth { Unknown, Ok, Stale, Silent, Fault };

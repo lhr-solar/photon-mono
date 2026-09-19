@@ -2,8 +2,8 @@
 
 | File | Size | Role |
 | --- | --- | --- |
-| `new_dyn.glb` | 6.2 MB | Dynamics car (optimized, tinygltf-valid). **HTTP static** at `models/new_dyn.glb`. Default 3D pick. |
-| `newCar.glb` | 32 MB | Display car (single mesh, no wheel nodes). **HTTP static**. |
+| `new_dyn.glb` | 6.2 MB | Dynamics car (optimized, tinygltf-valid). **HTTP static** at `models/new_dyn.glb`. Chassis-only; Model combo. |
+| `newCar.glb` | 32 MB | Display car (single mesh, no wheel nodes). **HTTP static**. Default 3D pick and OSM overlay. |
 | `s26_simple_track.glb` | 7.9 MB | Lightweight track. **HTTP static**. Overlay "Track" toggle. |
 
 ## How they are served

@@ -9,7 +9,7 @@ namespace photon::ui {
 
 void Scene3dScreen::draw(UiContext& ui) {
     ui.arena.signalMap().subscribe(ui.client, MapScreen::Scene3d);
-    drawScene3DView(ui.arena, ImGui::GetContentRegionAvail(), true);
+    drawScene3DView(ui.arena, ImGui::GetContentRegionAvail(), true, true);
 }
 
 }  // namespace photon::ui

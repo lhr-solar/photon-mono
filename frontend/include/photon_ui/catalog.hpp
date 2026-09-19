@@ -26,7 +26,7 @@ struct SignalDesc {
 
 inline constexpr SignalDesc kCatalog[] = {
     {kSignalRpm, "rpm", "Motor RPM", "rpm", 0.0, 7500.0, false, true},
-    {kSignalSpeed, "speed", "Speed", "km/h", 0.0, 38.0, false, true},
+    {kSignalSpeed, "speed", "Speed", "mph", 0.0, 70.0, false, true},
     {kSignalSoc, "soc", "Pack SOC", "%", 30.0, 0.0, true, false},
     {kSignalTemp, "temp", "Motor Temp", "C", 0.0, 75.0, false, true},
 };

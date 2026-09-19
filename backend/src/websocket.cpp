@@ -1,11 +1,13 @@
 #include "photon/websocket.hpp"
 
+#include "photon/base64.hpp"
 #include "photon/endian.hpp"
 #include "photon/ws_handshake.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <random>
 
 namespace photon::ws {
 using photon::readU16Be;
@@ -58,6 +60,15 @@ void unmask(std::uint8_t* data, std::size_t len, const std::uint8_t key[4]) {
     }
 }
 
+void fillMask(std::uint8_t key[4]) {
+    static thread_local std::mt19937 rng{std::random_device{}()};
+    const std::uint32_t v = rng();
+    key[0] = static_cast<std::uint8_t>(v);
+    key[1] = static_cast<std::uint8_t>(v >> 8);
+    key[2] = static_cast<std::uint8_t>(v >> 16);
+    key[3] = static_cast<std::uint8_t>(v >> 24);
+}
+
 }  // namespace
 
 std::vector<std::uint8_t> encodeServerFrame(Opcode opcode, std::span<const std::uint8_t> payload) {
@@ -74,6 +85,29 @@ std::vector<std::uint8_t> encodeServerFrame(Opcode opcode, std::span<const std::
         writeU64Be(out, static_cast<std::uint64_t>(n));
     }
     writeBytes(out, payload);
+    return out;
+}
+
+std::vector<std::uint8_t> encodeClientFrame(Opcode opcode, std::span<const std::uint8_t> payload,
+                                            const std::uint8_t mask[4]) {
+    std::vector<std::uint8_t> out;
+    out.push_back(static_cast<std::uint8_t>(0x80 | (static_cast<std::uint8_t>(opcode) & 0x0F)));
+    const std::size_t n = payload.size();
+    if (n <= 125) {
+        out.push_back(static_cast<std::uint8_t>(0x80 | n));
+    } else if (n <= 0xFFFF) {
+        out.push_back(static_cast<std::uint8_t>(0x80 | 126));
+        writeU16Be(out, static_cast<std::uint16_t>(n));
+    } else {
+        out.push_back(static_cast<std::uint8_t>(0x80 | 127));
+        writeU64Be(out, static_cast<std::uint64_t>(n));
+    }
+    out.insert(out.end(), mask, mask + 4);
+    out.resize(out.size() + n);
+    auto* dest = out.data() + (out.size() - n);
+    for (std::size_t i = 0; i < n; ++i) {
+        dest[i] = payload[i] ^ mask[i & 3];
+    }
     return out;
 }
 
@@ -116,6 +150,12 @@ HandshakeStatus Connection::readHandshake() {
             if (line.find("GET ") != 0) {
                 return HandshakeStatus::BadRequest;
             }
+            auto rest = line.substr(4);
+            while (!rest.empty() && rest.front() == ' ') {
+                rest.remove_prefix(1);
+            }
+            const auto sp = rest.find(' ');
+            httpTarget_ = std::string(rest.substr(0, sp == std::string_view::npos ? rest.size() : sp));
         } else if (!line.empty()) {
             const auto colon = line.find(':');
             if (colon != std::string_view::npos) {
@@ -139,6 +179,10 @@ HandshakeStatus Connection::readHandshake() {
     }
 
     if (!upgrade || !connection || !version13 || key.empty()) {
+        if (httpTarget_.find("export.csv") != std::string::npos) {
+            inq_.erase(inq_.begin(), inq_.begin() + static_cast<std::ptrdiff_t>(end + 4));
+            return HandshakeStatus::HttpExport;
+        }
         return HandshakeStatus::BadRequest;
     }
     clientKey_ = std::move(key);
@@ -158,7 +202,62 @@ bool Connection::writeHandshakeResponse() {
     return flushOutbound();
 }
 
+bool Connection::beginClientHandshake(std::string_view path, std::string_view host, std::string_view basicB64) {
+    clientMode_ = true;
+    handshakeOk_ = false;
+    std::uint8_t raw[16];
+    fillMask(raw);
+    fillMask(raw + 4);
+    fillMask(raw + 8);
+    fillMask(raw + 12);
+    clientKey_ = crypto::base64Encode(raw);
+    std::string req = "GET ";
+    req.append(path.empty() ? "/" : std::string(path));
+    req += " HTTP/1.1\r\nHost: ";
+    req.append(host);
+    req += "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ";
+    req += clientKey_;
+    req += "\r\nSec-WebSocket-Version: 13\r\n";
+    if (!basicB64.empty()) {
+        req += "Authorization: Basic ";
+        req.append(basicB64);
+        req += "\r\n";
+    }
+    req += "\r\n";
+    outq_.insert(outq_.end(), req.begin(), req.end());
+    return flushOutbound();
+}
+
+HandshakeStatus Connection::readClientHandshake() {
+    if (handshakeOk_) {
+        return HandshakeStatus::Ok;
+    }
+    if (!readAvailable()) {
+        return HandshakeStatus::BadRequest;
+    }
+    const std::string_view text(reinterpret_cast<const char*>(inq_.data()), inq_.size());
+    const auto end = text.find("\r\n\r\n");
+    if (end == std::string_view::npos) {
+        return inq_.size() > 16 * 1024 ? HandshakeStatus::BadRequest : HandshakeStatus::Incomplete;
+    }
+    const auto lineEnd = text.find("\r\n");
+    const std::string_view status = text.substr(0, lineEnd == std::string_view::npos ? end : lineEnd);
+    if (status.find("101") == std::string_view::npos) {
+        return HandshakeStatus::BadRequest;
+    }
+    inq_.erase(inq_.begin(), inq_.begin() + static_cast<std::ptrdiff_t>(end + 4));
+    handshakeOk_ = true;
+    return HandshakeStatus::Ok;
+}
+
 void Connection::queueFrame(Opcode opcode, std::span<const std::uint8_t> payload) {
+    if (clientMode_) {
+        std::uint8_t mask[4];
+        fillMask(mask);
+        const auto frame = encodeClientFrame(opcode, payload, mask);
+        outq_.insert(outq_.end(), frame.begin(), frame.end());
+        return;
+    }
     const auto frame = encodeServerFrame(opcode, payload);
     outq_.insert(outq_.end(), frame.begin(), frame.end());
 }
@@ -199,7 +298,9 @@ bool Connection::readAvailable() {
         }
         inq_.insert(inq_.end(), buf, buf + n);
         if (inq_.size() > kMaxPayload + 16) {
-            return false;
+            // Backpressure: stop reading this tick. Closing here made the
+            // native UI drop whenever history/CAN outran the 48-frame pump.
+            return true;
         }
     }
 }
@@ -285,12 +386,14 @@ std::optional<Frame> Connection::parseOneFrame() {
         readU64Be(inq_, off, payloadLen);
         headerLen = 10;
     }
-    if (!masked) {
+    if (!masked && !clientMode_) {
         // Client-to-server frames must be masked (RFC 6455 §5.1).
         inq_.clear();
         return std::nullopt;
     }
-    headerLen += 4;
+    if (masked) {
+        headerLen += 4;
+    }
     if (payloadLen > kMaxPayload) {
         inq_.clear();
         return std::nullopt;
@@ -298,14 +401,16 @@ std::optional<Frame> Connection::parseOneFrame() {
     if (inq_.size() < headerLen + static_cast<std::size_t>(payloadLen)) {
         return std::nullopt;
     }
-    std::uint8_t mask[4];
-    std::memcpy(mask, inq_.data() + headerLen - 4, 4);
     Frame frame;
     frame.fin = fin;
     frame.opcode = static_cast<Opcode>(opcode);
     frame.payload.assign(inq_.begin() + static_cast<std::ptrdiff_t>(headerLen),
                          inq_.begin() + static_cast<std::ptrdiff_t>(headerLen + payloadLen));
-    unmask(frame.payload.data(), frame.payload.size(), mask);
+    if (masked) {
+        std::uint8_t mask[4];
+        std::memcpy(mask, inq_.data() + headerLen - 4, 4);
+        unmask(frame.payload.data(), frame.payload.size(), mask);
+    }
     inq_.erase(inq_.begin(), inq_.begin() + static_cast<std::ptrdiff_t>(headerLen + payloadLen));
     return frame;
 }

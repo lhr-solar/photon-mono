@@ -30,6 +30,7 @@ enum class HandshakeStatus {
     Incomplete,
     Ok,
     BadRequest,
+    HttpExport,
 };
 
 class Connection {
@@ -44,6 +45,11 @@ public:
 
     HandshakeStatus readHandshake();
     bool writeHandshakeResponse();
+    const std::string& httpTarget() const { return httpTarget_; }
+    net::Socket releaseSocket() { return std::move(socket_); }
+    void setClientMode(bool on) { clientMode_ = on; }
+    bool beginClientHandshake(std::string_view path, std::string_view host, std::string_view basicB64);
+    HandshakeStatus readClientHandshake();
 
     void queueFrame(Opcode opcode, std::span<const std::uint8_t> payload);
     void queueText(std::string_view text);
@@ -67,9 +73,11 @@ private:
     std::vector<std::uint8_t> inq_;
     std::vector<std::uint8_t> outq_;
     std::string clientKey_;
+    std::string httpTarget_;
     std::vector<std::uint8_t> fragment_;
     Opcode fragmentOpcode_ = Opcode::Binary;
     bool handshakeOk_ = false;
+    bool clientMode_ = false;
     bool closeSent_ = false;
     bool closeReceived_ = false;
 
@@ -77,5 +85,7 @@ private:
 };
 
 std::vector<std::uint8_t> encodeServerFrame(Opcode opcode, std::span<const std::uint8_t> payload);
+std::vector<std::uint8_t> encodeClientFrame(Opcode opcode, std::span<const std::uint8_t> payload,
+                                            const std::uint8_t mask[4]);
 
 }  // namespace photon::ws

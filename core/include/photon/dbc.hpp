@@ -54,6 +54,11 @@ struct DecodedSample {
     double value = 0.0;
 };
 
+struct RawDecodedSample {
+    std::uint32_t signalId = 0;
+    std::int64_t raw = 0;
+};
+
 class Database {
 public:
     std::vector<Message> messages;
@@ -79,6 +84,9 @@ std::uint32_t signalIdOf(std::string_view message, std::string_view name);
 std::optional<Database> parse(std::string_view text, std::string* error = nullptr);
 std::optional<Database> loadFile(const std::string& path, std::string* error = nullptr);
 
+// Stems of `assets/dbc/*.dbc` (safe ids: alnum, `_`, `-`). Empty if the folder is missing.
+std::vector<std::string> listBundledIds(const std::string& assetsDir);
+
 struct SignalValue {
     std::string name;
     double value = 0.0;
@@ -92,12 +100,17 @@ struct EncodedFrame {
 };
 
 bool extractRaw(const Signal& sig, const std::uint8_t data[8], std::uint8_t dlc, std::uint64_t& raw);
+bool extractRawInt(const Signal& sig, const std::uint8_t data[8], std::uint8_t dlc, std::int64_t& raw);
+std::int64_t rawInteger(const Signal& sig, std::uint64_t bits);
+double physicalFromRaw(const Signal& sig, std::int64_t raw);
 bool insertRaw(const Signal& sig, std::uint8_t data[8], std::uint8_t dlc, std::uint64_t raw);
 bool decodeSignal(const Signal& sig, const std::uint8_t data[8], std::uint8_t dlc, double& value);
 bool encodeSignal(const Signal& sig, std::uint8_t data[8], std::uint8_t dlc, double value,
                   std::string* error = nullptr);
 std::vector<DecodedSample> decodeFrame(const Database& db, std::uint32_t canId, const std::uint8_t data[8],
                                        std::uint8_t dlc);
+std::vector<RawDecodedSample> decodeFrameRaw(const Database& db, std::uint32_t canId, const std::uint8_t data[8],
+                                             std::uint8_t dlc);
 bool encodeFrame(const Database& db, std::string_view messageName, std::span<const SignalValue> signals,
                  EncodedFrame& out, std::string* error = nullptr);
 

@@ -1,6 +1,6 @@
 #include "photon_ui/gl3d/renderer.hpp"
 
-#include <GLES3/gl3.h>
+#include "photon_ui/gl_api.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -8,9 +8,14 @@
 namespace photon::ui::gl3d {
 namespace {
 
-const char* kVert = R"(#version 300 es
-precision highp float;
-layout(location = 0) in vec3 aPos;
+const char* kVert =
+#ifdef __EMSCRIPTEN__
+    "#version 300 es\n"
+    "precision highp float;\n"
+#else
+    "#version 330\n"
+#endif
+    R"(layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNrm;
 layout(location = 2) in vec2 aUv;
 layout(location = 3) in vec4 aCol;
@@ -18,19 +23,27 @@ uniform mat4 uMvp;
 uniform mat4 uModel;
 uniform mat3 uNormal;
 out vec3 vNrm;
+out vec3 vWorld;
 out vec2 vUv;
 out vec4 vCol;
 void main() {
     vNrm = normalize(uNormal * aNrm);
+    vWorld = (uModel * vec4(aPos, 1.0)).xyz;
     vUv = aUv;
     vCol = aCol;
     gl_Position = uMvp * vec4(aPos, 1.0);
 }
 )";
 
-const char* kFrag = R"(#version 300 es
-precision highp float;
-in vec3 vNrm;
+const char* kFrag =
+#ifdef __EMSCRIPTEN__
+    "#version 300 es\n"
+    "precision highp float;\n"
+#else
+    "#version 330\n"
+#endif
+    R"(in vec3 vNrm;
+in vec3 vWorld;
 in vec2 vUv;
 in vec4 vCol;
 out vec4 oColor;
@@ -39,19 +52,105 @@ uniform vec3 uAmbient;
 uniform vec3 uLightColor;
 uniform vec3 uFillDir;
 uniform vec3 uFillColor;
+uniform vec3 uCamPos;
 uniform float uExposure;
 uniform vec4 uBaseColor;
 uniform sampler2D uTex;
 uniform int uHasTex;
+
+const float PI = 3.14159265;
+
+void brdf(vec3 albedo, vec3 N, vec3 V, vec3 L, vec3 radiance, float metallic, float roughness,
+          out vec3 diff, out vec3 spec) {
+    vec3 H = normalize(V + L);
+    float NdotL = max(dot(N, L), 0.0);
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotH = max(dot(N, H), 0.0);
+    float HdotV = max(dot(H, V), 0.0);
+    float a = max(roughness * roughness, 0.04);
+    float a2 = a * a;
+    float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    float D = a2 / max(PI * d * d, 1e-4);
+    float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+    float G = (NdotV / max(NdotV * (1.0 - k) + k, 1e-4)) * (NdotL / max(NdotL * (1.0 - k) + k, 1e-4));
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    vec3 F = F0 + (1.0 - F0) * pow(1.0 - HdotV, 5.0);
+    vec3 specB = (D * G * F) / max(4.0 * NdotV * NdotL, 1e-4);
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+    diff = kD * albedo / PI * radiance * NdotL;
+    spec = specB * radiance * NdotL;
+}
+
+void classifyCar(vec3 c, out float metallic, out float roughness, out float coat) {
+    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float mx = max(c.r, max(c.g, c.b));
+    float mn = min(c.r, min(c.g, c.b));
+    float sat = mx > 1e-4 ? (mx - mn) / mx : 0.0;
+    metallic = 0.06;
+    roughness = 0.46;
+    coat = 0.0;
+    if (c.r > 0.72 && c.g > 0.72 && c.b < 0.38) {
+        roughness = 0.30;
+        coat = 0.40;
+    } else if (c.r > 0.38 && c.g < 0.20 && c.b < 0.08) {
+        roughness = 0.28;
+        coat = 0.50;
+    } else if (c.b > c.r + 0.03 && c.b > c.g && sat > 0.10) {
+        metallic = 0.14;
+        roughness = 0.16;
+        coat = 1.0;
+    } else if (lum < 0.10) {
+        metallic = 0.0;
+        roughness = 0.92;
+    } else if (c.r > c.b + 0.03 && c.g > c.b && lum < 0.48 && sat > 0.07) {
+        metallic = 0.04;
+        roughness = 0.50;
+    } else if (sat < 0.08 && lum > 0.85) {
+        metallic = 0.08;
+        roughness = 0.20;
+        coat = 0.55;
+    } else if (sat < 0.10 && lum > 0.45) {
+        metallic = 0.80;
+        roughness = 0.26;
+    } else if (sat < 0.10) {
+        metallic = 0.64;
+        roughness = 0.36;
+    }
+}
+
 void main() {
     vec4 base = uBaseColor * vCol;
     if (uHasTex == 1) {
         base *= texture(uTex, vUv);
     }
-    vec3 n = normalize(vNrm);
-    float ndl = max(dot(n, normalize(uLightDir)), 0.0);
-    float ndlFill = max(dot(n, normalize(uFillDir)), 0.0);
-    vec3 lin = base.rgb * (uAmbient + uLightColor * ndl + uFillColor * ndlFill);
+    vec3 albedo = max(base.rgb, vec3(0.0));
+    float metallic;
+    float roughness;
+    float coat;
+    if (uHasTex == 1) {
+        metallic = 0.02;
+        roughness = 0.40;
+        coat = 0.14;
+    } else {
+        classifyCar(albedo, metallic, roughness, coat);
+    }
+    vec3 N = normalize(vNrm);
+    vec3 V = normalize(uCamPos - vWorld);
+    vec3 L0 = normalize(uLightDir);
+    vec3 L1 = normalize(uFillDir);
+    vec3 d0;
+    vec3 s0;
+    vec3 d1;
+    vec3 s1;
+    brdf(albedo, N, V, L0, uLightColor, metallic, roughness, d0, s0);
+    brdf(albedo, N, V, L1, uFillColor, metallic, roughness, d1, s1);
+    vec3 lin = albedo * uAmbient + d0 + d1 + s0 + s1;
+    if (coat > 0.0) {
+        vec3 cd;
+        vec3 cs;
+        brdf(vec3(1.0), N, V, L0, uLightColor, 0.0, 0.08, cd, cs);
+        lin += cs * coat;
+    }
     lin *= max(uExposure, 0.0);
     oColor = vec4(pow(max(lin, vec3(0.0)), vec3(1.0 / 2.2)), base.a);
 }
@@ -81,7 +180,18 @@ struct GlState {
     GLint blendDstA = GL_ZERO;
 };
 
+#ifndef __EMSCRIPTEN__
+bool extrasReady() { return photonGlExtrasReady(); }
+#else
+bool extrasReady() { return true; }
+#endif
+
 void saveState(GlState& s) {
+#ifndef __EMSCRIPTEN__
+    if (!extrasReady()) {
+        return;
+    }
+#endif
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &s.fbo);
     glGetIntegerv(GL_VIEWPORT, s.viewport);
     glGetIntegerv(GL_CURRENT_PROGRAM, &s.program);
@@ -106,6 +216,11 @@ void saveState(GlState& s) {
 }
 
 void restoreState(const GlState& s) {
+#ifndef __EMSCRIPTEN__
+    if (!extrasReady()) {
+        return;
+    }
+#endif
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(s.fbo));
     glViewport(s.viewport[0], s.viewport[1], s.viewport[2], s.viewport[3]);
     glUseProgram(static_cast<GLuint>(s.program));
@@ -141,6 +256,12 @@ void restoreState(const GlState& s) {
     glCullFace(static_cast<GLenum>(s.cullMode));
     glBlendFuncSeparate(static_cast<GLenum>(s.blendSrcRgb), static_cast<GLenum>(s.blendDstRgb),
                         static_cast<GLenum>(s.blendSrcA), static_cast<GLenum>(s.blendDstA));
+#ifndef __EMSCRIPTEN__
+    // ImGui_ImplOpenGL3 draws to the default FBO with its own VAO. Never leave
+    // the 3D target bound after this helper returns.
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindVertexArray(0);
+#endif
 }
 
 GLuint compile(GLenum type, const char* src) {
@@ -174,6 +295,18 @@ void bindAttribs() {
 }  // namespace
 
 Renderer::~Renderer() {
+#ifndef __EMSCRIPTEN__
+    if (!photonGlContextLive()) {
+        white_ = 0;
+        program_ = 0;
+        color_ = 0;
+        depth_ = 0;
+        fbo_ = 0;
+        fboW_ = 0;
+        fboH_ = 0;
+        return;
+    }
+#endif
     destroyTarget();
     destroyProgram();
     if (white_ != 0) {
@@ -237,6 +370,16 @@ void Renderer::destroyTarget() {
 }
 
 bool Renderer::ensureProgram() {
+#ifndef __EMSCRIPTEN__
+    if (!extrasReady()) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            std::fprintf(stderr, "[gl3d] extra GL entry points missing — renderer disabled\n");
+        }
+        return false;
+    }
+#endif
     if (program_ != 0) {
         return true;
     }
@@ -275,6 +418,7 @@ bool Renderer::ensureProgram() {
     uFillDir_ = glGetUniformLocation(program_, "uFillDir");
     uFillColor_ = glGetUniformLocation(program_, "uFillColor");
     uExposure_ = glGetUniformLocation(program_, "uExposure");
+    uCamPos_ = glGetUniformLocation(program_, "uCamPos");
     uBaseColor_ = glGetUniformLocation(program_, "uBaseColor");
     uTex_ = glGetUniformLocation(program_, "uTex");
     uHasTex_ = glGetUniformLocation(program_, "uHasTex");
@@ -282,6 +426,11 @@ bool Renderer::ensureProgram() {
 }
 
 bool Renderer::ensureTarget(int width, int height) {
+#ifndef __EMSCRIPTEN__
+    if (!extrasReady()) {
+        return false;
+    }
+#endif
     if (width < 1) {
         width = 1;
     }
@@ -365,6 +514,11 @@ unsigned Renderer::render(int width, int height, const Mat4& view, const Mat4& p
                           const Mat4* itemModels, const MeshGpu* extra, const Mat4* extraModel,
                           const ModelGpu* track, const Mat4* trackModel, const Lights& lights) {
     lastDraws_ = 0;
+#ifndef __EMSCRIPTEN__
+    if (!extrasReady()) {
+        return 0;
+    }
+#endif
     if (!ensureProgram()) {
         return 0;
     }
@@ -385,7 +539,7 @@ unsigned Renderer::render(int width, int height, const Mat4& view, const Mat4& p
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glClearColor(lights.clearColor.x, lights.clearColor.y, lights.clearColor.z, 1.0f);
+    glClearColor(lights.clearColor.x, lights.clearColor.y, lights.clearColor.z, lights.clearAlpha);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glUseProgram(program_);
@@ -396,6 +550,7 @@ unsigned Renderer::render(int width, int height, const Mat4& view, const Mat4& p
     glUniform3f(uFillDir_, lights.fillDir.x, lights.fillDir.y, lights.fillDir.z);
     glUniform3f(uFillColor_, lights.fillColor.x, lights.fillColor.y, lights.fillColor.z);
     glUniform1f(uExposure_, lights.exposure);
+    glUniform3f(uCamPos_, lights.camPos.x, lights.camPos.y, lights.camPos.z);
     glUniform1i(uTex_, 0);
 
     const auto drawMesh = [&](const MeshGpu& mesh, const DrawItem* items, std::size_t nItems,

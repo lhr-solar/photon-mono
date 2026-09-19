@@ -4,10 +4,14 @@ add_library(photon-core STATIC
     src/control.cpp
     src/dbc.cpp
     src/json.cpp
+    src/log_sessions.cpp
     src/pcan.cpp
     src/protocol.cpp
     src/sha1.cpp
     src/tracksim.cpp
+    src/tsdb.cpp
+    src/tsdb_live.cpp
+    src/video_index.cpp
     src/vsd1.cpp
     src/ws_handshake.cpp
 )

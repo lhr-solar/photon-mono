@@ -273,6 +273,40 @@ void testSocSaturatesWhenSolarExceedsLoad() {
 
 }  // namespace
 
+void testMeasuredDriveSeedsSolarAndSoc() {
+    CHECK(near(photon::tracksim::estimatePackSoc(83.2), 0.0, 1e-9, 1e-12));
+    CHECK(photon::tracksim::estimatePackSoc(134.4) == 1.0);
+    const double mid = photon::tracksim::estimatePackSoc(108.8);
+    CHECK(mid > 0.3);
+    CHECK(mid < 0.8);
+
+    photon::tracksim::MeasuredDrive m;
+    m.have = true;
+    m.haveArray = true;
+    m.arrayWMean = 640.0;
+    m.havePackV = true;
+    m.packVMean = 120.0;
+    m.socEst = photon::tracksim::estimatePackSoc(120.0);
+    photon::tracksim::fitCarFromMeasured(m);
+    const auto car = photon::tracksim::carOverrideFromMeasured(m);
+    CHECK(car.solarW.has_value());
+    CHECK(near(*car.solarW, 640.0, 1e-9, 1e-12));
+
+    photon::tracksim::MeasuredDrive coast;
+    coast.haveSpeed = true;
+    coast.speedMpsMean = 10.0;
+    // Default car at 10 m/s is ~207 W battery; 250 W inverts to a plausible CdA.
+    coast.electricalWMean = 250.0;
+    photon::tracksim::fitCarFromMeasured(coast);
+    CHECK(coast.haveCda);
+    CHECK(coast.cdaEst > 0.04);
+    CHECK(coast.cdaEst < 0.45);
+
+    const auto round = photon::tracksim::measuredDriveFromValue(photon::tracksim::measuredDriveToValue(m));
+    CHECK(round.haveArray);
+    CHECK(near(round.arrayWMean, 640.0, 1e-9, 1e-12));
+}
+
 void runTrackSimTests() {
     testFlatPowerMatchesHandCalc();
     testUphillExceedsFlat();
@@ -281,4 +315,5 @@ void runTrackSimTests() {
     testControlRequestResultRoundTrip();
     testSolverPropertiesAndExampleTrack();
     testSocSaturatesWhenSolarExceedsLoad();
+    testMeasuredDriveSeedsSolarAndSoc();
 }

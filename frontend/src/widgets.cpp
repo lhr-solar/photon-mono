@@ -60,7 +60,6 @@ void drawVitalTile(const char* id, const Vital& vital, ImVec2 size) {
     }
     ImGui::PopStyleVar();
     theme::popSmallFont();
-    ImGui::Dummy(ImVec2(0.0f, 2.0f));
 
     char valueBuf[32];
     if (vital.have) {
@@ -69,13 +68,7 @@ void drawVitalTile(const char* id, const Vital& vital, ImVec2 size) {
         std::snprintf(valueBuf, sizeof(valueBuf), "--");
     }
 
-    const float barReserve = vital.hasBar ? 8.0f : 0.0f;
-    const float remain = ImGui::GetContentRegionAvail().y - barReserve;
     theme::pushLargeFont();
-    const ImVec2 valueSize = ImGui::CalcTextSize(valueBuf);
-    const float padX = std::max(0.0f, (ImGui::GetContentRegionAvail().x - valueSize.x) * 0.5f);
-    const float padY = std::max(0.0f, (remain - valueSize.y) * 0.5f);
-    ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + padX, ImGui::GetCursorPosY() + padY));
     if (vital.have) {
         ImGui::TextUnformatted(valueBuf);
     } else {

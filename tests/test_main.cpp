@@ -1,6 +1,7 @@
 #include "photon/canp.hpp"
 #include "photon/control.hpp"
 #include "photon/protocol.hpp"
+#include "photon/video_udp.hpp"
 #include "photon/ws_handshake.hpp"
 #include "test_harness.hpp"
 
@@ -12,11 +13,28 @@
 #include <vector>
 
 void runTrackSimTests();
+void runInterpTests();
+void runMuxTests();
 void runDbcTests();
+void runLogSessionsTests();
 void runPcanTests();
 void runVsd1Tests();
 void runVideoTests();
+void runVideoIndexTests();
+void runTsdbTests();
+void runTsdbLiveTests();
+void runTileCacheTests();
+void runAnalysisRuntimeTests();
+void runTilePersistTests();
+void runSessionHistoryTests();
+void runReplayViewTests();
+void runLogSwitchTests();
 void runCliTests();
+void runLiveFanoutTests();
+void runAnalysisComputeTests();
+void runAnalysisWorkbookTests();
+void runAnalysisOverlayTests();
+void runPlotAxisTests();
 
 namespace {
 
@@ -106,6 +124,31 @@ void testCanMonitorRoundTrip() {
     CHECK((*out)[0].reserved == 0x1234);
     CHECK((*out)[0].timestampMs == 0x0102030405060708ull);
     CHECK((*out)[0].data[7] == 0xA7);
+}
+
+void testLatestCanPerId() {
+    photon::proto::CanMonitorItem a{};
+    a.canId = 0x100;
+    a.timestampMs = 1;
+    a.data[0] = 1;
+    photon::proto::CanMonitorItem b{};
+    b.canId = 0x200;
+    b.timestampMs = 2;
+    b.data[0] = 2;
+    photon::proto::CanMonitorItem a2{};
+    a2.canId = 0x100;
+    a2.timestampMs = 3;
+    a2.data[0] = 9;
+    const photon::proto::CanMonitorItem items[] = {a, b, a2};
+    const auto out = photon::proto::latestCanPerId(items);
+    CHECK(out.size() == 2);
+    CHECK(out[0].canId == 0x100);
+    CHECK(out[0].timestampMs == 3);
+    CHECK(out[0].data[0] == 9);
+    CHECK(out[1].canId == 0x200);
+    const auto capped = photon::proto::latestCanPerId(items, 1);
+    CHECK(capped.size() == 1);
+    CHECK(capped[0].canId == 0x200);
 }
 
 void testTimelineRoundTrip() {
@@ -203,6 +246,35 @@ void testControlJsonRoundTrip() {
     CHECK(ackDaqBack->activeSource.host == "10.0.0.8");
     CHECK(ackDaqBack->activeSource.port == 6500);
 
+    photon::ctrl::Message ackDays = photon::ctrl::helloAck({"log_replay"}, replayActive);
+    photon::ctrl::Message::DriveDay day;
+    day.date = "2026-07-23";
+    day.path = R"(F:\lhr\_logs_extract\on_track\days\2026-07-23)";
+    day.sessionCount = 10;
+    day.durationS = 16600.0;
+    ackDays.driveDays.push_back(day);
+    const auto ackDaysText = photon::ctrl::serialize(ackDays);
+    CHECK(ackDaysText.find("drive_days") != std::string::npos);
+    CHECK(ackDaysText.find("2026-07-23") != std::string::npos);
+    auto ackDaysBack = photon::ctrl::parse(ackDaysText);
+    CHECK(ackDaysBack.has_value());
+    CHECK(ackDaysBack->driveDays.size() == 1);
+    CHECK(ackDaysBack->driveDays[0].date == "2026-07-23");
+    CHECK(ackDaysBack->driveDays[0].sessionCount == 10);
+    CHECK(ackDaysBack->driveDays[0].sessions.empty());
+    photon::ctrl::Message::DriveSession stint;
+    stint.id = "2026-07-23-08";
+    stint.path = R"(F:\lhr\_logs_extract\on_track\days\2026-07-23\session-08.log)";
+    stint.startMs = 1784841790574ull;
+    stint.durationS = 1229.0;
+    stint.speedMaxMps = 40.04;
+    ackDays.driveDays[0].sessions.push_back(stint);
+    auto ackStintBack = photon::ctrl::parse(photon::ctrl::serialize(ackDays));
+    CHECK(ackStintBack.has_value());
+    CHECK(ackStintBack->driveDays[0].sessions.size() == 1);
+    CHECK(ackStintBack->driveDays[0].sessions[0].id == "2026-07-23-08");
+    CHECK(ackStintBack->driveDays[0].sessions[0].startMs == 1784841790574ull);
+
     auto src = photon::ctrl::selectSource(photon::ctrl::SourceKind::DaqTcp);
     src.host = "127.0.0.1";
     src.port = 6500;
@@ -224,6 +296,15 @@ void testControlJsonRoundTrip() {
     CHECK(subBack->signalIds.size() == 3);
     CHECK(subBack->signalIds[2] == 4);
 
+    auto canOn = photon::ctrl::subscribeCan();
+    auto canOnBack = photon::ctrl::parse(photon::ctrl::serialize(canOn));
+    CHECK(canOnBack.has_value());
+    CHECK(canOnBack->type == photon::ctrl::Type::SubscribeCan);
+    auto canOff = photon::ctrl::unsubscribeCan();
+    auto canOffBack = photon::ctrl::parse(photon::ctrl::serialize(canOff));
+    CHECK(canOffBack.has_value());
+    CHECK(canOffBack->type == photon::ctrl::Type::UnsubscribeCan);
+
     auto tl = photon::ctrl::timelineControl(photon::ctrl::TimelineMode::Pause, 5000);
     auto tlBack = photon::ctrl::parse(photon::ctrl::serialize(tl));
     CHECK(tlBack.has_value());
@@ -241,6 +322,20 @@ void testControlJsonRoundTrip() {
     CHECK(dbcBack.has_value());
     CHECK(dbcBack->type == photon::ctrl::Type::SelectDbc);
     CHECK(dbcBack->dbcId == "carcan_telemcan");
+
+    photon::ctrl::Message ackDbc = photon::ctrl::helloAck({"dbc"});
+    ackDbc.dbcId = "carcan_telemcan";
+    ackDbc.dbcPath = R"(F:\lhr\photon-next\assets\dbc\carcan_telemcan.dbc)";
+    ackDbc.dbcs = {"carcan_telemcan"};
+    const auto ackDbcText = photon::ctrl::serialize(ackDbc);
+    CHECK(ackDbcText.find("\"dbc\"") != std::string::npos);
+    CHECK(ackDbcText.find("carcan_telemcan") != std::string::npos);
+    auto ackDbcBack = photon::ctrl::parse(ackDbcText);
+    CHECK(ackDbcBack.has_value());
+    CHECK(ackDbcBack->dbcId == "carcan_telemcan");
+    CHECK(ackDbcBack->dbcPath == ackDbc.dbcPath);
+    CHECK(ackDbcBack->dbcs.size() == 1);
+    CHECK(ackDbcBack->dbcs[0] == "carcan_telemcan");
 
     photon::ctrl::CatalogSignal catSig;
     catSig.id = 42;
@@ -289,6 +384,20 @@ void testControlJsonRoundTrip() {
     CHECK(vstop.has_value());
     CHECK(vstop->type == photon::ctrl::Type::VideoStop);
 
+    auto vloc = photon::ctrl::videoLocate(1784843212345ull, 2, 8);
+    auto vlocBack = photon::ctrl::parse(photon::ctrl::serialize(vloc));
+    CHECK(vlocBack.has_value());
+    CHECK(vlocBack->type == photon::ctrl::Type::VideoLocate);
+    CHECK(vlocBack->startMs == 1784843212345ull);
+    CHECK(vlocBack->videoStreamId == 2);
+    CHECK(vlocBack->videoPrefetchGops == 8);
+
+    auto vclk = photon::ctrl::videoClock(-137);
+    auto vclkBack = photon::ctrl::parse(photon::ctrl::serialize(vclk));
+    CHECK(vclkBack.has_value());
+    CHECK(vclkBack->type == photon::ctrl::Type::VideoClock);
+    CHECK(vclkBack->videoClockOffsetMs == -137);
+
     auto vst = photon::ctrl::videoStatus(true, "10.0.0.2", 6700, photon::ctrl::VideoMode::Live, 42, 9, 3);
     auto vstBack = photon::ctrl::parse(photon::ctrl::serialize(vst));
     CHECK(vstBack.has_value());
@@ -300,6 +409,98 @@ void testControlJsonRoundTrip() {
     CHECK(vstBack->lastTsMs == 42);
     CHECK(vstBack->videoFrames == 9);
     CHECK(vstBack->videoDropped == 3);
+
+    auto hq = photon::ctrl::historyQuery(17, "20260723-160000-03", 1000, 5000, {1, 2}, 2000, 4096);
+    auto hqBack = photon::ctrl::parse(photon::ctrl::serialize(hq));
+    CHECK(hqBack.has_value());
+    CHECK(hqBack->type == photon::ctrl::Type::HistoryQuery);
+    CHECK(hqBack->queryId == 17);
+    CHECK(hqBack->sessionId == "20260723-160000-03");
+    CHECK(hqBack->fromMs == 1000);
+    CHECK(hqBack->toMs == 5000);
+    CHECK(hqBack->signalIds.size() == 2);
+    CHECK(hqBack->creditBytes == 4096);
+
+    photon::ctrl::Message::HistorySeries hs;
+    hs.signalId = 1;
+    hs.points = 10;
+    hs.level = 2;
+    hs.bucketMs = 1000;
+    hs.prior.present = true;
+    hs.prior.t = 900;
+    hs.prior.v = 3.5;
+    auto hr = photon::ctrl::historyResult(17, 2, 1000, 1000, 5000, {hs}, false);
+    auto hrBack = photon::ctrl::parse(photon::ctrl::serialize(hr));
+    CHECK(hrBack.has_value());
+    CHECK(hrBack->type == photon::ctrl::Type::HistoryResult);
+    CHECK(hrBack->historyLevel == 2);
+    CHECK(hrBack->historySeries.size() == 1);
+    CHECK(hrBack->historySeries[0].level == 2);
+    CHECK(hrBack->historySeries[0].bucketMs == 1000);
+    CHECK(hrBack->historySeries[0].prior.present);
+    CHECK(hrBack->historySeries[0].prior.t == 900);
+
+    auto hc = photon::ctrl::parse(photon::ctrl::serialize(photon::ctrl::historyCancel(17)));
+    CHECK(hc.has_value());
+    CHECK(hc->type == photon::ctrl::Type::HistoryCancel);
+    CHECK(hc->queryId == 17);
+
+    auto acq = photon::ctrl::analysisComputeRequest("job-1", "sess-1", 1000, 5000, {3, 4}, "summarize_window", 800);
+    acq.dbcHash = "abc";
+    acq.computeKind = "grok";
+    auto acqText = photon::ctrl::serialize(acq);
+    CHECK(acqText.find("analysis_compute_request") != std::string::npos);
+    CHECK(acqText.find("job_id") != std::string::npos);
+    auto acqBack = photon::ctrl::parse(acqText);
+    CHECK(acqBack.has_value());
+    CHECK(acqBack->type == photon::ctrl::Type::AnalysisComputeRequest);
+    CHECK(acqBack->jobId == "job-1");
+    CHECK(acqBack->sessionId == "sess-1");
+    CHECK(acqBack->t0Ms == 1000);
+    CHECK(acqBack->t1Ms == 5000);
+    CHECK(acqBack->signalIds.size() == 2);
+    CHECK(acqBack->recipeId == "summarize_window");
+
+    auto acr = photon::ctrl::parse(photon::ctrl::serialize(
+        photon::ctrl::analysisComputeResult("job-1", "failed", {}, "offline", "analysis compute sidecar offline")));
+    CHECK(acr.has_value());
+    CHECK(acr->type == photon::ctrl::Type::AnalysisComputeResult);
+    CHECK(acr->jobId == "job-1");
+    CHECK(acr->computeStatus == "failed");
+    CHECK(acr->code == "offline");
+
+    auto acc = photon::ctrl::parse(photon::ctrl::serialize(photon::ctrl::analysisComputeCancel("job-1")));
+    CHECK(acc.has_value());
+    CHECK(acc->type == photon::ctrl::Type::AnalysisComputeCancel);
+    CHECK(acc->jobId == "job-1");
+
+    auto cl = photon::ctrl::parse(photon::ctrl::serialize(photon::ctrl::catalogList()));
+    CHECK(cl.has_value());
+    CHECK(cl->type == photon::ctrl::Type::CatalogList);
+
+    photon::ctrl::Message::CatalogSession sess;
+    sess.id = "20260904-090000-00";
+    sess.path = "/tsdb/20260904-090000-00";
+    sess.minMs = 1000;
+    sess.maxMs = 50000;
+    sess.dbcHash = "deadbeef";
+    sess.sampleCount = 42;
+    sess.hasVideo = true;
+    auto cr = photon::ctrl::catalogResult({sess});
+    const auto crText = photon::ctrl::serialize(cr);
+    CHECK(crText.find("catalog_result") != std::string::npos);
+    CHECK(crText.find("dbc_hash") != std::string::npos);
+    CHECK(crText.find("min_ms") != std::string::npos);
+    auto crBack = photon::ctrl::parse(crText);
+    CHECK(crBack.has_value());
+    CHECK(crBack->type == photon::ctrl::Type::CatalogResult);
+    CHECK(crBack->catalogSessions.size() == 1);
+    CHECK(crBack->catalogSessions[0].id == "20260904-090000-00");
+    CHECK(crBack->catalogSessions[0].minMs == 1000);
+    CHECK(crBack->catalogSessions[0].maxMs == 50000);
+    CHECK(crBack->catalogSessions[0].dbcHash == "deadbeef");
+    CHECK(crBack->catalogSessions[0].sampleCount == 42);
+    CHECK(crBack->catalogSessions[0].hasVideo);
 }
 
 void testCanpRoundTrip() {
@@ -357,6 +558,34 @@ void testCanpRoundTrip() {
     CHECK(streamed->seq == 7);
 }
 
+void testVideoUdpAssemble() {
+    photon::video::ServerFrame frame;
+    frame.timestampMs = 99;
+    frame.flags = photon::video::kFlagKeyframe;
+    frame.payload.assign(2500, 0x65);
+    // Server fragments at 1200 B; emulate two packets then the tail.
+    photon::video::UdpPacket a;
+    a.frameSeq = 3;
+    a.fragIndex = 0;
+    a.fragCount = 3;
+    a.timestampMs = 99;
+    a.flags = photon::video::kFlagKeyframe;
+    a.payload.assign(frame.payload.begin(), frame.payload.begin() + 1200);
+    photon::video::UdpPacket b = a;
+    b.fragIndex = 1;
+    b.payload.assign(frame.payload.begin() + 1200, frame.payload.begin() + 2400);
+    photon::video::UdpPacket c = a;
+    c.fragIndex = 2;
+    c.payload.assign(frame.payload.begin() + 2400, frame.payload.end());
+    photon::video::UdpAssembler asmblr;
+    CHECK(!asmblr.add(a).has_value());
+    CHECK(!asmblr.add(b).has_value());
+    auto got = asmblr.add(c);
+    CHECK(got.has_value());
+    CHECK(got->timestampMs == 99);
+    CHECK(got->payload.size() == 2500);
+}
+
 void testWsAcceptKey() {
     // RFC 6455 example key / accept pair.
     const std::string accept = photon::ws::acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
@@ -369,17 +598,36 @@ int main() {
     testHeaderPacking();
     testTelemetryRoundTrip();
     testCanMonitorRoundTrip();
+    testLatestCanPerId();
     testTimelineRoundTrip();
     testVideoFrameRoundTrip();
+    testVideoUdpAssemble();
     testControlJsonRoundTrip();
     testCanpRoundTrip();
     testWsAcceptKey();
     runTrackSimTests();
+    runInterpTests();
+    runMuxTests();
     runDbcTests();
+    runLogSessionsTests();
     runPcanTests();
     runVsd1Tests();
     runVideoTests();
+    runVideoIndexTests();
+    runTsdbTests();
+    runTsdbLiveTests();
+    runTileCacheTests();
+    runAnalysisRuntimeTests();
+    runTilePersistTests();
+    runSessionHistoryTests();
+    runReplayViewTests();
+    runLogSwitchTests();
     runCliTests();
+    runLiveFanoutTests();
+    runAnalysisComputeTests();
+    runAnalysisWorkbookTests();
+    runAnalysisOverlayTests();
+    runPlotAxisTests();
 
     std::fprintf(stdout, "photon-tests: %d passed, %d failed\n", gPassed, gFailed);
     return gFailed == 0 ? 0 : 1;

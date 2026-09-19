@@ -2,6 +2,7 @@
 
 #include "photon_ui/arena.hpp"
 #include "photon_ui/client.hpp"
+#include "photon_ui/clock_format.hpp"
 #include "photon_ui/theme.hpp"
 
 #include <algorithm>
@@ -97,17 +98,7 @@ std::string catalogKey(const ctrl::CatalogSignal& sig) {
 }
 
 void formatClock(double ms, char* buf, std::size_t n) {
-    if (!(ms >= 0.0) || !std::isfinite(ms)) {
-        std::snprintf(buf, n, "--:--:--.---");
-        return;
-    }
-    const auto total = static_cast<std::uint64_t>(ms);
-    const auto msec = static_cast<unsigned>(total % 1000);
-    const auto sec = total / 1000;
-    const auto s = static_cast<unsigned>(sec % 60);
-    const auto m = static_cast<unsigned>((sec / 60) % 60);
-    const auto h = static_cast<unsigned>((sec / 3600) % 24);
-    std::snprintf(buf, n, "%02u:%02u:%02u.%03u", h, m, s, msec);
+    formatLocalClock(ms, buf, n, ClockParts::DateTime);
 }
 
 void formatAge(double ms, char* buf, std::size_t n) {
@@ -371,13 +362,13 @@ void AlarmEngine::evaluate(const ClientArena& arena, bool connected, bool playin
             const bool haveTap = arena.has(slot.id);
             bool gateOk = true;
             if (slot.gateMapped && arena.has(slot.gateId)) {
-                gateOk = arena.latest(slot.gateId) != 0.0;
+                gateOk = arena.readout(slot.gateId) != 0.0;
             }
             const bool active = haveTap && gateOk;
             if (active) {
-                const int tap = static_cast<int>(std::lround(arena.latest(slot.id)));
-                const double volts = arena.has(slot.voltId) ? arena.latest(slot.voltId) : 0.0;
-                const double temp = arena.has(slot.tempId) ? arena.latest(slot.tempId) : 0.0;
+                const int tap = static_cast<int>(std::lround(arena.readout(slot.id)));
+                const double volts = arena.has(slot.voltId) ? arena.readout(slot.voltId) : 0.0;
+                const double temp = arena.has(slot.tempId) ? arena.readout(slot.tempId) : 0.0;
                 char label[80];
                 std::snprintf(label, sizeof(label), "BPS fault tap %d (V=%0.3f, T=%0.1f)", tap, volts, temp);
                 slot.liveLabel = label;
@@ -400,7 +391,7 @@ void AlarmEngine::evaluate(const ClientArena& arena, bool connected, bool playin
         }
 
         const bool have = arena.has(slot.id);
-        const double value = have ? arena.latest(slot.id) : 0.0;
+        const double value = have ? arena.readout(slot.id) : 0.0;
         const bool active = have && value != 0.0;
         if (active && std::strcmp(slot.def->signal, "BPS_Status.BPS_Fault") == 0) {
             slot.liveLabel = bpsFaultChipLabel(static_cast<int>(std::lround(value)));
@@ -586,9 +577,11 @@ void drawAlarmStrip(AlarmEngine& engine, ImVec2 size) {
     theme::beginCard("##alarm_strip", size, bg, theme::kStripPadding, theme::CardFit::Flush);
     theme::pushSmallFont();
 
-    const float rowH = std::max(20.0f, ImGui::GetContentRegionAvail().y);
+    const float rowH = std::max(22.0f, ImGui::GetContentRegionAvail().y);
+    const ImVec2 chipOrigin = ImGui::GetCursorPos();
+    ImGui::SetCursorPos(ImVec2(chipOrigin.x + 4.0f, chipOrigin.y + 1.0f));
     bool openPopup = false;
-    ImGui::BeginChild("##alarm_chips", ImVec2(ImGui::GetContentRegionAvail().x, rowH),
+    ImGui::BeginChild("##alarm_chips", ImVec2(ImGui::GetContentRegionAvail().x - 4.0f, rowH),
                       ImGuiChildFlags_None,
                       ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
@@ -615,7 +608,7 @@ void drawAlarmStrip(AlarmEngine& engine, ImVec2 size) {
             ImGui::SameLine(0.0f, 8.0f);
         }
         const EcuPill pill = engine.ecuPill(i);
-        const char* state = "—";
+        const char* state = "--";
         ImVec4 col = theme::mutedFg();
         switch (pill.health) {
             case EcuHealth::Ok:
@@ -636,7 +629,7 @@ void drawAlarmStrip(AlarmEngine& engine, ImVec2 size) {
                 break;
             case EcuHealth::Unknown:
             default:
-                state = "—";
+                state = "--";
                 col = theme::mutedFg();
                 break;
         }

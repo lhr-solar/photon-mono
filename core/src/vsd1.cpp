@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <fstream>
 #include <utility>
 
@@ -48,6 +49,13 @@ std::vector<fs::path> collectLogFiles(const fs::path& root) {
         }
     }
     std::sort(files.begin(), files.end());
+    // Day extracts keep run.log plus per-stint copies. Index the merged day
+    // once so replay is not 2x the bytes and "no data" while buffering.
+    for (const auto& file : files) {
+        if (toLower(file.filename().string()) == "run.log") {
+            return {file};
+        }
+    }
     return files;
 }
 
@@ -66,44 +74,99 @@ fs::path resolveRoot(const fs::path& requested) {
     return requested;
 }
 
-void indexPayload(Archive& archive, std::span<const std::uint8_t> payload, std::size_t fileIndex,
-                  std::uint64_t frameOffset, std::uint32_t payloadBytes, bool keepBatch) {
-    auto batches = extractCanp(payload);
-    for (auto& batch : batches) {
-        IndexedBatch item;
-        item.timestampMs = batch.timestamp;
-        item.fileIndex = fileIndex;
-        item.frameOffset = frameOffset;
-        item.payloadBytes = payloadBytes;
-        if (keepBatch) {
-            item.batch = std::make_unique<canp::Batch>(std::move(batch));
-        }
-        archive.batches.push_back(std::move(item));
+bool peekCanpBatch(std::span<const std::uint8_t> bytes, std::uint64_t& timestamp, std::size_t& consumed) {
+    if (bytes.size() < canp::kHeaderSize) {
+        return false;
     }
+    std::size_t off = 0;
+    std::uint32_t magic = 0;
+    std::uint16_t version = 0;
+    std::uint16_t count = 0;
+    std::uint32_t seq = 0;
+    if (!readU32Be(bytes, off, magic) || !readU16Be(bytes, off, version) || !readU16Be(bytes, off, count) ||
+        !readU32Be(bytes, off, seq) || !readU64Be(bytes, off, timestamp)) {
+        return false;
+    }
+    if (magic != canp::kMagic || version != canp::kVersion || count == 0 || count > canp::kMaxBatch) {
+        return false;
+    }
+    const std::size_t need = canp::kHeaderSize + static_cast<std::size_t>(count) * canp::kPacketSize;
+    if (bytes.size() < need) {
+        return false;
+    }
+    consumed = need;
+    return true;
 }
 
-void finishArchive(Archive& archive) {
-    std::sort(archive.batches.begin(), archive.batches.end(),
-              [](const IndexedBatch& a, const IndexedBatch& b) {
-                  if (a.timestampMs != b.timestampMs) {
-                      return a.timestampMs < b.timestampMs;
-                  }
-                  if (a.fileIndex != b.fileIndex) {
-                      return a.fileIndex < b.fileIndex;
-                  }
-                  return a.frameOffset < b.frameOffset;
-              });
-    if (archive.batches.empty()) {
-        archive.minTimeMs = 0;
-        archive.maxTimeMs = 0;
+void visitPayload(std::span<const std::uint8_t> payload, std::size_t fileIndex, std::uint64_t frameOffset,
+                  std::uint32_t payloadBytes, bool keepBatch, const std::function<void(IndexedBatch&&)>& visit) {
+    if (keepBatch) {
+        auto batches = extractCanp(payload);
+        for (auto& batch : batches) {
+            IndexedBatch item;
+            item.timestampMs = batch.timestamp;
+            item.fileIndex = fileIndex;
+            item.frameOffset = frameOffset;
+            item.payloadBytes = payloadBytes;
+            item.batch = std::make_unique<canp::Batch>(std::move(batch));
+            visit(std::move(item));
+        }
         return;
     }
-    archive.minTimeMs = archive.batches.front().timestampMs;
-    archive.maxTimeMs = archive.batches.back().timestampMs;
+    std::size_t off = 0;
+    while (off < payload.size()) {
+        std::uint64_t timestamp = 0;
+        std::size_t consumed = 0;
+        if (peekCanpBatch(payload.subspan(off), timestamp, consumed)) {
+            IndexedBatch item;
+            item.timestampMs = timestamp;
+            item.fileIndex = fileIndex;
+            item.frameOffset = frameOffset;
+            item.payloadBytes = payloadBytes;
+            visit(std::move(item));
+            off += consumed;
+            continue;
+        }
+        auto batches = extractCanp(payload.subspan(off));
+        for (auto& batch : batches) {
+            IndexedBatch item;
+            item.timestampMs = batch.timestamp;
+            item.fileIndex = fileIndex;
+            item.frameOffset = frameOffset;
+            item.payloadBytes = payloadBytes;
+            visit(std::move(item));
+        }
+        break;
+    }
 }
 
-bool indexFile(Archive& archive, const fs::path& path, std::size_t fileIndex, std::string* error,
-               std::atomic<bool>* cancel) {
+void indexPayload(Archive& archive, std::span<const std::uint8_t> payload, std::size_t fileIndex,
+                  std::uint64_t frameOffset, std::uint32_t payloadBytes, bool keepBatch) {
+    visitPayload(payload, fileIndex, frameOffset, payloadBytes, keepBatch,
+                 [&](IndexedBatch&& item) { archive.batches.push_back(std::move(item)); });
+}
+
+constexpr std::uint32_t kIndexMagic = 0x58444950u;  // "PIDX" LE
+constexpr std::uint32_t kIndexVersion = 1;
+
+fs::path cachePathFor(const std::vector<fs::path>& files) {
+    if (files.size() == 1) {
+        return fs::path(files[0].string() + ".photon-idx");
+    }
+    return files.front().parent_path() / ".photon-idx";
+}
+
+std::uint64_t fileMtimeCount(const fs::path& path) {
+    std::error_code ec;
+    const auto t = fs::last_write_time(path, ec);
+    if (ec) {
+        return 0;
+    }
+    return static_cast<std::uint64_t>(t.time_since_epoch().count());
+}
+
+bool walkFile(const fs::path& path, std::size_t fileIndex, std::atomic<bool>* cancel, std::string* error,
+              const std::function<void(IndexedBatch&&)>& visit) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         if (error) {
@@ -111,6 +174,8 @@ bool indexFile(Archive& archive, const fs::path& path, std::size_t fileIndex, st
         }
         return false;
     }
+    std::vector<char> ioBuf(1 << 20);
+    in.rdbuf()->pubsetbuf(ioBuf.data(), static_cast<std::streamsize>(ioBuf.size()));
     std::vector<std::uint8_t> header(kHeaderSize);
     std::vector<std::uint8_t> payload;
     std::size_t frames = 0;
@@ -134,13 +199,140 @@ bool indexFile(Archive& archive, const fs::path& path, std::size_t fileIndex, st
             !in.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(fh.payloadBytes))) {
             break;
         }
-        indexPayload(archive, payload, fileIndex, offset, fh.payloadBytes, false);
+        visitPayload(payload, fileIndex, offset, fh.payloadBytes, false, visit);
         offset += kHeaderSize + static_cast<std::uint64_t>(fh.payloadBytes);
     }
     return true;
 }
 
 }  // namespace
+
+void finishArchive(Archive& archive) {
+    std::sort(archive.batches.begin(), archive.batches.end(),
+              [](const IndexedBatch& a, const IndexedBatch& b) {
+                  if (a.timestampMs != b.timestampMs) {
+                      return a.timestampMs < b.timestampMs;
+                  }
+                  if (a.fileIndex != b.fileIndex) {
+                      return a.fileIndex < b.fileIndex;
+                  }
+                  return a.frameOffset < b.frameOffset;
+              });
+    if (archive.batches.empty()) {
+        archive.minTimeMs = 0;
+        archive.maxTimeMs = 0;
+        return;
+    }
+    archive.minTimeMs = archive.batches.front().timestampMs;
+    archive.maxTimeMs = archive.batches.back().timestampMs;
+}
+
+bool walkLogFiles(const std::vector<fs::path>& files, std::atomic<bool>* cancel, std::string* error,
+                  const std::function<void(IndexedBatch&&)>& visit) {
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) {
+            if (error) {
+                *error = "index cancelled";
+            }
+            return false;
+        }
+        if (!walkFile(files[i], i, cancel, error, visit)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<Archive> tryLoadIndexCache(const std::vector<fs::path>& files) {
+    if (files.empty()) {
+        return std::nullopt;
+    }
+    const auto cache = cachePathFor(files);
+    std::ifstream in(cache, std::ios::binary);
+    if (!in) {
+        return std::nullopt;
+    }
+    std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::size_t off = 0;
+    std::uint32_t magic = 0;
+    std::uint32_t version = 0;
+    std::uint32_t fileCount = 0;
+    if (!readU32Le(bytes, off, magic) || magic != kIndexMagic || !readU32Le(bytes, off, version) ||
+        version != kIndexVersion || !readU32Le(bytes, off, fileCount) ||
+        fileCount != static_cast<std::uint32_t>(files.size())) {
+        return std::nullopt;
+    }
+    for (const auto& file : files) {
+        std::uint64_t size = 0;
+        std::uint64_t mtime = 0;
+        std::uint32_t nameLen = 0;
+        if (!readU64Le(bytes, off, size) || !readU64Le(bytes, off, mtime) || !readU32Le(bytes, off, nameLen)) {
+            return std::nullopt;
+        }
+        if (off + nameLen > bytes.size()) {
+            return std::nullopt;
+        }
+        const std::string name(reinterpret_cast<const char*>(bytes.data() + off), nameLen);
+        off += nameLen;
+        std::error_code ec;
+        if (name != file.filename().string() || fs::file_size(file, ec) != size || fileMtimeCount(file) != mtime) {
+            return std::nullopt;
+        }
+    }
+    std::uint64_t batchCount = 0;
+    if (!readU64Le(bytes, off, batchCount)) {
+        return std::nullopt;
+    }
+    Archive archive;
+    archive.files = files;
+    archive.complete = true;
+    archive.batches.reserve(static_cast<std::size_t>(batchCount));
+    for (std::uint64_t i = 0; i < batchCount; ++i) {
+        IndexedBatch item;
+        std::uint32_t fileIndex = 0;
+        if (!readU64Le(bytes, off, item.timestampMs) || !readU64Le(bytes, off, item.frameOffset) ||
+            !readU32Le(bytes, off, item.payloadBytes) || !readU32Le(bytes, off, fileIndex)) {
+            return std::nullopt;
+        }
+        item.fileIndex = fileIndex;
+        archive.batches.push_back(std::move(item));
+    }
+    finishArchive(archive);
+    return archive;
+}
+
+bool saveIndexCache(const Archive& archive) {
+    if (archive.files.empty() || archive.batches.empty()) {
+        return false;
+    }
+    std::vector<std::uint8_t> out;
+    out.reserve(16 + archive.files.size() * 48 + archive.batches.size() * 24);
+    writeU32Le(out, kIndexMagic);
+    writeU32Le(out, kIndexVersion);
+    writeU32Le(out, static_cast<std::uint32_t>(archive.files.size()));
+    for (const auto& file : archive.files) {
+        std::error_code ec;
+        writeU64Le(out, fs::file_size(file, ec));
+        writeU64Le(out, fileMtimeCount(file));
+        const auto name = file.filename().string();
+        writeU32Le(out, static_cast<std::uint32_t>(name.size()));
+        out.insert(out.end(), name.begin(), name.end());
+    }
+    writeU64Le(out, static_cast<std::uint64_t>(archive.batches.size()));
+    for (const auto& item : archive.batches) {
+        writeU64Le(out, item.timestampMs);
+        writeU64Le(out, item.frameOffset);
+        writeU32Le(out, item.payloadBytes);
+        writeU32Le(out, static_cast<std::uint32_t>(item.fileIndex));
+    }
+    const auto cache = cachePathFor(archive.files);
+    std::ofstream file(cache, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        return false;
+    }
+    file.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(file);
+}
 
 bool parseHeader(std::span<const std::uint8_t> bytes, FrameHeader& out) {
     if (bytes.size() < kHeaderSize) {
@@ -220,20 +412,12 @@ std::optional<Archive> indexPath(const fs::path& path, std::string* error, std::
         }
         return std::nullopt;
     }
-    for (std::size_t i = 0; i < archive.files.size(); ++i) {
-        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) {
-            if (error) {
-                *error = "index cancelled";
-            }
-            return std::nullopt;
-        }
-        std::string fileError;
-        if (!indexFile(archive, archive.files[i], i, &fileError, cancel)) {
-            if (error) {
-                *error = fileError;
-            }
-            return std::nullopt;
-        }
+    if (auto cached = tryLoadIndexCache(archive.files)) {
+        return cached;
+    }
+    if (!walkLogFiles(archive.files, cancel, error,
+                      [&](IndexedBatch&& item) { archive.batches.push_back(std::move(item)); })) {
+        return std::nullopt;
     }
     if (archive.batches.empty()) {
         if (error) {
@@ -242,6 +426,7 @@ std::optional<Archive> indexPath(const fs::path& path, std::string* error, std::
         return std::nullopt;
     }
     finishArchive(archive);
+    saveIndexCache(archive);
     return archive;
 }
 
@@ -369,7 +554,7 @@ ReplayCursor::EmitRange ReplayCursor::advance(std::uint64_t wallDtMs) {
         }
     }
     range.end = playIndex_;
-    if (cursorMs_ >= archive_->maxTimeMs && playIndex_ >= archive_->batches.size()) {
+    if (cursorMs_ >= archive_->maxTimeMs && playIndex_ >= archive_->batches.size() && archive_->complete) {
         mode_ = Mode::Pause;
         cursorMs_ = archive_->maxTimeMs;
     }

@@ -1,5 +1,6 @@
 #include "photon_ui/scene3d.hpp"
 
+#include "photon/interp.hpp"
 #include "photon/protocol.hpp"
 #include "photon_ui/gl3d/model.hpp"
 #include "photon_ui/gl3d/renderer.hpp"
@@ -7,17 +8,108 @@
 #include "photon_ui/theme.hpp"
 #include "photon_ui/widgets.hpp"
 
+#include "photon_ui/platform.hpp"
+
 #include "imgui.h"
 
+#ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <utility>
 #include <vector>
 
+#ifdef __EMSCRIPTEN__
+EM_JS(void, photon_maps3d_show, (int on), {
+    try {
+        if (window.photonMaps3d) {
+            window.photonMaps3d.show(!!on);
+        }
+    } catch (e) {}
+});
+EM_JS(void, photon_maps3d_layout, (float x, float y, float w, float h), {
+    try {
+        if (window.photonMaps3d) {
+            window.photonMaps3d.setRect(x, y, w, h);
+        }
+    } catch (e) {}
+});
+EM_JS(void, photon_maps3d_start, (double lat, double lng, const char* url), {
+    try {
+        if (window.photonMaps3d) {
+            window.photonMaps3d.start(lat, lng, UTF8ToString(url));
+        }
+    } catch (e) {}
+});
+EM_JS(void, photon_maps3d_pose, (double lat, double lng, double heading, double scale, double range,
+                                 double tilt, int follow), {
+    try {
+        if (window.photonMaps3d && isFinite(lat) && isFinite(lng) && isFinite(heading)) {
+            window.photonMaps3d.pose(lat, lng, heading, scale, range, tilt, !!follow);
+        }
+    } catch (e) {}
+});
+EM_JS(int, photon_maps3d_ready, (), {
+    try {
+        return (window.photonMaps3d && window.photonMaps3d.ready()) ? 1 : 0;
+    } catch (e) {
+        return 0;
+    }
+});
+EM_JS(int, photon_maps3d_hosted, (), {
+    try {
+        return (window.photonMaps3d && window.photonMaps3d.ready()) ? 1 : 0;
+    } catch (e) {
+        return 0;
+    }
+});
+EM_JS(void, photon_maps3d_status, (char* buf, int n), {
+    try {
+        var s = (window.photonMaps3d && window.photonMaps3d.status()) || "";
+        stringToUTF8(s, buf, n);
+    } catch (e) {
+        if (n > 0) {
+            HEAPU8[buf] = 0;
+        }
+    }
+});
+EM_JS(void, photon_maps3d_reset_cam, (), {
+    try {
+        if (window.photonMaps3d && window.photonMaps3d.resetCam) {
+            window.photonMaps3d.resetCam();
+        }
+    } catch (e) {}
+});
+EM_JS(void, photon_maps3d_interactive, (int on), {
+    try {
+        if (window.photonMaps3d && window.photonMaps3d.setInteractive) {
+            window.photonMaps3d.setInteractive(!!on);
+        }
+    } catch (e) {}
+});
+#else
+extern "C" {
+void photon_maps3d_show(int on);
+void photon_maps3d_layout(float x, float y, float w, float h);
+void photon_maps3d_start(double lat, double lng, const char* url);
+void photon_maps3d_pose(double lat, double lng, double heading, double scale, double range, double tilt,
+                        int follow);
+int photon_maps3d_ready();
+int photon_maps3d_hosted();
+void photon_maps3d_status(char* buf, int n);
+void photon_maps3d_reset_cam();
+void photon_maps3d_interactive(int on);
+}
+#endif
 namespace photon::ui {
 namespace {
 
@@ -54,6 +146,32 @@ constexpr const char* kCarUrls[] = {"models/new_dyn.glb", "models/newCar.glb"};
 constexpr const char* kCarNames[] = {"new_dyn.glb", "newCar.glb"};
 constexpr const char* kTrackUrl = "models/s26_simple_track.glb";
 
+// OSM / MapLibre 3D (OpenFreeMap + Mapterhorn DEM). COTA until GPS arrives.
+constexpr double kPresetCotaLat = 30.132792;
+constexpr double kPresetCotaLon = -97.641144;
+constexpr double kPresetAustinLat = 30.2672;
+constexpr double kPresetAustinLon = -97.7431;
+
+struct Maps3dUi {
+    bool on = true;
+    bool restart = false;
+    bool website = false;
+    bool websiteQueryDone = false;
+    bool follow = true;
+    int preset = 0;
+    float scale = 10.0f;
+    float headingOff = 0.0f;
+    float range = 55.0f;
+    float tilt = 62.0f;
+    double lastLat = 0.0;
+    double lastLon = 0.0;
+    bool haveFix = false;
+    double heading = 0.0;
+    interp::GpsPlayback gps{};
+};
+
+Maps3dUi gMaps{};
+
 struct CachedModel {
     gl3d::LoadedModel model;
     bool ready = false;
@@ -79,7 +197,12 @@ public:
         }
         gl3d::buildGround(renderer_, ground_);
         ready_ = true;
-        requestCar(CarSlot::NewDyn);
+        requestCar(CarSlot::NewCar);
+    }
+
+    void tick(const ClientArena& arena) {
+        ensure();
+        step(arena);
     }
 
     void resetView() { frameCamera(activeModel()); }
@@ -117,15 +240,15 @@ public:
         if (slot < 0 || slot > 1) {
             return;
         }
+        if (selected_ == slot && (cars_[slot].ready || cars_[slot].loading)) {
+            return;
+        }
         selected_ = slot;
         requestCar(static_cast<CarSlot>(slot));
         if (cars_[selected_].ready) {
             useCar(selected_);
-        } else {
-            displayed_ = -1;
-            itemMats_.clear();
-            cam_ = Camera{};
         }
+        // Keep the last ready car on screen while the new GLB fetches/parses.
     }
 
     void setWantTrack(bool on) {
@@ -222,15 +345,16 @@ public:
         }
         const bool useTrack = wantTrack_ && track_.ready;
         const float r = std::max(modelRadius_, 1.0f);
+        const float dist = cam_.distance;
         const float farPlane = std::max(useTrack ? 260.0f : 16.0f, cam_.distance + r * 2.0f + 16.0f);
         const float aspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
         const gl3d::Mat4 proj = gl3d::perspective(gl3d::radians(kFovYDeg), aspect, 0.15f, farPlane);
         const float yaw = gl3d::radians(cam_.yaw);
         const float pitch = gl3d::radians(cam_.pitch);
         const gl3d::Vec3 target{cam_.targetX, cam_.targetY, cam_.targetZ};
-        const gl3d::Vec3 eye{target.x + cam_.distance * std::cos(pitch) * std::sin(yaw),
-                             target.y + cam_.distance * std::sin(pitch),
-                             target.z + cam_.distance * std::cos(pitch) * std::cos(yaw)};
+        const gl3d::Vec3 eye{target.x + dist * std::cos(pitch) * std::sin(yaw),
+                             target.y + dist * std::sin(pitch),
+                             target.z + dist * std::cos(pitch) * std::cos(yaw)};
         const gl3d::Mat4 view = gl3d::lookAt(eye, target, {0.0f, 1.0f, 0.0f});
         const gl3d::Mat4 groundM = gl3d::identity();
         const gl3d::MeshGpu* extra = useTrack ? nullptr : &ground_;
@@ -238,9 +362,11 @@ public:
         const gl3d::Mat4* trackMats = useTrack && !trackMats_.empty() ? trackMats_.data() : nullptr;
         const gl3d::Vec3 toCam = gl3d::normalize(eye - target);
         gl3d::Lights lights{};
+        lights.camPos = eye;
         lights.fillDir = gl3d::normalize({toCam.x, toCam.y + 0.35f, toCam.z});
-        const ImVec4 clear = theme::mixColor(theme::background(), theme::muted(), 0.55f);
-        lights.clearColor = {clear.x, clear.y, clear.z};
+        const ImVec4 clear = theme::background();
+        lights.clearColor = gl3d::Vec3{clear.x, clear.y, clear.z};
+        lights.clearAlpha = 1.0f;
         lights.exposure = kExposure;
         const unsigned tex =
             renderer_.render(width, height, view, proj, car.gpu, itemMats_.data(), extra, &groundM, trackGpu,
@@ -252,6 +378,20 @@ public:
     void orbit(float dx, float dy) {
         cam_.yaw += dx * 0.35f;
         cam_.pitch = std::clamp(cam_.pitch + dy * 0.25f, -8.0f, 78.0f);
+    }
+
+    void pan(float dx, float dy) {
+        const float yaw = gl3d::radians(cam_.yaw);
+        const float pitch = gl3d::radians(cam_.pitch);
+        const float rx = std::cos(yaw);
+        const float rz = -std::sin(yaw);
+        const float ux = -std::sin(pitch) * std::sin(yaw);
+        const float uy = std::cos(pitch);
+        const float uz = -std::sin(pitch) * std::cos(yaw);
+        const float s = std::max(cam_.distance, 1.0f) * 0.0022f;
+        cam_.targetX += (-dx * rx - dy * ux) * s;
+        cam_.targetY += (-dy * uy) * s;
+        cam_.targetZ += (-dx * rz - dy * uz) * s;
     }
 
     void zoom(float wheel) {
@@ -269,7 +409,7 @@ private:
     std::vector<gl3d::Mat4> trackMats_{};
     Camera cam_{};
     Pose pose_{};
-    int selected_ = static_cast<int>(CarSlot::NewDyn);
+    int selected_ = static_cast<int>(CarSlot::NewCar);
     int displayed_ = -1;
     bool ready_ = false;
     bool wheelSpin_ = true;
@@ -279,11 +419,11 @@ private:
     bool suspRefValid_[3]{};
     float suspRef_[3]{};
     double speedValue_ = 0.0;
-    const char* speedUnit_ = "m/s";
+    const char* speedUnit_ = "mph";
     int lastDraws_ = 0;
     float modelRadius_ = 0.0f;
     float framedDistance_ = 0.0f;
-    char loadStatus_[128]{"loading new_dyn.glb"};
+    char loadStatus_[128]{"loading newCar.glb"};
 
     const gl3d::LoadedModel& activeModel() const {
         if (displayed_ >= 0 && displayed_ < 2 && cars_[displayed_].ready) {
@@ -350,9 +490,24 @@ private:
     }
 
     void startFetch(const char* url, int kind) {
+#ifdef __EMSCRIPTEN__
         auto* job = new FetchJob{this, kind};
         emscripten_async_wget2_data(url, "GET", "", job, 1, &Scene3dRuntime::onWget2Ok,
                                    &Scene3dRuntime::onWget2Err, &Scene3dRuntime::onWget2Progress);
+#else
+        const std::string path = photon::ui::assetPath(url);
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            fetchFailed(kind);
+            return;
+        }
+        std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (bytes.empty()) {
+            fetchFailed(kind);
+            return;
+        }
+        finishFetch(kind, bytes.data(), static_cast<int>(bytes.size()));
+#endif
     }
 
     static void onWget2Ok(unsigned /*handle*/, void* arg, void* data, unsigned size) {
@@ -397,13 +552,19 @@ private:
         const Vital suspRr = map.vital("susp_rear", arena);
         const Vital speed = map.vital("vehicle_speed", arena);
 
-        speedValue_ = speed.have ? speed.value : 0.0;
-        speedUnit_ = (speed.unit != nullptr && speed.unit[0] != '\0') ? speed.unit : "m/s";
+        speedValue_ = speed.have ? speed.value * kMpsToMph : 0.0;
+        speedUnit_ = "mph";
 
         const bool mappedLive = (steer.mapped && steer.have) || (rpmFl.mapped && rpmFl.have) ||
                                 (rpmFr.mapped && rpmFr.have) || (suspFl.mapped && suspFl.have) ||
-                                (suspFr.mapped && suspFr.have) || (suspRr.mapped && suspRr.have);
-        synthetic_ = !mappedLive;
+                                (suspFr.mapped && suspFr.have) || (suspRr.mapped && suspRr.have) ||
+                                (speed.mapped && speed.have);
+        const bool liveSource = arena.source == ctrl::SourceKind::LogReplay ||
+                                arena.source == ctrl::SourceKind::DaqTcp ||
+                                arena.source == ctrl::SourceKind::Pcan;
+        // A catalog pin is the log. Do not keep the sine-wave car running
+        // beside history tiles.
+        synthetic_ = !arena.catalogPinned() && !mappedLive && !liveSource;
 
         if (synthetic_) {
             // Photon's applyDynamicsJiggle (gui.cpp): 5s period, ±35° road, ±540° wheel.
@@ -423,8 +584,8 @@ private:
             pose_.rollDeg = std::sin(phase * 0.73f) * 4.0f;
             pose_.pitchDeg = std::sin(phase * 1.07f + 1.2f) * 3.0f;
             if (!speed.have) {
-                speedValue_ = 4.0 + 1.2 * std::sin(static_cast<double>(phase));
-                speedUnit_ = "m/s";
+                speedValue_ = (4.0 + 1.2 * std::sin(static_cast<double>(phase))) * kMpsToMph;
+                speedUnit_ = "mph";
             }
             return;
         }
@@ -492,12 +653,25 @@ Scene3dRuntime& runtime() {
 }
 
 void handleOrbit() {
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-        const ImVec2 d = ImGui::GetIO().MouseDelta;
-        runtime().orbit(d.x, d.y);
+    const ImGuiIO& io = ImGui::GetIO();
+    static bool camDrag = false;
+    if (ImGui::IsItemHovered() && (io.MouseDown[0] || io.MouseDown[1] || io.MouseDown[2])) {
+        camDrag = true;
+    }
+    if (!io.MouseDown[0] && !io.MouseDown[1] && !io.MouseDown[2]) {
+        camDrag = false;
+    }
+    if (camDrag) {
+        const ImVec2 d = io.MouseDelta;
+        const bool pan = io.MouseDown[1] || io.MouseDown[2] || (io.MouseDown[0] && io.KeyShift);
+        if (pan) {
+            runtime().pan(d.x, d.y);
+        } else if (io.MouseDown[0]) {
+            runtime().orbit(d.x, d.y);
+        }
     }
     if (ImGui::IsItemHovered()) {
-        const float wheel = ImGui::GetIO().MouseWheel;
+        const float wheel = io.MouseWheel;
         if (std::fabs(wheel) > 0.0f) {
             runtime().zoom(wheel);
         }
@@ -514,6 +688,17 @@ void drawHud(ImVec2 origin, ImVec2 size) {
     draw->AddRectFilled(ImVec2(p.x - 8.0f, p.y - 4.0f), ImVec2(p.x + ts.x + 8.0f, p.y + ts.y + 4.0f),
                         theme::u32(theme::withAlpha(theme::card(), 0.82f)), 6.0f);
     draw->AddText(p, theme::u32(theme::primary()), line);
+    char gps[80];
+    if (gMaps.haveFix) {
+        std::snprintf(gps, sizeof(gps), "GPS  %0.6f  %0.6f", gMaps.lastLat, gMaps.lastLon);
+    } else {
+        std::snprintf(gps, sizeof(gps), "No GPS fix");
+    }
+    const ImVec2 gs = ImGui::CalcTextSize(gps);
+    const ImVec2 gp(origin.x + theme::kHudInset, origin.y + size.y - gs.y - theme::kHudInset);
+    draw->AddRectFilled(ImVec2(gp.x - 6.0f, gp.y - 3.0f), ImVec2(gp.x + gs.x + 6.0f, gp.y + gs.y + 3.0f),
+                        theme::u32(theme::withAlpha(theme::card(), 0.82f)), 6.0f);
+    draw->AddText(gp, theme::u32(gMaps.haveFix ? theme::success() : theme::warning()), gps);
     if (runtime().loading()) {
         const ImVec2 w = ImGui::CalcTextSize(runtime().loadStatus());
         const ImVec2 lp(origin.x + theme::kHudInset, origin.y + theme::kHudInset);
@@ -532,10 +717,12 @@ void drawHud(ImVec2 origin, ImVec2 size) {
 void drawOverlayPanel() {
     ImGui::SetCursorPos(ImVec2(theme::kHudInset, theme::kHudInset));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::withAlpha(theme::card(), 0.88f));
-    ImGui::BeginChild("##gl3d_overlay", ImVec2(300.0f, 360.0f), ImGuiChildFlags_Borders);
+    ImGui::BeginChild("##gl3d_overlay", ImVec2(288.0f, 400.0f), ImGuiChildFlags_Borders);
     ImGui::TextColored(theme::primary(), "3D");
     if (ImGui::Button("Reset camera", ImVec2(140.0f, 0.0f))) {
         runtime().resetView();
+        gMaps.follow = true;
+        photon_maps3d_reset_cam();
     }
     bool spin = runtime().wheelSpin();
     if (ImGui::Checkbox("Wheel spin", &spin)) {
@@ -551,6 +738,40 @@ void drawOverlayPanel() {
     }
     if (runtime().wantTrack() && !runtime().trackReady() && runtime().trackError()[0] != '\0') {
         ImGui::TextColored(theme::danger(), "%s", runtime().trackError());
+    }
+    ImGui::Separator();
+    if (ImGui::Checkbox("OSM 3D", &gMaps.on)) {
+        if (!gMaps.on) {
+            photon_maps3d_show(0);
+        }
+        gMaps.restart = true;
+    }
+    theme::pushSmallFont();
+    ImGui::TextWrapped(
+        "OpenStreetMap tiles and DEM are cached in this browser. "
+        "No API key. Tab switches keep the world warm.");
+    theme::popSmallFont();
+    ImGui::Combo("No-GPS fallback", &gMaps.preset, "COTA\0Austin downtown\0");
+    if (gMaps.haveFix) {
+        ImGui::TextColored(theme::success(), "GPS  %.5f  %.5f", gMaps.lastLat, gMaps.lastLon);
+    } else {
+        ImGui::TextColored(theme::warning(), "No GPS fix: using fallback");
+    }
+    ImGui::Checkbox("Follow car", &gMaps.follow);
+    theme::pushSmallFont();
+    ImGui::TextWrapped("Left-drag pans around the car. Zoom, orbit, and pitch are locked.");
+    theme::popSmallFont();
+    ImGui::SliderFloat("Model scale", &gMaps.scale, 0.2f, 20.0f, "%.2f");
+    ImGui::SliderFloat("Heading offset", &gMaps.headingOff, -180.0f, 180.0f, "%.0f deg");
+    ImGui::SliderFloat("Camera range", &gMaps.range, 20.0f, 400.0f, "%.0f m");
+    ImGui::SliderFloat("Camera tilt", &gMaps.tilt, 20.0f, 85.0f, "%.0f deg");
+    char mapsStatus[160]{};
+    photon_maps3d_status(mapsStatus, static_cast<int>(sizeof(mapsStatus)));
+    ImGui::TextColored(theme::mutedFg(), "%s", mapsStatus[0] != '\0' ? mapsStatus : "off");
+    if (gMaps.haveFix) {
+        ImGui::TextColored(theme::success(), "Car GPS  %0.6f  %0.6f", gMaps.lastLat, gMaps.lastLon);
+    } else {
+        ImGui::TextColored(theme::warning(), "Waiting for car GPS…");
     }
     const auto& model = runtime().model();
     ImGui::TextColored(theme::mutedFg(), "%s  %u tris  %d draws", model.name.c_str(),
@@ -571,10 +792,47 @@ void drawOverlayPanel() {
 
 }  // namespace
 
-void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay) {
+#ifndef __EMSCRIPTEN__
+bool scene3dGpuEnabled() {
+    const char* off = std::getenv("PHOTON_GL3D");
+    // Default on. PHOTON_GL3D=0 disables GPU if it misbehaves.
+    if (off != nullptr && off[0] == '0') {
+        return false;
+    }
+    return true;
+}
+#else
+bool scene3dGpuEnabled() { return true; }
+#endif
+
+void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay, bool hostMaps) {
     if (size.x < 8.0f || size.y < 8.0f) {
         return;
     }
+#ifndef __EMSCRIPTEN__
+    if (!scene3dGpuEnabled()) {
+        ImGui::BeginChild("gl3d-desktop-stub", size, ImGuiChildFlags_None);
+        ImGui::TextColored(theme::mutedFg(), "3D GPU view is off in the desktop build.");
+        ImGui::TextColored(theme::mutedFg(), "Use Plots / Analysis to debug catalog. PHOTON_GL3D=1 forces it.");
+        ImGui::EndChild();
+        return;
+    }
+    // Parsing newCar.glb on the first frame blocked the WS hello for ~40s.
+    if (!arena.haveActiveSource) {
+        ImGui::BeginChild("gl3d-wait", size, ImGuiChildFlags_None);
+        ImGui::TextColored(theme::mutedFg(), "Connecting…");
+        ImGui::EndChild();
+        return;
+    }
+    static int sWarmFrames = 0;
+    if (sWarmFrames < 8) {
+        ++sWarmFrames;
+        ImGui::BeginChild("gl3d-warm", size, ImGuiChildFlags_None);
+        ImGui::TextColored(theme::mutedFg(), "Loading 3D model…");
+        ImGui::EndChild();
+        return;
+    }
+#endif
     runtime().ensure();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 cursor = ImGui::GetCursorPos();
@@ -594,16 +852,247 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay) {
         th = 1080;
     }
 
-    const unsigned tex = runtime().render(arena, tw, th);
-    ImGui::InvisibleButton("##gl3d_orbit", size);
-    handleOrbit();
-    if (tex != 0) {
-        ImDrawList* draw = ImGui::GetWindowDrawList();
-        draw->AddImage(ImTextureRef(static_cast<ImTextureID>(tex)), ImGui::GetItemRectMin(),
-                       ImGui::GetItemRectMax(), ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+    auto mapsAnchor = [&](double& useLat, double& useLon) {
+        const SignalMap& map = arena.signalMap();
+        const ResolvedScalar* latSlot = map.scalar("gps_lat");
+        const ResolvedScalar* lonSlot = map.scalar("gps_lon");
+        const SignalRing* latRing = (latSlot != nullptr && latSlot->mapped) ? arena.ring(latSlot->id) : nullptr;
+        const SignalRing* lonRing = (lonSlot != nullptr && lonSlot->mapped) ? arena.ring(lonSlot->id) : nullptr;
+        useLat = gMaps.preset == 1 ? kPresetAustinLat : kPresetCotaLat;
+        useLon = gMaps.preset == 1 ? kPresetAustinLon : kPresetCotaLon;
+        if (arena.consumeMapsReset()) {
+            gMaps.gps.reset();
+            gMaps.haveFix = false;
+        }
+        auto takeFix = [&](double lat, double lon) {
+            // History sometimes ships DBC raw (microdegrees) instead of physical.
+            if (std::fabs(lat) > 90.0 && std::fabs(lat) < 9.0e7) {
+                lat *= 1.0e-6;
+            }
+            if (std::fabs(lon) > 180.0 && std::fabs(lon) < 1.8e8) {
+                lon *= 1.0e-6;
+            }
+            if (!std::isfinite(lat) || !std::isfinite(lon) || (lat == 0.0 && lon == 0.0) ||
+                std::fabs(lat) > 90.0 || std::fabs(lon) > 180.0) {
+                return false;
+            }
+            const ResolvedScalar* validSlot = map.scalar("gps_valid");
+            if (validSlot != nullptr && validSlot->mapped) {
+                double valid = 1.0;
+                if (!arena.cursorValue(validSlot->id, valid)) {
+                    valid = arena.readout(validSlot->id, 1.0);
+                }
+                // Valid=0 still carries the last WGS84 sample. Rejecting it
+                // left OSM on COTA even when the catalog pin had coordinates.
+                if (valid <= 0.5) {
+                    std::fprintf(stderr, "[maps] gps_valid=%.2f: using lat/lon anyway\n", valid);
+                    std::fflush(stderr);
+                }
+            }
+            if (!gMaps.haveFix) {
+                gMaps.follow = true;
+            }
+            gMaps.lastLat = lat;
+            gMaps.lastLon = lon;
+            gMaps.haveFix = true;
+            useLat = lat;
+            useLon = lon;
+            return true;
+        };
+        if (arena.catalogPinned() || latRing == nullptr || lonRing == nullptr || latRing->count == 0 ||
+            lonRing->count == 0) {
+            double tileLat = 0.0;
+            double tileLon = 0.0;
+            const std::uint64_t cursor = arena.effectiveCursorMs();
+            auto readGps = [&]() {
+                if (latSlot == nullptr || !latSlot->mapped || lonSlot == nullptr || !lonSlot->mapped) {
+                    return false;
+                }
+                if (arena.cursorValue(latSlot->id, tileLat) && arena.cursorValue(lonSlot->id, tileLon) &&
+                    !(tileLat == 0.0 && tileLon == 0.0)) {
+                    return true;
+                }
+                const auto span = arena.tiles().sessionMaxMs() > arena.tiles().sessionMinMs()
+                                      ? arena.tiles().sessionMaxMs() - arena.tiles().sessionMinMs()
+                                      : 600000ull;
+                if (arena.tiles().sampleNear(latSlot->id, cursor, tileLat, span) &&
+                    arena.tiles().sampleNear(lonSlot->id, cursor, tileLon, span) &&
+                    !(tileLat == 0.0 && tileLon == 0.0)) {
+                    return true;
+                }
+                return arena.tiles().sampleFirstAbs(latSlot->id, tileLat, 0.01) &&
+                       arena.tiles().sampleFirstAbs(lonSlot->id, tileLon, 0.01);
+            };
+            if (readGps() && takeFix(tileLat, tileLon)) {
+                static double sLoggedLat = 1e9;
+                if (std::fabs(tileLat - sLoggedLat) > 1e-5) {
+                    sLoggedLat = tileLat;
+                    std::fprintf(stderr, "[maps] catalog GPS %.6f %.6f cursor=%llu ids=%u,%u\n", tileLat,
+                                 tileLon, static_cast<unsigned long long>(cursor), latSlot->id, lonSlot->id);
+                    std::fflush(stderr);
+                }
+                return;
+            }
+            static int sMiss = 0;
+            if (sMiss < 12) {
+                ++sMiss;
+                std::fprintf(stderr,
+                             "[maps] catalog GPS miss mapped=%d/%d cursor=%llu lat=%.6f lon=%.6f read=%d\n",
+                             latSlot != nullptr && latSlot->mapped ? 1 : 0,
+                             lonSlot != nullptr && lonSlot->mapped ? 1 : 0,
+                             static_cast<unsigned long long>(cursor), tileLat, tileLon, readGps() ? 1 : 0);
+                std::fflush(stderr);
+            }
+            if (gMaps.haveFix) {
+                useLat = gMaps.lastLat;
+                useLon = gMaps.lastLon;
+            }
+            return;
+        }
+        const double oldest = std::min(latRing->firstTs(), lonRing->firstTs());
+        const double newest = std::max(latRing->lastTs(), lonRing->lastTs());
+        const auto& tl = arena.timeline();
+        const bool playing = tl.mode == static_cast<std::uint8_t>(proto::TimelineMode::Play) ||
+                             tl.mode == static_cast<std::uint8_t>(proto::TimelineMode::Live);
+        const std::uint64_t cursorMs = arena.displayCursorMs();
+        const bool haveCursor = tl.maxTimeMs > tl.minTimeMs && cursorMs != 0;
+        if (gMaps.haveFix && (std::fabs(latRing->latest - gMaps.lastLat) > 0.08 ||
+                              std::fabs(lonRing->latest - gMaps.lastLon) > 0.08)) {
+            gMaps.gps.reset();
+            gMaps.haveFix = false;
+        }
+        const float dtMs = playing ? ImGui::GetIO().DeltaTime * 1000.0f : 0.0f;
+        gMaps.gps.advance(newest, oldest, static_cast<double>(dtMs), playing, static_cast<double>(cursorMs),
+                          haveCursor);
+        const interp::GpsFix fix =
+            gMaps.gps.sample(latRing->t.data(), latRing->v.data(), latRing->count, latRing->cap, latRing->write,
+                             lonRing->t.data(), lonRing->v.data(), lonRing->count, lonRing->cap, lonRing->write);
+        if (!fix.ok) {
+            if (gMaps.haveFix) {
+                useLat = gMaps.lastLat;
+                useLon = gMaps.lastLon;
+            }
+            return;
+        }
+        double valid = 1.0;
+        const ResolvedScalar* validSlot = map.scalar("gps_valid");
+        const bool validMapped = validSlot != nullptr && validSlot->mapped;
+        if (validMapped && !arena.interpolate(validSlot->id, fix.playMs, valid)) {
+            valid = arena.readout(validSlot->id, 1.0);
+        }
+        if (validMapped && valid <= 0.5) {
+            if (gMaps.haveFix) {
+                useLat = gMaps.lastLat;
+                useLon = gMaps.lastLon;
+            }
+            return;
+        }
+        if (!gMaps.haveFix) {
+            gMaps.follow = true;
+        }
+        gMaps.lastLat = fix.lat;
+        gMaps.lastLon = fix.lon;
+        gMaps.heading = fix.headingDeg;
+        gMaps.haveFix = true;
+        useLat = fix.lat;
+        useLon = fix.lon;
+    };
+
+    double useLat = kPresetAustinLat;
+    double useLon = kPresetAustinLon;
+    mapsAnchor(useLat, useLon);
+    const bool wantMaps = gMaps.on && (overlay || hostMaps);
+    const float dpi = (fb > 0.0f) ? fb : 1.0f;
+    static float sLayout[4]{-1.0f, -1.0f, -1.0f, -1.0f};
+    static int sCar = -1;
+    static bool sShown = false;
+    static bool sStarted = false;
+    static double sStartLat = 1e9;
+    static double sStartLon = 1e9;
+    if (gMaps.restart) {
+        sStarted = false;
+        sCar = -1;
+        gMaps.restart = false;
+    }
+    if (wantMaps) {
+        const float panel = overlay ? 308.0f : 0.0f;
+        const float lx = (origin.x + panel) / dpi;
+        const float ly = origin.y / dpi;
+        const float lw = std::max(8.0f, size.x - panel) / dpi;
+        const float lh = size.y / dpi;
+        if (std::fabs(lx - sLayout[0]) > 0.5f || std::fabs(ly - sLayout[1]) > 0.5f ||
+            std::fabs(lw - sLayout[2]) > 0.5f || std::fabs(lh - sLayout[3]) > 0.5f) {
+            sLayout[0] = lx;
+            sLayout[1] = ly;
+            sLayout[2] = lw;
+            sLayout[3] = lh;
+        }
+        photon_maps3d_layout(lx, ly, lw, lh);
+        // OSM overlay always uses the display body. new_dyn is chassis-only;
+        // native GLES keeps the Model combo for dynamics when OSM is off.
+        const int car = static_cast<int>(CarSlot::NewCar);
+        const bool jumped = sStarted && (std::fabs(useLat - sStartLat) > 0.002 ||
+                                         std::fabs(useLon - sStartLon) > 0.002);
+        if (sCar != car || !sStarted || jumped) {
+            sCar = car;
+            sStarted = true;
+            sStartLat = useLat;
+            sStartLon = useLon;
+            std::fprintf(stderr, "[maps] start %.6f %.6f haveFix=%d\n", useLat, useLon, gMaps.haveFix ? 1 : 0);
+            std::fflush(stderr);
+            photon_maps3d_start(useLat, useLon, kCarUrls[car]);
+        }
     } else {
-        ImGui::SetCursorPos(cursor);
-        ImGui::TextColored(theme::danger(), "3D renderer failed to initialize");
+        sShown = false;
+        sCar = -1;
+        sStarted = false;
+        sStartLat = 1e9;
+        sStartLon = 1e9;
+    }
+    const bool mapsLive = wantMaps && photon_maps3d_ready() != 0;
+    const bool mapsHosted = wantMaps && photon_maps3d_hosted() != 0;
+    if (!overlay) {
+        gMaps.follow = true;
+    }
+    if (mapsHosted || mapsLive) {
+        runtime().tick(arena);
+        ImGui::Dummy(size);
+        if (mapsOverlayBlockedByPopup()) {
+            photon_maps3d_show(0);
+        } else {
+            photon_maps3d_pose(useLat, useLon, gMaps.heading + static_cast<double>(gMaps.headingOff),
+                               static_cast<double>(gMaps.scale), static_cast<double>(gMaps.range),
+                               static_cast<double>(gMaps.tilt), gMaps.follow ? 1 : 0);
+            photon_maps3d_show(1);
+            sShown = true;
+        }
+    } else {
+        if (!wantMaps) {
+            photon_maps3d_show(0);
+        }
+        ImGui::InvisibleButton("##gl3d_orbit", size);
+        handleOrbit();
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const unsigned tex = runtime().render(arena, tw, th);
+        if (tex != 0) {
+            draw->AddImage(ImTextureRef(static_cast<ImTextureID>(static_cast<std::uintptr_t>(tex))), min,
+                           max, ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+        } else {
+            ImGui::SetCursorPos(cursor);
+            ImGui::TextColored(theme::danger(), "3D renderer failed to initialize");
+        }
+        if (wantMaps) {
+            char mapsStatus[160]{};
+            photon_maps3d_status(mapsStatus, static_cast<int>(sizeof(mapsStatus)));
+            const char* line = mapsStatus[0] != '\0' ? mapsStatus : "Loading OSM 3D…";
+            const ImVec2 ts = ImGui::CalcTextSize(line);
+            const ImVec2 tp((min.x + max.x - ts.x) * 0.5f, min.y + 18.0f);
+            draw->AddRectFilled(ImVec2(tp.x - 10.0f, tp.y - 6.0f), ImVec2(tp.x + ts.x + 10.0f, tp.y + ts.y + 6.0f),
+                                theme::u32(theme::withAlpha(theme::card(), 0.9f)), 6.0f);
+            draw->AddText(tp, theme::u32(theme::warning()), line);
+        }
     }
     drawHud(origin, size);
     if (overlay) {
@@ -612,11 +1101,48 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay) {
     }
 }
 
+namespace {
+bool gMapsHoldOff = false;
+}
+
+void hideMaps3d() { photon_maps3d_show(0); }
+
+void setMapsOverlayHoldOff(bool on) {
+    gMapsHoldOff = on;
+    if (on) {
+        photon_maps3d_show(0);
+    }
+}
+
+bool mapsOverlayHoldOff() { return gMapsHoldOff; }
+
+void setMaps3dInteractive(bool on) { photon_maps3d_interactive(on ? 1 : 0); }
+
+void drawMaps3dKeyRow() {
+    char mapsStatus[160]{};
+    photon_maps3d_status(mapsStatus, static_cast<int>(sizeof(mapsStatus)));
+    ImGui::TextColored(theme::mutedFg(), "%s", mapsStatus[0] != '\0' ? mapsStatus : "OSM 3D");
+}
+
 void drawScene3DTile(ClientArena& arena, ImVec2 size) {
-    runtime().ensure();
     theme::beginCard("dock3d", size, theme::card());
     ImGui::TextColored(theme::primary(), "3D");
     ImGui::SameLine();
+    if (gMaps.haveFix) {
+        ImGui::TextColored(theme::success(), "GPS  %0.5f  %0.5f", gMaps.lastLat, gMaps.lastLon);
+    } else {
+        ImGui::TextColored(theme::warning(), "No GPS fix");
+    }
+    ImGui::SameLine();
+#ifndef __EMSCRIPTEN__
+    if (!scene3dGpuEnabled()) {
+        ImGui::TextColored(theme::mutedFg(), "GPU off");
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        drawScene3DView(arena, avail, false, true);
+        theme::endCard();
+        return;
+    }
+#endif
     ImGui::TextColored(theme::mutedFg(), "%s", runtime().model().name.c_str());
     if (runtime().loading()) {
         ImGui::SameLine();
@@ -627,7 +1153,7 @@ void drawScene3DTile(ClientArena& arena, ImVec2 size) {
         drawSyntheticWatermark();
     }
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    drawScene3DView(arena, avail, false);
+    drawScene3DView(arena, avail, false, true);
     theme::endCard();
 }
 

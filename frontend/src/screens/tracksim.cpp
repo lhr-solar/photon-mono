@@ -1,5 +1,7 @@
+#include "photon/tracksim.hpp"
 #include "photon_ui/client.hpp"
 #include "photon_ui/screen.hpp"
+#include "photon_ui/signal_map.hpp"
 #include "photon_ui/theme.hpp"
 
 #include "imgui.h"
@@ -13,12 +15,12 @@
 namespace photon::ui {
 namespace {
 
-constexpr float kDefaultMassKg = 280.0f;
-constexpr float kDefaultCda = 0.12f;
-constexpr float kDefaultCrr = 0.0045f;
-constexpr float kDefaultMotorW = 3500.0f;
+constexpr double kDefaultSoc = 0.90;
+constexpr double kDefaultSolarW = 850.0;
 constexpr double kMpsToKmh = 3.6;
 constexpr double kDebounceS = 0.30;
+constexpr float kBudgetMinS = 90.0f;
+constexpr float kBudgetMaxS = 1200.0f;
 
 void formatMmSs(double seconds, char* buf, std::size_t n) {
     if (!std::isfinite(seconds) || seconds < 0.0) {
@@ -54,7 +56,7 @@ void dEdTExplanation(double dEdT, char* buf, std::size_t n) {
 }
 
 void drawSummaryCard(const char* id, const char* label, const char* value, ImVec4 valueColor, ImVec2 size) {
-    theme::beginCard(id, size, theme::card());
+    theme::beginCard(id, size, theme::card(), theme::kStripPadding);
     ImGui::TextColored(theme::mutedFg(), "%s", label);
     ImGui::TextColored(valueColor, "%s", value);
     theme::endCard();
@@ -95,6 +97,11 @@ void TrackSimScreen::syncPartsFromBudget() {
     budgetSec_ = total % 60;
 }
 
+void TrackSimScreen::queueSolve() {
+    debouncePending_ = true;
+    debounceUntilS_ = ImGui::GetTime() + kDebounceS;
+}
+
 void TrackSimScreen::sendSolve(UiContext& ui) {
     debouncePending_ = false;
     const auto& tracks = ui.arena.trackSim.tracks;
@@ -110,31 +117,22 @@ void TrackSimScreen::sendSolve(UiContext& ui) {
         ui.arena.trackSim.error = "time budget must be positive";
         return;
     }
-    float soc = initialSoc_;
-    if (soc < 0.0f) {
-        soc = 0.0f;
-        initialSoc_ = 0.0f;
-    }
-    if (soc > 1.0f) {
-        soc = 1.0f;
-        initialSoc_ = 1.0f;
+
+    const tracksim::MeasuredDrive& m = ui.arena.trackSim.measured;
+    double soc = kDefaultSoc;
+    if (m.havePackV && std::isfinite(m.socEst) && m.socEst > 0.0) {
+        soc = m.socEst;
+        if (soc > 1.0) {
+            soc = 1.0;
+        }
     }
 
     tracksim::CarOverride car;
-    if (massKg_ != kDefaultMassKg) {
-        car.massKg = static_cast<double>(massKg_);
+    if (m.haveArray && std::isfinite(m.arrayWMean) && m.arrayWMean >= 0.0) {
+        car.solarW = m.arrayWMean;
     }
-    if (cdaM2_ != kDefaultCda) {
-        car.cdaM2 = static_cast<double>(cdaM2_);
-    }
-    if (crr_ != kDefaultCrr) {
-        car.crr = static_cast<double>(crr_);
-    }
-    if (motorPowerW_ != kDefaultMotorW) {
-        car.motorPowerW = static_cast<double>(motorPowerW_);
-    }
-    ui.client.requestTrackSim(tracks[static_cast<std::size_t>(trackIndex_)].id, static_cast<double>(budgetS_),
-                              static_cast<double>(soc), car);
+    ui.client.requestTrackSim(tracks[static_cast<std::size_t>(trackIndex_)].id, static_cast<double>(budgetS_), soc,
+                              car);
 }
 
 void TrackSimScreen::draw(UiContext& ui) {
@@ -155,6 +153,7 @@ void TrackSimScreen::draw(UiContext& ui) {
                     break;
                 }
             }
+            queueSolve();
         }
     }
 
@@ -169,8 +168,9 @@ void TrackSimScreen::draw(UiContext& ui) {
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float gap = theme::kGridGap;
-    const float left = 300.0f;
+    const float left = 328.0f;
 
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, theme::kStripPadding);
     ImGui::BeginChild("##tracksim-ctrl", ImVec2(left, avail.y),
                       ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::Text("Track Sim");
@@ -196,6 +196,7 @@ void TrackSimScreen::draw(UiContext& ui) {
                 const char* label = info.name.empty() ? info.id.c_str() : info.name.c_str();
                 if (ImGui::Selectable(label, isSel)) {
                     trackIndex_ = i;
+                    queueSolve();
                 }
                 if (isSel) {
                     ImGui::SetItemDefaultFocus();
@@ -206,41 +207,94 @@ void TrackSimScreen::draw(UiContext& ui) {
         ImGui::TextColored(theme::mutedFg(), "%.0f m · %d segments", selected.lengthM, selected.segmentCount);
     }
 
+    if (ui.client.helloOk() && ImGui::GetTime() - lastMeasurePollS_ > 2.5) {
+        lastMeasurePollS_ = ImGui::GetTime();
+        ui.client.requestTrackSimList();
+    }
+
+    const tracksim::MeasuredDrive& m = sim.measured;
+    double trackLenM = 0.0;
+    if (!sim.tracks.empty() && trackIndex_ >= 0 && trackIndex_ < static_cast<int>(sim.tracks.size())) {
+        trackLenM = sim.tracks[static_cast<std::size_t>(trackIndex_)].lengthM;
+    }
+
     ImGui::Spacing();
-    ImGui::Text("Time budget");
+    const float liveH = m.have ? (m.haveSpeed ? 118.0f : 96.0f) : 80.0f;
+    theme::beginCard("measured", ImVec2(-1.0f, liveH), theme::card(), ImVec2(8.0f, 6.0f));
+    theme::pushSmallFont();
+    ImGui::TextColored(theme::mutedFg(), "Live / this log");
+    if (!m.have) {
+        ImGui::TextWrapped("Play replay or connect until pack V and array power arrive. Solar and starting SOC come from there.");
+        theme::popSmallFont();
+    } else {
+        if (m.haveArray) {
+            ImGui::Text("Solar %0.0f W  (array, used by solver)", m.arrayWMean);
+        } else {
+            ImGui::Text("Solar %.0f W  (car default, no array yet)", kDefaultSolarW);
+        }
+        if (m.havePackV) {
+            ImGui::Text("Start SOC %0.0f%%  (%0.1f V pack)", m.socEst * 100.0, m.packVMean);
+        } else {
+            ImGui::Text("Start SOC %.0f%%  (default)", kDefaultSoc * 100.0);
+        }
+        if (m.haveSpeed) {
+            ImGui::Text("Speed %0.1f m/s  max %0.1f", m.speedMpsMean, m.speedMpsMax);
+        }
+        ImGui::TextColored(theme::mutedFg(), "%d samp · %0.0f s", m.samples, m.windowS);
+        theme::popSmallFont();
+    }
+    theme::endCard();
+
+    ImGui::Spacing();
+    ImGui::Text("Target time");
+    theme::pushSmallFont();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(theme::mutedFg(),
+                       "How long this lap should take. More time = slower, cheaper. Less time = faster, more energy.");
+    ImGui::PopTextWrapPos();
+    theme::popSmallFont();
     ImGui::SetNextItemWidth(80.0f);
     if (ImGui::InputInt("min", &budgetMin_)) {
         syncBudgetFromParts();
+        queueSolve();
     }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(80.0f);
     if (ImGui::InputInt("sec", &budgetSec_)) {
         syncBudgetFromParts();
+        queueSolve();
     }
-    if (ImGui::SliderFloat("##budget", &budgetS_, 90.0f, 1200.0f, "%.0f s")) {
+    if (ImGui::SliderFloat("##budget", &budgetS_, kBudgetMinS, kBudgetMaxS, "%.0f s")) {
         syncPartsFromBudget();
-        if (!sim.tracks.empty()) {
-            debouncePending_ = true;
-            debounceUntilS_ = ImGui::GetTime() + kDebounceS;
-        }
+        queueSolve();
     }
-
-    ImGui::Spacing();
-    if (ImGui::InputFloat("Initial SOC", &initialSoc_, 0.05f, 0.10f, "%.2f")) {
-        if (initialSoc_ < 0.0f) {
-            initialSoc_ = 0.0f;
-        }
-        if (initialSoc_ > 1.0f) {
-            initialSoc_ = 1.0f;
-        }
+    if (trackLenM > 1.0 && budgetS_ > 0.0f) {
+        const double vMps = trackLenM / static_cast<double>(budgetS_);
+        theme::pushSmallFont();
+        const double speedScale = useMph_ ? kMpsToMph : kMpsToKmh;
+        const char* speedUnit = useMph_ ? "mph" : "km/h";
+        ImGui::TextColored(theme::mutedFg(), "Average %.1f %s  (%.1f m/s) over %.2f km", vMps * speedScale, speedUnit,
+                           vMps, trackLenM / 1000.0);
+        theme::popSmallFont();
     }
-
-    if (ImGui::CollapsingHeader("Car overrides")) {
-        ImGui::TextColored(theme::mutedFg(), "Leave at defaults to use the backend car.");
-        ImGui::InputFloat("Mass (kg)", &massKg_, 1.0f, 10.0f, "%.1f");
-        ImGui::InputFloat("CdA (m^2)", &cdaM2_, 0.005f, 0.02f, "%.3f");
-        ImGui::InputFloat("Crr", &crr_, 0.0005f, 0.001f, "%.4f");
-        ImGui::InputFloat("Motor (W)", &motorPowerW_, 50.0f, 250.0f, "%.0f");
+    if (m.haveSpeed && m.speedMpsMean > 0.5 && trackLenM > 1.0) {
+        const double paceS = trackLenM / m.speedMpsMean;
+        char paceBuf[16];
+        formatMmSs(paceS, paceBuf, sizeof(paceBuf));
+        theme::pushSmallFont();
+        ImGui::TextColored(theme::mutedFg(), "Logged pace would take %s", paceBuf);
+        theme::popSmallFont();
+        if (ImGui::Button("Match logged pace", ImVec2(-1.0f, 0.0f))) {
+            budgetS_ = static_cast<float>(paceS);
+            if (budgetS_ < kBudgetMinS) {
+                budgetS_ = kBudgetMinS;
+            }
+            if (budgetS_ > kBudgetMaxS) {
+                budgetS_ = kBudgetMaxS;
+            }
+            syncPartsFromBudget();
+            queueSolve();
+        }
     }
 
     ImGui::Spacing();
@@ -268,12 +322,13 @@ void TrackSimScreen::draw(UiContext& ui) {
         ImGui::PopTextWrapPos();
     }
     ImGui::EndChild();
+    ImGui::PopStyleVar();
 
     ImGui::SameLine(0.0f, gap);
     ImGui::BeginChild("##tracksim-main", ImVec2(avail.x - left - gap, avail.y), ImGuiChildFlags_None);
 
     const ImVec2 main = ImGui::GetContentRegionAvail();
-    const float summaryH = 72.0f;
+    const float summaryH = 56.0f;
     const float explainH = 22.0f;
     const float toggleH = 28.0f;
     const float bannerH = (sim.haveResult && !sim.feasible) ? 36.0f : 0.0f;
@@ -314,10 +369,10 @@ void TrackSimScreen::draw(UiContext& ui) {
     }
 
     const ImVec4 badgeColor = !sim.haveResult ? theme::mutedFg() : (sim.feasible ? theme::success() : theme::danger());
-    const char* badge = !sim.haveResult ? "—" : (sim.feasible ? "FEASIBLE" : "INFEASIBLE");
+    const char* badge = !sim.haveResult ? "--" : (sim.feasible ? "FEASIBLE" : "INFEASIBLE");
     drawSummaryCard("sum-feas", "Status", badge, badgeColor, ImVec2(cardW, summaryH));
     ImGui::SameLine(0.0f, gap);
-    drawSummaryCard("sum-time", "Time vs budget", slackBuf, theme::foreground(), ImVec2(cardW, summaryH));
+    drawSummaryCard("sum-time", "Time vs target", slackBuf, theme::foreground(), ImVec2(cardW, summaryH));
     ImGui::SameLine(0.0f, gap);
     drawSummaryCard("sum-wh", "Energy", energyBuf, theme::foreground(), ImVec2(cardW, summaryH));
     ImGui::SameLine(0.0f, gap);
@@ -330,13 +385,13 @@ void TrackSimScreen::draw(UiContext& ui) {
         dEdTExplanation(sim.dEdT, explain, sizeof(explain));
         ImGui::TextColored(theme::mutedFg(), "%s", explain);
     } else {
-        ImGui::TextColored(theme::mutedFg(), "Solve a track to get a recommended speed profile.");
+        ImGui::TextColored(theme::mutedFg(), "Set a target time and Solve. Drag the slider to see speed vs energy.");
     }
 
     if (bannerH > 0.0f) {
         theme::beginCard("infeas-banner", ImVec2(main.x, bannerH), theme::withAlpha(theme::danger(), 0.22f),
                          theme::CardFit::Band);
-        ImGui::TextColored(theme::danger(), "Time budget too tight — profile shown is at limits");
+        ImGui::TextColored(theme::danger(), "Time budget too tight: profile shown is at limits");
         theme::endCard();
     }
 
@@ -381,6 +436,7 @@ void TrackSimScreen::draw(UiContext& ui) {
         }
     }
 
+    theme::pushPlotFont();
     if (ImPlot::BeginPlot("##speed-profile", ImVec2(-1.0f, speedH))) {
         ImPlot::SetupAxes("distance (km)", speedUnit);
         ImPlot::SetupAxis(ImAxis_Y2, "grade", ImPlotAxisFlags_AuxDefault);
@@ -411,6 +467,7 @@ void TrackSimScreen::draw(UiContext& ui) {
         }
         ImPlot::EndPlot();
     }
+    theme::popPlotFont();
 
     ImGui::EndChild();
 }

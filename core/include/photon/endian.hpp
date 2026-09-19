@@ -26,6 +26,12 @@ inline void writeU64Le(std::vector<std::uint8_t>& out, std::uint64_t v) {
     writeU32Le(out, static_cast<std::uint32_t>(v >> 32));
 }
 
+inline void writeF32Le(std::vector<std::uint8_t>& out, float v) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    writeU32Le(out, bits);
+}
+
 inline void writeF64Le(std::vector<std::uint8_t>& out, double v) {
     std::uint64_t bits = 0;
     std::memcpy(&bits, &v, sizeof(bits));
@@ -83,6 +89,15 @@ inline bool readU64Le(std::span<const std::uint8_t> in, std::size_t& off, std::u
         return false;
     }
     v = static_cast<std::uint64_t>(lo) | (static_cast<std::uint64_t>(hi) << 32);
+    return true;
+}
+
+inline bool readF32Le(std::span<const std::uint8_t> in, std::size_t& off, float& v) {
+    std::uint32_t bits = 0;
+    if (!readU32Le(in, off, bits)) {
+        return false;
+    }
+    std::memcpy(&v, &bits, sizeof(v));
     return true;
 }
 

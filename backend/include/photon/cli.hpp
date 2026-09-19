@@ -14,8 +14,17 @@ struct Options {
     std::string assetsDir;
     std::string videoHost;
     std::uint16_t videoPort = 6700;
-    ctrl::SourceKind source = ctrl::SourceKind::Synthetic;
+    std::uint16_t videoUdpPort = 6800;
+    std::string videoUdpHost;  // empty = videoHost. Oracle live tee is 10.66.0.1.
+    ctrl::SourceKind source = ctrl::SourceKind::DaqTcp;
     std::string logPath;
+    std::string tsdbDir;
+    bool writeLiveTail = true;
+    std::string password;
+    // Empty = off (default). Loopback host:port of grok-analyst, e.g. 127.0.0.1:18765.
+    std::string analysisCompute;
+    // Empty = auto (daq_host:8080 when daq_host is not loopback). "off" disables.
+    std::string historyRemote;
 };
 
 void usage(const char* argv0);

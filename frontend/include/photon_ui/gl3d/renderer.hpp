@@ -90,7 +90,9 @@ struct Lights {
     Vec3 fillDir{-0.55f, 0.40f, -0.35f};
     Vec3 fillColor{0.80f, 0.55f, 0.38f};
     Vec3 ambient{0.52f, 0.54f, 0.60f};
+    Vec3 camPos{0.0f, 1.2f, 2.4f};
     Vec3 clearColor{0.12f, 0.12f, 0.13f};
+    float clearAlpha = 1.0f;
     float exposure = 2.0f;
 };
 
@@ -136,6 +138,7 @@ private:
     int uFillDir_ = -1;
     int uFillColor_ = -1;
     int uExposure_ = -1;
+    int uCamPos_ = -1;
     int uBaseColor_ = -1;
     int uTex_ = -1;
     int uHasTex_ = -1;
