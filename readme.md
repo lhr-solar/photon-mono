@@ -2,7 +2,7 @@
 
 Photon Server is the ingest server on the **PC** (CANP, video store, fan-out, observer). It starts `photon-index --live-fanout` so the TSDB is written on this machine, and a **local UI** (`photon-backend` + `photon.html`) pointed at loopback fan-out. That local UI is how you watch the car when you are sitting at the PC. The laptop runs its own client when you want a different source (USB PCAN, another host). Oracle is a pipe *to* this process (public IP + WireGuard DNAT).
 
-Telemetry rides the lightweight CANP wire protocol over TCP. Incoming H.264 from the car/pit is accepted as RTP/UDP, stored as a **separate** compressed elementary stream (never re-encoded), and served via GOP pointers — see [docs/video-protocol.md](docs/video-protocol.md) for the wire format.
+Telemetry rides the lightweight CANP wire protocol over TCP. Incoming H.264 from the car/pit is accepted as RTP/UDP, stored as a **separate** compressed elementary stream (never re-encoded), and served via GOP pointers. See [docs/video-protocol.md](docs/video-protocol.md) for the wire format.
 
 ## Architecture
 
