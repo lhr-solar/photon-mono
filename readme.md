@@ -252,6 +252,8 @@ Observer JSON includes a `video` object: `listening`, `bytes_stored`, `segment_c
 
 ### Option A: Docker & Docker Compose (Recommended)
 
+Production is the Windows native exe via a scheduled task (`scripts/install-autostart.ps1` → `scripts/ensure-running.ps1`); Docker is optional.
+
 1. Start the container with persistent storage:
 
 ```bash
@@ -289,7 +291,7 @@ sudo chown -R photon:photon /var/lib/photon
 3. Install the systemd unit file:
 
 ```bash
-sudo cp photon-server.service /etc/systemd/system/
+sudo cp scripts/photon-server.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now photon-server.service
 ```

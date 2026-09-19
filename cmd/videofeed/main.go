@@ -31,7 +31,7 @@ import (
 func main() {
 	mode := flag.String("mode", "dump", "dump | feed | probe")
 	out := flag.String("out", "gen.h264", "output path for -mode dump")
-	rtpAddr := flag.String("rtp", "127.0.0.1:6800", "RTP ingress address")
+	rtpAddr := flag.String("rtp", "127.0.0.1:6200", "RTP ingress address")
 	rtcpAddr := flag.String("rtcp", "127.0.0.1:6801", "RTCP address")
 	videoAddr := flag.String("video", "127.0.0.1:6700", "video client address")
 	gops := flag.Int("gops", 4, "number of GOPs")

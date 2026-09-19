@@ -11,7 +11,7 @@ Environment="PHOTON_HOST=0.0.0.0"
 Environment="PHOTON_INGRESS_PORT=6100"
 Environment="PHOTON_CLIENT_PORT=6500"
 Environment="PHOTON_OBSERVER_PORT=5400"
-Environment="PHOTON_VIDEO_INGRESS_PORT=6600"
+Environment="PHOTON_VIDEO_INGRESS_PORT=6200"
 Environment="PHOTON_VIDEO_CLIENT_PORT=6700"
 Environment="PHOTON_DATA_DIR=/var/lib/photon/data"
 ExecStart=/usr/local/bin/photon-server
