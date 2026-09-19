@@ -24,28 +24,18 @@ add_executable(photon-tests
     ${CMAKE_SOURCE_DIR}/tools/photon-index/live_fanout.cpp
     test_video.cpp
     test_video_index.cpp
-    ${CMAKE_SOURCE_DIR}/backend/src/cli.cpp
-    ${CMAKE_SOURCE_DIR}/backend/src/analysis_compute.cpp
-    ${CMAKE_SOURCE_DIR}/backend/src/csv_export.cpp
-    ${CMAKE_SOURCE_DIR}/backend/src/history_remote.cpp
-    ${CMAKE_SOURCE_DIR}/backend/src/net.cpp
-    ${CMAKE_SOURCE_DIR}/backend/src/session.cpp
-    ${CMAKE_SOURCE_DIR}/backend/src/source.cpp
-    ${CMAKE_SOURCE_DIR}/backend/src/track_catalog.cpp
-    ${CMAKE_SOURCE_DIR}/backend/src/video_relay.cpp
-    ${CMAKE_SOURCE_DIR}/backend/src/websocket.cpp
-    ${CMAKE_SOURCE_DIR}/frontend/src/tile_cache.cpp
-    ${CMAKE_SOURCE_DIR}/frontend/src/analysis_runtime.cpp
-    ${CMAKE_SOURCE_DIR}/frontend/src/analysis_workbook.cpp
-    ${CMAKE_SOURCE_DIR}/frontend/src/analysis_eval.cpp
-    ${CMAKE_SOURCE_DIR}/frontend/src/tile_store.cpp
+    ${CMAKE_SOURCE_DIR}/photon/ui/src/tile_cache.cpp
+    ${CMAKE_SOURCE_DIR}/photon/ui/src/analysis_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/photon/ui/src/analysis_workbook.cpp
+    ${CMAKE_SOURCE_DIR}/photon/ui/src/analysis_eval.cpp
+    ${CMAKE_SOURCE_DIR}/photon/ui/src/tile_store.cpp
 )
 
-target_link_libraries(photon-tests PRIVATE photon-core photon-export-lib)
+target_link_libraries(photon-tests PRIVATE photon-core photon-export-lib photon_daemon)
 target_include_directories(photon-tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/backend/include
-    ${CMAKE_SOURCE_DIR}/frontend/include
+    ${CMAKE_SOURCE_DIR}/photon/daemon/include
+    ${CMAKE_SOURCE_DIR}/photon/ui/include
     ${CMAKE_SOURCE_DIR}/tools/photon-index
 )
 
