@@ -1,15 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 )
-
-const observerAddress = ":5400"
 
 var ingressStats struct {
 	listening      atomic.Bool
@@ -61,6 +61,7 @@ type ServerMetadata struct {
 	Clients     ClientsMetadata `json:"clients"`
 	Queue       QueueMetadata   `json:"queue"`
 	Storage     StorageMetadata `json:"storage"`
+	Video       VideoMetadata   `json:"video"`
 }
 
 type QueueMetadata struct {
@@ -102,6 +103,14 @@ type ClientMetadata struct {
 	WriteFailures uint64    `json:"write_failures"`
 }
 
+type VideoMetadata struct {
+	Listening     bool   `json:"listening"`
+	BytesStored   uint64 `json:"bytes_stored"`
+	SegmentCount  int    `json:"segment_count"`
+	LiveClients   int    `json:"live_clients"`
+	LastReceiveMS int64  `json:"last_receive_ms"`
+}
+
 type ClientsMetadata struct {
 	Listening      bool             `json:"listening"`
 	Active         int              `json:"active"`
@@ -116,34 +125,59 @@ type ClientsMetadata struct {
 }
 
 func listenForObservers(
+	ctx context.Context,
+	listener net.Listener,
 	startedAt time.Time,
 	store *StreamStore,
 	clients *ClientTracker,
 	ingress <-chan []byte,
+	video *VideoStore,
+	gate *ClientGate,
+	connWg *sync.WaitGroup,
 ) {
-	listener, err := net.Listen("tcp", observerAddress)
-	if err != nil {
-		panic(err)
-	}
-	defer listener.Close()
-
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			continue
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				continue
+			}
 		}
-		go writeServerMetadata(conn, startedAt, store, clients, ingress)
+		connWg.Add(1)
+		go func(c net.Conn) {
+			defer connWg.Done()
+			if !admitAndAuth(gate, c) {
+				_ = c.Close()
+				return
+			}
+			defer gate.Release(c)
+			writeServerMetadata(ctx, c, startedAt, store, clients, ingress, video)
+		}(conn)
 	}
 }
 
 func writeServerMetadata(
+	ctx context.Context,
 	conn net.Conn,
 	startedAt time.Time,
 	store *StreamStore,
 	clients *ClientTracker,
 	ingress <-chan []byte,
+	video *VideoStore,
 ) {
 	defer conn.Close()
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
 
 	encoder := json.NewEncoder(conn)
 	ticker := time.NewTicker(time.Second)
@@ -186,12 +220,31 @@ func writeServerMetadata(
 				BlockedMS: blockedNS / int64(time.Millisecond),
 			},
 			Storage: storageMetadata(storage),
+			Video:   videoMetadata(video),
 		}
 		if err := encoder.Encode(metadata); err != nil {
 			return
 		}
-		<-ticker.C
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
+}
+
+func videoMetadata(store *VideoStore) VideoMetadata {
+	meta := VideoMetadata{
+		Listening:     videoRuntime.ingressListening.Load(),
+		LiveClients:   int(videoRuntime.liveClients.Load()) + int(videoUdpRuntime.subs.Load()),
+		LastReceiveMS: videoRuntime.lastReceiveMS.Load(),
+	}
+	if store != nil {
+		stats := store.Stats()
+		meta.BytesStored = stats.BytesStored
+		meta.SegmentCount = stats.SegmentCount
+	}
+	return meta
 }
 
 func storageMetadata(snapshot StoreSnapshot) StorageMetadata {

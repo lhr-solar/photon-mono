@@ -19,7 +19,6 @@ const (
 	frameHeaderBytes      = 24
 	frameMagic            = uint32(0x56534431)
 	storeInspectBytes     = 20 + 64*29
-	streamDir             = "/home/ubuntu/logs/"
 	segmentSize           = 256 * 1024 * 1024
 	hotTailBytes          = 32 * 1024 * 1024
 	diskHighWatermarkByte = 8 * 1024 * 1024 * 1024
@@ -74,6 +73,7 @@ type StreamStore struct {
 	cond *sync.Cond
 
 	segmentsDir string
+	closed      bool
 
 	nextID          MessageID
 	oldestID        MessageID
@@ -91,8 +91,8 @@ type StreamStore struct {
 	diskBytes int64
 }
 
-func OpenStreamStore() (*StreamStore, error) {
-	segmentsDir := filepath.Join(streamDir, "segments")
+func OpenStreamStore(dataDir string) (*StreamStore, error) {
+	segmentsDir := filepath.Join(dataDir, "segments")
 	if err := os.MkdirAll(segmentsDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -117,6 +117,10 @@ func OpenStreamStore() (*StreamStore, error) {
 func (s *StreamStore) Append(payload []byte) (MessageID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.closed {
+		return 0, errors.New("stream store is closed")
+	}
 
 	if s.activeOffset+int64(frameHeaderBytes+len(payload)) > segmentSize && s.activeOffset > 0 {
 		if err := s.rotateActiveSegmentLocked(); err != nil {
@@ -161,14 +165,25 @@ func (s *StreamStore) Append(payload []byte) (MessageID, error) {
 
 func (s *StreamStore) ReadOrWait(id MessageID) (Message, error) {
 	for {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return Message{}, errors.New("stream store is closed")
+		}
+		s.mu.Unlock()
+
 		msg, ok, err := s.Read(id)
 		if err != nil || ok {
 			return msg, err
 		}
 
 		s.mu.Lock()
-		for id >= s.nextID {
+		for id >= s.nextID && !s.closed {
 			s.cond.Wait()
+		}
+		if s.closed {
+			s.mu.Unlock()
+			return Message{}, errors.New("stream store is closed")
 		}
 		s.mu.Unlock()
 	}
@@ -329,21 +344,29 @@ func (s *StreamStore) CompactBefore(id MessageID) error {
 
 func (s *StreamStore) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	s.cond.Broadcast()
 
 	var firstErr error
 	if s.activeFile != nil {
 		if err := s.activeFile.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		s.activeFile = nil
 	}
 	for _, segment := range s.segments {
 		if segment.readFile != nil {
 			if err := segment.readFile.Close(); err != nil && firstErr == nil {
 				firstErr = err
 			}
+			segment.readFile = nil
 		}
 	}
+	s.mu.Unlock()
 	return firstErr
 }
 

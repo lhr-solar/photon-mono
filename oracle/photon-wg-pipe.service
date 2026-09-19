@@ -1,0 +1,13 @@
+[Unit]
+Description=Photon Oracle WireGuard DNAT pipe to MACBOOK
+After=network-online.target wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/photon-wg-pipe.sh apply
+ExecStop=/usr/local/sbin/photon-wg-pipe.sh remove
+
+[Install]
+WantedBy=multi-user.target

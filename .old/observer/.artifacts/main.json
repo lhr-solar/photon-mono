@@ -1,1 +1,0 @@
-{ "directory": "/home/pablo/documents/systems/server/observer", "file": "main.cpp", "output": ".artifacts/main.o", "arguments": ["/usr/bin/clang++", "-xc++", "main.cpp", "-o", ".artifacts/main.o", "--driver-mode=g++", "-std=c++23", "-fprebuilt-module-path=.artifacts", "-c", "--target=x86_64-pc-linux-gnu"]},

@@ -4,8 +4,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"image/color"
+	"io"
 	"net"
 	"os"
 	"sort"
@@ -33,6 +36,15 @@ type metadata struct {
 	Clients     clients   `json:"clients"`
 	Queue       queue     `json:"queue"`
 	Storage     storage   `json:"storage"`
+	Video       videoMeta `json:"video"`
+}
+
+type videoMeta struct {
+	Listening     bool   `json:"listening"`
+	BytesStored   uint64 `json:"bytes_stored"`
+	SegmentCount  int    `json:"segment_count"`
+	LiveClients   int    `json:"live_clients"`
+	LastReceiveMS int64  `json:"last_receive_ms"`
 }
 
 type ingress struct {
@@ -1431,13 +1443,112 @@ func newModel(decoder *json.Decoder) model {
 	return m
 }
 
+func normalizeAddress(input string, defaultHost string, defaultPort int) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return net.JoinHostPort(defaultHost, strconv.Itoa(defaultPort))
+	}
+
+	// If input is purely digits, treat as port on defaultHost
+	if portNum, err := strconv.Atoi(input); err == nil && portNum > 0 && portNum <= 65535 {
+		return net.JoinHostPort(defaultHost, input)
+	}
+
+	// If input is a raw IP address (IPv4 or IPv6 like "::1" or "192.168.1.1"), append defaultPort
+	if ip := net.ParseIP(input); ip != nil {
+		return net.JoinHostPort(input, strconv.Itoa(defaultPort))
+	}
+
+	// If input starts with single colon (e.g. ":5400"), prepend defaultHost
+	if strings.HasPrefix(input, ":") && !strings.HasPrefix(input, "::") {
+		return net.JoinHostPort(defaultHost, input[1:])
+	}
+
+	// Try splitting host and port
+	host, port, err := net.SplitHostPort(input)
+	if err == nil {
+		if host == "" {
+			host = defaultHost
+		}
+		return net.JoinHostPort(host, port)
+	}
+
+	// No port was present, treat input as hostname
+	return net.JoinHostPort(input, strconv.Itoa(defaultPort))
+}
+
+func parseObserverConfig(args []string, getenv func(string) string, output io.Writer) (string, error) {
+	defaultAddr := "127.0.0.1:5400"
+	if envAddr := strings.TrimSpace(getenv("PHOTON_OBSERVER_ADDR")); envAddr != "" {
+		defaultAddr = envAddr
+	} else if envAddr := strings.TrimSpace(getenv("PHOTON_SERVER_ADDR")); envAddr != "" {
+		defaultAddr = envAddr
+	}
+
+	fs := flag.NewFlagSet("photon-observer", flag.ContinueOnError)
+	fs.SetOutput(output)
+
+	var addrFlag string
+	fs.StringVar(&addrFlag, "addr", defaultAddr, "Server telemetry address [host:port]")
+	fs.StringVar(&addrFlag, "server", defaultAddr, "Alias for -addr")
+
+	fs.Usage = func() {
+		fmt.Fprintf(output, "Usage of photon-observer:\n")
+		fmt.Fprintf(output, "  photon-observer [flags] [server_address]\n\n")
+		fmt.Fprintf(output, "Flags:\n")
+		fmt.Fprintf(output, "  -addr, -server string  Server telemetry address (default %q, env: PHOTON_OBSERVER_ADDR)\n\n", "127.0.0.1:5400")
+		fmt.Fprintf(output, "Examples:\n")
+		fmt.Fprintf(output, "  photon-observer\n")
+		fmt.Fprintf(output, "  photon-observer -addr 192.168.1.100:5400\n")
+		fmt.Fprintf(output, "  photon-observer 192.168.1.100:5400\n")
+	}
+
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+
+	addr := addrFlag
+	if fs.NArg() > 0 {
+		addr = fs.Arg(0)
+	}
+
+	return normalizeAddress(addr, "127.0.0.1", 5400), nil
+}
+
+func writeClientAuth(w io.Writer, password string) error {
+	if password == "" || len(password) > 64 {
+		return fmt.Errorf("invalid password")
+	}
+	buf := make([]byte, 5+len(password))
+	copy(buf[:4], "PHAU")
+	buf[4] = byte(len(password))
+	copy(buf[5:], password)
+	_, err := w.Write(buf)
+	return err
+}
+
 func main() {
-	conn, err := net.Dial("tcp", "3.141.38.115:5400")
+	addr, err := parseObserverConfig(os.Args[1:], os.Getenv, os.Stderr)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to connect to photon server at %s: %v\n", addr, err)
 		os.Exit(1)
 	}
 	defer conn.Close()
+	if password := strings.TrimSpace(os.Getenv("PHOTON_PASSWORD")); password != "" {
+		if err := writeClientAuth(conn, password); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to authenticate: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	m := newModel(json.NewDecoder(conn))
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

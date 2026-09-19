@@ -1,1 +1,0 @@
-{ "directory": "/home/pablo/documents/systems/server/observer", "file": "../lib/tui/lib/sphere.cppm", "output": ".artifacts/sphere.pcm", "arguments": ["/usr/bin/clang++", "-xc++-module", "../lib/tui/lib/sphere.cppm", "-o", ".artifacts/sphere.pcm", "--driver-mode=g++", "-std=c++23", "--precompile", "--target=x86_64-pc-linux-gnu"]},

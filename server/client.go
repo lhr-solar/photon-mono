@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -104,9 +105,62 @@ func (t *ClientTracker) Count() int {
 	return len(t.clients)
 }
 
-func writeClient(conn net.Conn, client *Client, store *StreamStore, tracker *ClientTracker) {
+func listenForClients(
+	ctx context.Context,
+	listener net.Listener,
+	store *StreamStore,
+	tracker *ClientTracker,
+	gate *ClientGate,
+	connWg *sync.WaitGroup,
+) {
+	tracker.listening.Store(true)
+	defer tracker.listening.Store(false)
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				tracker.acceptFailures.Add(1)
+				continue
+			}
+		}
+		connWg.Add(1)
+		go func(c net.Conn) {
+			defer connWg.Done()
+			if !admitAndAuth(gate, c) {
+				_ = c.Close()
+				return
+			}
+			defer gate.Release(c)
+			client := tracker.Register(c.RemoteAddr().String(), store.StartIDForNewClient())
+			writeClient(ctx, c, client, store, tracker)
+		}(conn)
+	}
+}
+
+func writeClient(
+	ctx context.Context,
+	conn net.Conn,
+	client *Client,
+	store *StreamStore,
+	tracker *ClientTracker,
+) {
 	defer conn.Close()
 	defer tracker.Unregister(client)
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+
 	nextID := MessageID(client.nextID.Load())
 	for {
 		msg, err := store.ReadOrWait(nextID)

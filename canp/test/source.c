@@ -9,11 +9,10 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
-#include <math.h>
 
 #include "../canp.h"
 
-#define SERVER_IP "3.141.38.115"
+#define DEFAULT_SERVER_IP "127.0.0.1"
 #define SERVER_I_PORT 6100
 #define SERVER_O_PORT 6500
 
@@ -25,8 +24,8 @@ uint64_t currentTimeMillis(void) {
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
-int connectTCP(void) {
-    int sock = {};
+int connectTCP(const char *server_ip) {
+    int sock = -1;
     struct sockaddr_in server = {};
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if(sock < 0) return -1;
@@ -39,7 +38,7 @@ int connectTCP(void) {
     memset(&server, 0, sizeof(server));
     server.sin_family = AF_INET;
     server.sin_port = htons(SERVER_I_PORT);
-    inet_pton(AF_INET, SERVER_IP, &server.sin_addr);
+    inet_pton(AF_INET, server_ip, &server.sin_addr);
 
     if(connect(sock, (struct sockaddr*)&server, sizeof(server)) == 0) return sock;
 
@@ -47,9 +46,23 @@ int connectTCP(void) {
     return -1;
 }
 
-int main(){
+int main(int argc, char **argv){
+    const char *server_ip = DEFAULT_SERVER_IP;
+    if(argc > 1) {
+        server_ip = argv[1];
+    } else {
+        const char *env_ip = getenv("PHOTON_SERVER_IP");
+        if(env_ip && strlen(env_ip) > 0) {
+            server_ip = env_ip;
+        }
+    }
+
+    printf("Connecting CANP source to %s:%d...\n", server_ip, SERVER_I_PORT);
     int sock = -1;
-    while(sock < 0) sock = connectTCP();
+    while(sock < 0) {
+        sock = connectTCP(server_ip);
+        if(sock < 0) usleep(100 * 1000);
+    }
     printf("connected\n");
     int seq = 0;
     canpBatch_t batch;
@@ -73,4 +86,4 @@ int main(){
         seq++;
         usleep(10*1000);
     }
-};
+}

@@ -1,6 +1,0 @@
-#!/bin/sh
-set -eu
-
-make -C "$(dirname "$0")" build
-mv "$(dirname "$0")"/.artifacts/observer .
-./observer

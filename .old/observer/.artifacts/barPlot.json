@@ -1,1 +1,0 @@
-{ "directory": "/home/pablo/documents/systems/server/observer", "file": ".artifacts/barPlot.pcm", "output": ".artifacts/barPlot.o", "arguments": ["/usr/bin/clang++", "-xpcm", ".artifacts/barPlot.pcm", "-o", ".artifacts/barPlot.o", "--driver-mode=g++", "-std=c++23", "-c", "--target=x86_64-pc-linux-gnu"]},

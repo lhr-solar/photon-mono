@@ -1,0 +1,17 @@
+[Unit]
+Description=Photon Oracle raw CANP tee (car :6100 -> store + PHAU clients)
+After=network-online.target photon-wg-pipe.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PHOTON_PASSWORD=laptop
+Environment=PHOTON_STORE=10.66.0.2:6100
+Environment=PHOTON_INGRESS_PORT=6100
+Environment=PHOTON_FANOUT_PORT=6110
+ExecStart=/usr/bin/python3 /usr/local/sbin/photon-raw-relay.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,3 +1,4 @@
+# compiled test / sample binaries
 client/client
 server/server
 source/source
@@ -10,3 +11,35 @@ observer/tui
 server/main
 canp/test/source_test
 canp/test/sink_test
+
+# Windows / Go build outputs
+*.exe
+*.o
+*.pcm
+.artifacts/
+.old/**/.artifacts/
+.old/**/client
+.old/**/observer
+.old/**/server
+.old/**/source
+
+# runtime data, logs, agent scratch
+data/
+*.log
+__pycache__/
+_stage/*.exe
+_stage/*.log
+_stage/*.vpt
+_stage/*.err
+_stage/photon-edge-profile/
+
+# WASM UI is built from photon-next; local copies are deploy artifacts
+ui/photon.wasm
+ui/photon.js
+ui/photon.data
+
+# host-local SSH authorized_keys for photon-sshd
+authorized_keys
+sshd/authorized_keys
+scripts/*.log
+scripts/*.err

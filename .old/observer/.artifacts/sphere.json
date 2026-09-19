@@ -1,1 +1,0 @@
-{ "directory": "/home/pablo/documents/systems/server/observer", "file": ".artifacts/sphere.pcm", "output": ".artifacts/sphere.o", "arguments": ["/usr/bin/clang++", "-xpcm", ".artifacts/sphere.pcm", "-o", ".artifacts/sphere.o", "--driver-mode=g++", "-std=c++23", "-c", "--target=x86_64-pc-linux-gnu"]},

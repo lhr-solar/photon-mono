@@ -1,1 +1,0 @@
-{ "directory": "/home/pablo/documents/systems/server/observer", "file": ".artifacts/progressBar.pcm", "output": ".artifacts/progressBar.o", "arguments": ["/usr/bin/clang++", "-xpcm", ".artifacts/progressBar.pcm", "-o", ".artifacts/progressBar.o", "--driver-mode=g++", "-std=c++23", "-c", "--target=x86_64-pc-linux-gnu"]},

@@ -1,0 +1,34 @@
+services:
+  photon-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: photon-server:latest
+    container_name: photon-server
+    restart: unless-stopped
+    ports:
+      # Ingress (CANP stream ingestion)
+      - "6100:6100"
+      # Fan-out (downstream clients)
+      - "6500:6500"
+      # Observer (JSON telemetry / TUI monitor)
+      - "5400:5400"
+      # Video ingress (RTP/H.264)
+      - "6600:6600/udp"
+      # Video live/replay clients
+      - "6700:6700"
+    environment:
+      - PHOTON_HOST=0.0.0.0
+      - PHOTON_INGRESS_PORT=6100
+      - PHOTON_CLIENT_PORT=6500
+      - PHOTON_OBSERVER_PORT=5400
+      - PHOTON_VIDEO_INGRESS_PORT=6600
+      - PHOTON_VIDEO_CLIENT_PORT=6700
+      - PHOTON_DATA_DIR=/data
+    volumes:
+      # Persistent storage for segments
+      - photon-data:/data
+
+volumes:
+  photon-data:
+    driver: local
