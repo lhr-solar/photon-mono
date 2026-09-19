@@ -4,7 +4,11 @@ add_library(photon_daemon STATIC
     src/csv_export.cpp
     src/history_remote.cpp
     src/session.cpp
-    src/source.cpp
+    src/sources/daq_tcp.cpp
+    src/sources/log_replay.cpp
+    src/sources/pcan_source.cpp
+    src/sources/source_hub.cpp
+    src/sources/synthetic.cpp
     src/track_catalog.cpp
     src/video_relay.cpp
 )
