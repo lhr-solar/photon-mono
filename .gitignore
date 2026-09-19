@@ -27,11 +27,11 @@ canp/test/sink_test
 data/
 *.log
 __pycache__/
-_stage/*.exe
-_stage/*.log
-_stage/*.vpt
-_stage/*.err
-_stage/photon-edge-profile/
+_stage/
+
+# host-local SSH host keys (generated next to the exe)
+ssh_host_ed25519
+ssh_host_ed25519.pub
 
 # WASM UI is built from photon-next; local copies are deploy artifacts
 ui/photon.wasm
