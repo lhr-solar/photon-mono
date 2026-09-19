@@ -1,5 +1,5 @@
 # Capture photon-next WebGL 3D with RenderDoc (Chrome GPU process, not Photon.exe).
-# Usage: .\frontend\scripts\renderdoc-capture.ps1
+# Usage: .\web\scripts\renderdoc-capture.ps1
 
 $ErrorActionPreference = "Continue"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
@@ -13,7 +13,7 @@ $Ui = "C:\Program Files\RenderDoc\qrenderdoc.exe"
 $Port = 8080
 $Url = "http://127.0.0.1:$Port/photon.html?screen=scene3d"
 
-if (-not (Test-Path $Html)) { throw "photon.html missing. Run frontend/scripts/build.ps1" }
+if (-not (Test-Path $Html)) { throw "photon.html missing. Run web/scripts/build.ps1" }
 if (-not (Test-Path $Chrome)) { throw "Chrome not found at $Chrome" }
 if (-not (Test-Path $Cmd)) { throw "RenderDoc not found at $Cmd" }
 

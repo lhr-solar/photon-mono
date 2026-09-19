@@ -50,7 +50,7 @@ if(PHOTON_FRONTEND)
     if(NOT EMSCRIPTEN)
         message(FATAL_ERROR
             "PHOTON_FRONTEND=ON requires the Emscripten toolchain.\n"
-            "Use frontend/scripts/build.ps1 or:\n"
+            "Use web/scripts/build.ps1 or:\n"
             "  emcmake cmake -S . -B .artifacts-web -G Ninja -DPHOTON_FRONTEND=ON -DBUILD_TESTING=OFF")
     endif()
     add_subdirectory(photon)
