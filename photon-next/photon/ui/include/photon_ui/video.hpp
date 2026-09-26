@@ -19,11 +19,10 @@ namespace photon::ui {
 //   2. Config-flag NALs (SPS/PPS) derive `avc1.PPCCLL` and configure the
 //      decoder with annexb (no avcC description).
 //   3. Key/delta NALs become EncodedVideoChunk; output VideoFrames are queued.
-//      Queue > 3 drops to the latest frame only. Because the UI uploads one
-//      frame per paint, NALs are released on a clock (Live) or on the cursor
-//      (replay) rather than on arrival: a GOP submitted in one go decodes to
-//      frames that are dropped unseen.
-//   4. Each UI frame, the latest VideoFrame is uploaded with
+//      Pending frames stay in decode order (cap 12). Each UI paint uploads
+//      the oldest pending frame so a GOP does not collapse to one still.
+//      Live still releases NALs on a wall clock; replay follows the cursor.
+//   4. Each UI frame, one VideoFrame is uploaded with
 //      `texImage2D(..., videoFrame)` on the Emscripten GL texture
 //      (`GL.textures[id]`). If that throws, fall back to OffscreenCanvas 2D
 //      `drawImage` then `texImage2D` from the canvas.
@@ -41,6 +40,9 @@ public:
     void feed(std::uint64_t timestampMs, std::uint8_t flags, std::span<const std::uint8_t> nal);
     void poll();
     void reset();
+    // True when the ring already has a keyframe and pictures through videoMs,
+    // so Play/Pause must not re-locate (that dumps a GOP and desyncs CAN).
+    bool hasVideoAt(std::uint64_t videoMs) const;
 
     bool hasFrame() const { return haveFrame_; }
     unsigned texture() const { return tex_; }

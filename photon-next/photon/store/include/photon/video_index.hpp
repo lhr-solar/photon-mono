@@ -164,8 +164,9 @@ enum class PlaybackMode : std::uint8_t {
     // Nothing is asking for video.
     Idle,
     // A drag is in progress. §9.8: zero backend round trips, so this never
-    // asks for a pointer, and §8.3: nearest keyframe only, because decoding
-    // forward to an exact cursor costs a whole GOP of decodes per position.
+    // asks for a pointer. Resident P-frames are released up to the cursor
+    // (same as Committed); a GOP that is not in the ring stays on its
+    // keyframe rather than fetching.
     Scrubbing,
     // A cursor was committed. Exact decode happens here.
     Committed,
@@ -196,6 +197,27 @@ inline constexpr std::uint64_t kLocateLeadMs = 400;
 // Same hold as photon-server videoLocateHoldMs. A GOP further from the
 // pinned session than this is another day's clip, not "keep the last still".
 inline constexpr std::uint64_t kReplayHoldMs = 2500;
+// Compressed-NAL budget for a pinned replay window (~1 minute of 720p).
+inline constexpr std::size_t kReplayCacheBudget = 16 * 1024 * 1024;
+
+// How many GOPs to pull on a historical locate so a 1-minute pin is resident
+// instead of one GOP (~1 s) at a time. Live t=0 must not use this.
+inline std::uint16_t replayPrefetchGops(std::uint64_t minCursorMs, std::uint64_t maxCursorMs) {
+    if (maxCursorMs <= minCursorMs) {
+        return 8;
+    }
+    const std::uint64_t span = maxCursorMs - minCursorMs;
+    std::uint64_t n = span / 800ull + 4ull;
+    if (n < 8) {
+        n = 8;
+    }
+    // First picture on a seek should land in one range-read, not a 16-GOP
+    // stall. Play keeps asking as the ring's newest timestamp is approached.
+    if (n > 4) {
+        n = 4;
+    }
+    return static_cast<std::uint16_t>(n);
+}
 
 inline bool videoOverlapsWindow(std::uint64_t startMs, std::uint64_t endMs, std::uint64_t minV,
                                 std::uint64_t maxV) {
@@ -229,6 +251,8 @@ public:
     void setReplayWindow(std::uint64_t minCursorMs, std::uint64_t maxCursorMs);
     void clearReplayWindow();
     bool replayWindowOn() const { return replayWindowOn_; }
+    std::uint64_t replayMinCursorMs() const { return replayMinCursorMs_; }
+    std::uint64_t replayMaxCursorMs() const { return replayMaxCursorMs_; }
     bool videoInReplayWindow(std::uint64_t videoMs) const;
     std::uint64_t firstReplayCoveredMs() const;
 
@@ -298,7 +322,7 @@ struct BufferedNal {
 // so it cannot grow with session length.
 class GopRing {
 public:
-    static constexpr std::size_t kDefaultBudget = 8 * 1024 * 1024;
+    static constexpr std::size_t kDefaultBudget = kReplayCacheBudget;
 
     void setBudget(std::size_t bytes) { budget_ = bytes == 0 ? kDefaultBudget : bytes; }
     std::size_t budget() const { return budget_; }

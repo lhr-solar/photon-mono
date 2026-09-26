@@ -52,9 +52,17 @@ EM_JS(void, photon_video_init, (), {
             lastKeyLen: 0,
             lastVclAt: 0,
             heldKey: false,
+            needKey: false,
+            spsCodec: "",
         };
     }
     const s = Module._photonVideo;
+    if (s.needKey === undefined) {
+        s.needKey = false;
+    }
+    if (s.spsCodec === undefined) {
+        s.spsCodec = "";
+    }
     s.startLen = function(bytes) {
         if (bytes.length >= 4 && bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 0 && bytes[3] === 1) {
             return 4;
@@ -138,20 +146,26 @@ EM_JS(void, photon_video_init, (), {
         }
         return data;
     };
+    s.dropAU = function() {
+        s.auParts = [];
+        s.auKey = false;
+        s.auTs = -1;
+    };
     s.flushAU = function(forceOutput) {
         if (!s.auParts || !s.auParts.length || !s.configured || !s.decoder) {
-            if (s.auParts) {
-                s.auParts = [];
-            }
-            s.auKey = false;
+            s.dropAU();
             return;
         }
         const data = s.concatParts();
         const isKey = s.auKey;
         const ts = s.auTs;
-        s.auParts = [];
-        s.auKey = false;
+        s.dropAU();
         if (!data) {
+            return;
+        }
+        // Chrome rejects type:'delta' after configure() or flush() until the
+        // next IDR. Catalog Play used to flush the key then feed P-frames.
+        if (!isKey && s.needKey) {
             return;
         }
         try {
@@ -161,17 +175,23 @@ EM_JS(void, photon_video_init, (), {
                 data: data,
             }));
             s.heldKey = !!isKey;
+            if (isKey) {
+                s.needKey = false;
+            }
             // Still GOP only: Chrome holds the IDR until flush() or another
             // chunk. Play/live must not flush() after a key or the next
             // P-frame has no reference and the picture goes blocky.
             if (forceOutput && isKey && s.decoder.state === 'configured') {
                 s.heldKey = false;
+                s.needKey = true;
                 s.decoder.flush().catch(function(err) {
                     s.error = err && err.message ? String(err.message) : String(err);
+                    s.needKey = true;
                 });
             }
         } catch (e) {
             s.error = e && e.message ? String(e.message) : String(e);
+            s.needKey = true;
         }
     };
 });
@@ -208,6 +228,8 @@ EM_JS(void, photon_video_reset, (), {
     s.lastKeyLen = 0;
     s.lastVclAt = 0;
     s.heldKey = false;
+    s.needKey = false;
+    s.spsCodec = "";
 });
 
 EM_JS(void, photon_video_copy_error, (int ptr, int cap), {
@@ -256,20 +278,22 @@ EM_JS(void, photon_video_feed, (int ptr, int len, double tsMs, int flags), {
             s.decoder = new VideoDecoder({
                 output: function(frame) {
                     s.pending.push(frame);
-                    if (s.pending.length > 3) {
-                        const latest = s.pending.pop();
-                        for (const f of s.pending) {
-                            try {
-                                f.close();
-                            } catch (e) {
-                            }
+                    // Keep a short in-order queue. Collapsing to the newest
+                    // frame made a GOP submitted in one tick play as one still.
+                    while (s.pending.length > 12) {
+                        try {
+                            s.pending.shift().close();
+                        } catch (e) {
                         }
-                        s.pending = [latest];
                     }
                 },
                 error: function(err) {
                     s.error = err && err.message ? String(err.message) : String(err);
                     s.configured = false;
+                    s.needKey = true;
+                    if (s.dropAU) {
+                        s.dropAU();
+                    }
                     try {
                         if (s.decoder) {
                             s.decoder.close();
@@ -286,17 +310,6 @@ EM_JS(void, photon_video_feed, (int ptr, int len, double tsMs, int flags), {
         return true;
     };
 
-    const sameNal = function(a, b) {
-        if (!a || !b || a.length !== b.length) {
-            return false;
-        }
-        for (let i = 0; i < a.length; i++) {
-            if (a[i] !== b[i]) {
-                return false;
-            }
-        }
-        return true;
-    };
     if (!s.forEachNal) {
         s.forEachNal = function(buf) {
             return buf && buf.length ? [buf] : [];
@@ -318,12 +331,19 @@ EM_JS(void, photon_video_feed, (int ptr, int len, double tsMs, int flags), {
         if (t === 7 || t === 8) {
             // Car cameras restamp SPS/PPS on every access unit. Closing the
             // decoder on each copy cancels the in-flight IDR before output().
+            // Reconfigure only when profile/constraints/level actually change.
             if (t === 7) {
                 const copy = nal.slice();
-                const changed = !sameNal(s.sps, copy);
+                const codec = codecFromSps(copy);
+                const changed = s.spsCodec !== codec;
                 s.sps = copy;
+                s.spsCodec = codec;
                 if (changed) {
                     s.configured = false;
+                    s.needKey = true;
+                    if (s.dropAU) {
+                        s.dropAU();
+                    }
                     if (s.decoder) {
                         try {
                             s.decoder.close();
@@ -356,11 +376,13 @@ EM_JS(void, photon_video_feed, (int ptr, int len, double tsMs, int flags), {
                     hardwareAcceleration: 'prefer-software',
                 });
                 s.configured = true;
+                s.needKey = true;
                 s.error = "";
             } catch (e) {
                 try {
                     s.decoder.configure({codec: codecFromSps(s.sps), optimizeForLatency: true});
                     s.configured = true;
+                    s.needKey = true;
                     s.error = "";
                 } catch (e2) {
                     s.error = e2 && e2.message ? String(e2.message) : String(e2);
@@ -424,37 +446,54 @@ EM_JS(void, photon_video_end_au, (int force), {
         return;
     }
     s.heldKey = false;
+    s.needKey = true;
     s.decoder.flush().catch(function(err) {
         s.error = err && err.message ? String(err.message) : String(err);
+        s.needKey = true;
     });
 });
 
-EM_JS(int, photon_video_upload, (int glTex), {
+EM_JS(int, photon_video_upload, (int glTex, double cursorMs), {
     const s = Module._photonVideo;
     if (!s || s.pending.length === 0) {
         return 0;
     }
-    const frame = s.pending.pop();
-    for (const f of s.pending) {
-        try {
-            f.close();
-        } catch (e) {
+    let frame = null;
+    let keep = false;
+    if (cursorMs > 0) {
+        // EncodedVideoChunk timestamp is microseconds (auTs * 1000).
+        const curUs = cursorMs * 1000;
+        let best = -1;
+        for (let i = 0; i < s.pending.length; i++) {
+            if (s.pending[i].timestamp <= curUs) {
+                best = i;
+            }
         }
+        if (best < 0) {
+            return 0;
+        }
+        for (let i = 0; i < best; i++) {
+            try { s.pending[i].close(); } catch (e) {}
+        }
+        s.pending = s.pending.slice(best);
+        frame = s.pending[0];
+        keep = true;
+    } else {
+        frame = s.pending.shift();
     }
-    s.pending = [];
     s.width = frame.displayWidth | 0;
     s.height = frame.displayHeight | 0;
     const tex = (typeof GL !== 'undefined' && GL.textures) ? GL.textures[glTex] : null;
     if (!tex || typeof GLctx === 'undefined') {
-        s.pending = [frame];
+        if (!keep) {
+            s.pending.unshift(frame);
+        }
         return 0;
     }
     GLctx.bindTexture(GLctx.TEXTURE_2D, tex);
     try {
-        // Preferred path: WebGL2 texImage2D accepts VideoFrame directly.
         GLctx.texImage2D(GLctx.TEXTURE_2D, 0, GLctx.RGBA, GLctx.RGBA, GLctx.UNSIGNED_BYTE, frame);
     } catch (e) {
-        // Fallback: 2D blit then upload the canvas.
         if (!s.canvas) {
             s.canvas = new OffscreenCanvas(frame.displayWidth, frame.displayHeight);
             s.ctx2d = s.canvas.getContext('2d', {alpha: false});
@@ -472,9 +511,8 @@ EM_JS(int, photon_video_upload, (int glTex), {
     GLctx.texParameteri(GLctx.TEXTURE_2D, GLctx.TEXTURE_MAG_FILTER, GLctx.LINEAR);
     GLctx.texParameteri(GLctx.TEXTURE_2D, GLctx.TEXTURE_WRAP_S, GLctx.CLAMP_TO_EDGE);
     GLctx.texParameteri(GLctx.TEXTURE_2D, GLctx.TEXTURE_WRAP_T, GLctx.CLAMP_TO_EDGE);
-    try {
-        frame.close();
-    } catch (e) {
+    if (!keep) {
+        try { frame.close(); } catch (e) {}
     }
     return 1;
 });
@@ -487,7 +525,7 @@ void photon_video_copy_error(char* ptr, int cap);
 int photon_video_dim(int which);
 void photon_video_feed(const std::uint8_t* ptr, int len, double tsMs, int flags);
 void photon_video_end_au(int force);
-int photon_video_upload(unsigned glTex);
+int photon_video_upload(unsigned glTex, double cursorMs);
 }
 #endif
 
@@ -513,6 +551,13 @@ VideoDecoder::~VideoDecoder() {
 }
 
 bool VideoDecoder::supported() const { return photon_video_supported() != 0; }
+
+bool VideoDecoder::hasVideoAt(std::uint64_t videoMs) const {
+    if (videoMs == 0 || ring_.nals().empty()) {
+        return false;
+    }
+    return ring_.keyframeAtOrBefore(videoMs) >= 0 && videoMs <= ring_.newestMs() + 80;
+}
 
 void VideoDecoder::ensureTexture() {
     if (!supported() || tex_ != 0) {
@@ -711,8 +756,9 @@ void VideoDecoder::reenterAt(std::uint64_t keyframeVideoMs, std::uint64_t feedUp
         }
         submit(buffered);
     }
-    // Live must retain the keyframe reference for the following delta frames.
-    photon_video_end_au(mode_ == vidx::PlaybackMode::Live ? 0 : 1);
+    // Submit the current AU. Do not codec-flush: Chrome then requires the
+    // next chunk to be a key, and Live/Play immediately feed P-frames.
+    photon_video_end_au(0);
 }
 
 namespace {
@@ -862,7 +908,7 @@ void VideoDecoder::syncToCursor(const ClientArena& arena) {
             return;
         }
         if (haveDelta) {
-            photon_video_end_au(1);
+            photon_video_end_au(0);
             return;
         }
         if (forcedStillTries_ >= 8) {
@@ -898,14 +944,17 @@ void VideoDecoder::syncToCursor(const ClientArena& arena) {
     if (plan.requestLocate) {
         pendingLocateMs_ = plan.locateAtMs;
         havePendingLocate_ = true;
-    } else if (mode_ == vidx::PlaybackMode::Committed && !havePendingLocate_ && !plan.haveTarget &&
-               !ring_.nals().empty()) {
-        // Pointer rows do not cover this cursor. Jump-locate only when the
-        // playhead is well past the ring. In-GOP newest+1 polls re-fetched
-        // the same 90–500 NAL GOP every 400 ms and made seeking feel stuck.
+    } else if (!havePendingLocate_ && !ring_.nals().empty() &&
+               (mode_ == vidx::PlaybackMode::Committed || mode_ == vidx::PlaybackMode::Scrubbing)) {
         const std::uint64_t videoMs = vidx::videoMsForCursor(cursorMs, playback_.clockOffsetMs());
-        if (videoMs > ring_.newestMs() + 2000) {
-            pendingLocateMs_ = videoMs;
+        // Pointer rows are not bytes. A fat prefetch table used to suppress
+        // locate while the ring still held one GOP, so Play froze on a still.
+        const bool outsideRing = videoMs + 50 < ring_.oldestMs() || videoMs > ring_.newestMs() + 200;
+        const bool ringRunningOut =
+            mode_ == vidx::PlaybackMode::Committed && videoMs + vidx::kLocateLeadMs >= ring_.newestMs();
+        const bool beforeEnd = videoEndMs_ == 0 || ring_.newestMs() + 100 < videoEndMs_;
+        if (beforeEnd && (outsideRing || ringRunningOut)) {
+            pendingLocateMs_ = outsideRing ? (videoMs == 0 ? 1 : videoMs) : ring_.newestMs() + 1;
             havePendingLocate_ = true;
         }
     }
@@ -915,7 +964,7 @@ void VideoDecoder::syncToCursor(const ClientArena& arena) {
         const std::uint64_t videoMs = vidx::videoMsForCursor(cursorMs, playback_.clockOffsetMs());
         if (ring_.keyframeAtOrBefore(videoMs) >= 0 &&
             (releasedSeq_ == 0 || videoMs < lastCursorVideoMs_)) {
-            reenterAt(videoMs, mode_ == vidx::PlaybackMode::Scrubbing ? 0 : videoMs);
+            reenterAt(videoMs, videoMs);
         } else {
             releaseThrough(videoMs);
         }
@@ -1019,6 +1068,14 @@ void VideoDecoder::requestLocate(std::uint64_t atMs) {
     // A timeline seek must re-enter the GOP at the playhead, not keep
     // releasing forward from the previous still.
     lastCursorVideoMs_ = 0;
+    if (!ring_.nals().empty() && atMs != 0 &&
+        (atMs + 50 < ring_.oldestMs() || atMs > ring_.newestMs() + 2000)) {
+        ring_.clear();
+        releasedSeq_ = 0;
+        haveVcl_ = false;
+        batchFloorMs_ = 0;
+        haveFrame_ = false;
+    }
 }
 
 void VideoDecoder::cancelPendingLocate() {
@@ -1051,9 +1108,13 @@ void VideoDecoder::poll() {
         inited_ = true;
     }
     ensureTexture();
+    const double cursorMs =
+        (mode_ == vidx::PlaybackMode::Live || lastCursorVideoMs_ == 0)
+            ? 0.0
+            : static_cast<double>(lastCursorVideoMs_);
 #ifdef __EMSCRIPTEN__
     photon_video_end_au(0);
-    if (photon_video_upload(static_cast<int>(tex_)) != 0) {
+    if (photon_video_upload(static_cast<int>(tex_), cursorMs) != 0) {
         haveFrame_ = true;
         width_ = photon_video_dim(0);
         height_ = photon_video_dim(1);
@@ -1062,7 +1123,7 @@ void VideoDecoder::poll() {
     photon_video_copy_error(reinterpret_cast<int>(error_), static_cast<int>(sizeof(error_)));
 #else
     photon_video_end_au(0);
-    if (photon_video_upload(tex_) != 0) {
+    if (photon_video_upload(tex_, cursorMs) != 0) {
         haveFrame_ = true;
         width_ = photon_video_dim(0);
         height_ = photon_video_dim(1);
@@ -1070,6 +1131,13 @@ void VideoDecoder::poll() {
     }
     photon_video_copy_error(error_, static_cast<int>(sizeof(error_)));
 #endif
+    if (!haveFrame_ && std::strstr(error_, "key frame") != nullptr) {
+        releasedSeq_ = 0;
+        lastCursorVideoMs_ = 0;
+        liveReleaseMs_ = 0;
+        photon_video_reset();
+        error_[0] = '\0';
+    }
     if (pastVideoEnd_ && mode_ != vidx::PlaybackMode::Live) {
         haveFrame_ = false;
         std::snprintf(error_, sizeof(error_), "%s", kNoRunVideo);

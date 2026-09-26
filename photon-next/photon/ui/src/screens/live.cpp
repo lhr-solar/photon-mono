@@ -13,9 +13,11 @@
 namespace photon::ui {
 namespace {
 
-constexpr float kBarH = 44.0f;
-constexpr float kPaneBarH = 32.0f;
 constexpr float kSplitterW = 10.0f;
+
+float barHeight() {
+    return std::max(36.0f, ImGui::GetFrameHeight() + 10.0f);
+}
 
 bool paneToggle(const char* id, const char* label, bool on) {
     if (on) {
@@ -35,20 +37,21 @@ bool paneToggle(const char* id, const char* label, bool on) {
 void paneHeader(const char* title, bool* open) {
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     const float w = ImGui::GetContentRegionAvail().x;
-    ImGui::GetWindowDrawList()->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + kPaneBarH),
+    const float barH = std::max(28.0f, ImGui::GetFrameHeight());
+    ImGui::GetWindowDrawList()->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + barH),
                                               theme::u32(theme::titlebar()), 0.0f);
-    ImGui::Dummy(ImVec2(w, kPaneBarH));
-    ImGui::SetCursorScreenPos(ImVec2(p0.x + 10.0f, p0.y + 6.0f));
+    ImGui::Dummy(ImVec2(w, barH));
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + 10.0f, p0.y + std::max(2.0f, (barH - ImGui::GetFontSize()) * 0.5f)));
     ImGui::TextColored(theme::primary(), "%s", title);
     ImGui::SameLine();
-    ImGui::SetCursorScreenPos(ImVec2(p0.x + w - 28.0f, p0.y + 4.0f));
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + w - 28.0f, p0.y + std::max(2.0f, (barH - ImGui::GetFrameHeight()) * 0.5f)));
     ImGui::PushID(title);
     if (ImGui::SmallButton("x")) {
         *open = false;
     }
     ImGui::SetItemTooltip("Close pane");
     ImGui::PopID();
-    ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + kPaneBarH));
+    ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + barH));
 }
 
 }  // namespace
@@ -60,16 +63,18 @@ void LiveViewScreen::draw(UiContext& ui) {
     if (ui.client.helloOk() && showVideo_ && !ui.arena.video.subscribed && !ui.arena.catalogPinned()) {
         ui.client.goLive();
     }
-    videoDecoder().poll();
     if (showScene_) {
         ui.arena.signalMap().subscribe(ui.client, MapScreen::Scene3d);
     }
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float gap = theme::kGridGap;
+    const float barH = barHeight();
 
-    theme::beginCard("livebar", ImVec2(avail.x, kBarH), theme::card(), theme::kStripPadding,
+    theme::beginCard("livebar", ImVec2(avail.x, barH), theme::card(), theme::kStripPadding,
                      theme::CardFit::Band);
+    ImGui::BeginChild("##livebarscroll", ImVec2(std::max(1.0f, avail.x - 8.0f), std::max(1.0f, barH - 8.0f)),
+                      ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
     if (paneToggle("live3d", "3D", showScene_)) {
         showScene_ = !showScene_;
     }
@@ -111,10 +116,11 @@ void LiveViewScreen::draw(UiContext& ui) {
     }
     ImGui::SameLine();
     drawMaps3dKeyRow();
+    ImGui::EndChild();
     theme::endCard();
 
     const auto& v = ui.arena.video;
-    const float statusH = 28.0f;
+    const float statusH = std::max(24.0f, ImGui::GetFontSize() + 10.0f);
     theme::beginCard("livestat", ImVec2(avail.x, statusH), theme::muted(), theme::kStripPadding,
                      theme::CardFit::Band);
     if (!videoDecoder().supported()) {
@@ -138,18 +144,30 @@ void LiveViewScreen::draw(UiContext& ui) {
     }
     theme::endCard();
 
-    const float bodyH = std::max(1.0f, avail.y - kBarH - statusH - gap * 2.0f);
+    const float bodyH = std::max(1.0f, avail.y - barH - statusH - gap * 2.0f);
     const ImVec2 bodyMin = ImGui::GetCursorScreenPos();
     const float bodyW = std::max(avail.x, 2.0f);
-    const bool split = showScene_ && showVideo_ && bodyW > kSplitterW * 3.0f;
-    const float minPane = std::min(180.0f, bodyW * 0.22f);
+    // Side by side only when the window is wide enough for both panes.
+    // A narrow or tall window stacks 3D over video so neither is a sliver.
+    const bool wide = bodyW >= 980.0f && bodyW >= bodyH;
+    const bool split = showScene_ && showVideo_ && wide && bodyW > kSplitterW * 3.0f;
+    const bool stack = showScene_ && showVideo_ && !split;
+    const float minPane = std::min(180.0f, (split ? bodyW : bodyH) * 0.22f);
 
     float sceneW = 0.0f;
+    float sceneH = bodyH;
     float videoW = 0.0f;
+    float videoH = bodyH;
     if (split) {
         sceneW = std::clamp(bodyW * sceneFraction_, minPane, bodyW - minPane - kSplitterW);
         videoW = bodyW - sceneW - kSplitterW;
         sceneFraction_ = sceneW / bodyW;
+    } else if (stack) {
+        sceneW = bodyW;
+        videoW = bodyW;
+        sceneH = std::clamp(bodyH * sceneFraction_, minPane, bodyH - minPane - kSplitterW);
+        videoH = bodyH - sceneH - kSplitterW;
+        sceneFraction_ = sceneH / bodyH;
     } else if (showScene_) {
         sceneW = bodyW;
     } else if (showVideo_) {
@@ -166,7 +184,7 @@ void LiveViewScreen::draw(UiContext& ui) {
 
     if (showScene_) {
         ImGui::SetCursorScreenPos(bodyMin);
-        theme::beginCard("livescene", ImVec2(sceneW, bodyH), theme::background(), ImVec2(0.0f, 0.0f),
+        theme::beginCard("livescene", ImVec2(sceneW, sceneH), theme::background(), ImVec2(0.0f, 0.0f),
                          theme::CardFit::Band);
         paneHeader("3D", &showScene_);
         const ImVec2 sceneAvail = ImGui::GetContentRegionAvail();
@@ -176,14 +194,19 @@ void LiveViewScreen::draw(UiContext& ui) {
         hideMaps3d();
     }
 
-    if (split) {
-        ImGui::SetCursorScreenPos(ImVec2(bodyMin.x + sceneW, bodyMin.y));
-        ImGui::InvisibleButton("##LiveViewSplitter", ImVec2(kSplitterW, bodyH));
+    if (split || stack) {
+        const float along = split ? bodyW : bodyH;
+        const ImVec2 splitPos = split ? ImVec2(bodyMin.x + sceneW, bodyMin.y)
+                                      : ImVec2(bodyMin.x, bodyMin.y + sceneH);
+        const ImVec2 splitSz = split ? ImVec2(kSplitterW, sceneH) : ImVec2(bodyW, kSplitterW);
+        ImGui::SetCursorScreenPos(splitPos);
+        ImGui::InvisibleButton("##LiveViewSplitter", splitSz);
         const bool hovered = ImGui::IsItemHovered();
         const bool active = ImGui::IsItemActive();
-        if (active) {
-            sceneFraction_ = std::clamp(sceneFraction_ + ImGui::GetIO().MouseDelta.x / bodyW,
-                                        minPane / bodyW, 1.0f - minPane / bodyW - kSplitterW / bodyW);
+        if (active && along > 1.0f) {
+            const float delta = split ? ImGui::GetIO().MouseDelta.x : ImGui::GetIO().MouseDelta.y;
+            sceneFraction_ = std::clamp(sceneFraction_ + delta / along, minPane / along,
+                                        1.0f - minPane / along - kSplitterW / along);
         }
         const ImVec2 s0 = ImGui::GetItemRectMin();
         const ImVec2 s1 = ImGui::GetItemRectMax();
@@ -192,15 +215,16 @@ void LiveViewScreen::draw(UiContext& ui) {
             ImVec2(s0.x + 3.0f, s0.y + 6.0f), ImVec2(s1.x - 3.0f, s1.y - 6.0f),
             theme::u32(theme::withAlpha(col, active ? 0.9f : 0.55f)), 3.0f);
         if (hovered || active) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            ImGui::SetMouseCursor(split ? ImGuiMouseCursor_ResizeEW : ImGuiMouseCursor_ResizeNS);
         }
     }
 
     if (showVideo_) {
         const float videoX = split ? bodyMin.x + sceneW + kSplitterW : bodyMin.x;
-        ImGui::SetCursorScreenPos(ImVec2(videoX, bodyMin.y));
-        theme::beginCard("livevideo", ImVec2(videoW, bodyH), theme::background(), ImVec2(0.0f, 0.0f),
-                         theme::CardFit::Band);
+        const float videoY = stack ? bodyMin.y + sceneH + kSplitterW : bodyMin.y;
+        ImGui::SetCursorScreenPos(ImVec2(videoX, videoY));
+        theme::beginCard("livevideo", ImVec2(videoW, stack ? videoH : bodyH), theme::background(),
+                         ImVec2(0.0f, 0.0f), theme::CardFit::Band);
         paneHeader("Video", &showVideo_);
         drawVideoImage(ui.arena, ImGui::GetContentRegionAvail());
         theme::endCard();

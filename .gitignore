@@ -1,0 +1,21 @@
+# Build trees and binaries at any level
+.artifacts/
+.artifacts-*/
+.external/
+*.exe
+*.dll
+*.obj
+*.o
+*.pdb
+*.ilk
+
+# Runtime data next to the server binary, not photon-next/tools/data
+/data/
+photon-server/data/
+*.log
+__pycache__/
+
+# Host SSH material
+authorized_keys
+ssh_host_ed25519
+ssh_host_ed25519.pub

@@ -336,12 +336,12 @@ void testScrubIssuesNoRequests() {
     for (std::uint64_t t = 50'000; t <= 200'000; t += 137) {
         const CursorPlan plan = pb.update(t, PlaybackMode::Scrubbing);
         CHECK(!plan.requestLocate);
-        CHECK(plan.keyframeOnly);
+        CHECK(!plan.keyframeOnly);
     }
     CHECK(pb.locateRequests() == before);
 }
 
-void testScrubShowsNearestKeyframeOnly() {
+void testScrubDecodesToCursorWhenResident() {
     CursorPlayback pb;
     LocateReply reply;
     reply.found = true;
@@ -351,26 +351,33 @@ void testScrubShowsNearestKeyframeOnly() {
     }
     pb.applyLocate(reply);
 
-    // Mid-GOP cursor: the preview is that GOP's keyframe, not the cursor.
+    // Mid-GOP cursor: P-frames already in the ring are released up to the
+    // playhead, not the GOP's IDR. That is what made a 1-minute pin a slideshow.
     CursorPlan plan = pb.update(103'500, PlaybackMode::Scrubbing);
     CHECK(plan.haveTarget);
     CHECK(plan.target.startMs == 102'000);
-    CHECK(plan.keyframeOnly);
-    CHECK(plan.feedUpToMs == 102'000);
-    // Specifically not the cursor: decoding forward to it is what §8.3 forbids
-    // during a drag.
-    CHECK(plan.feedUpToMs != 103'500);
+    CHECK(!plan.keyframeOnly);
+    CHECK(plan.feedUpToMs == 103'500);
 
     // Moving inside the same GOP must not re-enter the decoder.
     plan = pb.update(103'700, PlaybackMode::Scrubbing);
     CHECK(!plan.reenter);
     CHECK(plan.target.startMs == 102'000);
+    CHECK(plan.feedUpToMs == 103'700);
 
     // Crossing into the next GOP must.
     plan = pb.update(104'100, PlaybackMode::Scrubbing);
     CHECK(plan.reenter);
     CHECK(plan.target.startMs == 104'000);
-    CHECK(plan.feedUpToMs == 104'000);
+    CHECK(plan.feedUpToMs == 104'100);
+}
+
+void testReplayPrefetchCoversAMinute() {
+    CHECK(photon::vidx::replayPrefetchGops(0, 0) == 8);
+    CHECK(photon::vidx::replayPrefetchGops(1'000, 2'000) == 8);
+    const auto minute = photon::vidx::replayPrefetchGops(1'789'244'940'000ull, 1'789'245'000'000ull);
+    CHECK(minute == 4);
+    CHECK(photon::vidx::replayPrefetchGops(0, 3'600'000ull) == 4);
 }
 
 // §8.3: exact decode happens on release, in the Committed state.
@@ -690,7 +697,8 @@ void runVideoIndexTests() {
     testClockOffsetConversion();
     testEntryRowSelection();
     testScrubIssuesNoRequests();
-    testScrubShowsNearestKeyframeOnly();
+    testScrubDecodesToCursorWhenResident();
+    testReplayPrefetchCoversAMinute();
     testCommitDecodesToTheExactCursor();
     testCommitPrefetchesBeforeLastGopEnds();
     testCommitRequestsPointerOutsideResidentRange();

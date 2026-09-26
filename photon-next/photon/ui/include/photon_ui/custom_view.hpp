@@ -106,6 +106,10 @@ private:
 
 void flushPlotImageExport();
 
+// First catalog signal that looks like a radio antenna reading (name contains
+// antenna, rssi, or snr), otherwise the first signal on Telemetry_Status.
+const ctrl::CatalogSignal* findAntennaSignal(const ClientArena& arena);
+
 std::string serializeCustomViews(const CustomViewDocument& doc);
 bool parseCustomViews(std::string_view text, CustomViewDocument* out, std::string* error);
 

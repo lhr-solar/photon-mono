@@ -1,0 +1,35 @@
+# Local-only grok-analyst sidecar (WP-H).
+# Host publish is loopback. No :6100/:6500/:6700.
+#
+# The sidecar process (run-grok-analyst.cmd on the host) spawns one container
+# per job from grok-analyst-job:local. Job containers get only that job's
+# scratch bind-mounted at /job — never docker.sock, data/tsdb, data/video,
+# or the repo. They use --network=none, 1 CPU, 1g RAM, pids=64.
+services:
+  grok-analyst:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: grok-analyst:local
+    container_name: grok-analyst
+    restart: "no"
+    ports:
+      - "127.0.0.1:18765:18765"
+    environment:
+      # Inside the container the process must accept the published port.
+      # The host mapping above keeps the port off the LAN.
+      GROK_ANALYST_BIND: "0.0.0.0:18765"
+      GROK_ANALYST_CONTAINER: "1"
+    # Intentionally no volumes for data/tsdb, data/video, or /var/run/docker.sock.
+    # Prefer run-grok-analyst.cmd so the host docker CLI can spawn job workers
+    # without placing docker.sock in this long-lived service.
+
+  grok-job:
+    build:
+      context: .
+      dockerfile: Dockerfile.job
+    image: grok-analyst-job:local
+    profiles: ["build-job"]
+    # Image only — sidecar applies network/CPU/RAM/PID limits at docker run.
+    restart: "no"
+    command: ["true"]

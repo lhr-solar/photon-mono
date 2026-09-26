@@ -4,13 +4,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../frontend/src/video_decoder.cpp'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../photon/ui/src/video_decoder.cpp'), 'utf8');
 function glue(name, args) {
     const start = source.indexOf('EM_JS(void, ' + name + ',');
-    assert(start >= 0);
+    assert.ok(start >= 0, name + ' missing');
     const body = source.indexOf('{', start);
     const end = source.indexOf('\n});', body);
-    assert(end >= 0);
+    assert.ok(end >= 0, name + ' unclosed');
     return '(' + args + ') => ' + source.slice(body, end + 2);
 }
 const context = vm.createContext({
@@ -28,11 +28,14 @@ function setup() {
     let flushes = 0;
     state.configured = true;
     state.error = '';
+    state.needKey = false;
     state.pending = [];
     state.decoder = {
         state: 'configured',
         decode(chunk) {
-            if (keyRequired && chunk.type !== 'key') throw Error('Key frame required after flush');
+            if (keyRequired && chunk.type !== 'key') {
+                throw Error('A key frame is required after configure() or flush()');
+            }
             keyRequired = false;
             decoded.push(chunk.type);
         },
@@ -64,5 +67,27 @@ run = setup();
 run.feed(true, 2000);
 endAu(1);
 assert.equal(run.flushes(), 1);
+assert.deepEqual(run.decoded, ['key']);
+assert.equal(run.state.needKey, true);
+// Catalog Play used to flush the IDR then feed P-frames, which Chrome rejects.
+run.feed(false, 2033);
+endAu(0);
+assert.equal(run.state.error, '');
+assert.deepEqual(run.decoded, ['key']);
+run.feed(true, 2066);
+endAu(0);
+run.feed(false, 2099);
+endAu(0);
+assert.equal(run.state.error, '');
+assert.deepEqual(run.decoded, ['key', 'key', 'delta']);
+// Leftover delta AU after configure()/flush() must be dropped, not decoded.
+run = setup();
+run.state.needKey = true;
+run.feed(false, 3000);
+endAu(0);
+assert.equal(run.state.error, '');
+assert.deepEqual(run.decoded, []);
+run.feed(true, 3033);
+endAu(0);
 assert.deepEqual(run.decoded, ['key']);
 console.log('WebCodecs live pause and still-image regression tests passed');

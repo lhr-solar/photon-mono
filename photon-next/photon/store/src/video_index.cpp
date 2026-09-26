@@ -522,12 +522,12 @@ CursorPlan CursorPlayback::update(std::uint64_t cursorMs, PlaybackMode mode) {
     }
 
     if (mode == PlaybackMode::Scrubbing) {
-        // §9.8: a drag issues zero backend round trips. That is only safe
-        // because whatever is already resident is drawable; §8.3 accepts the
-        // nearest keyframe as the preview, which at a 1-2 s IDR interval is at
-        // worst 2 s behind the cursor.
-        plan.keyframeOnly = true;
-        plan.feedUpToMs = plan.haveTarget ? plan.target.startMs : 0;
+        // §9.8: a drag issues zero backend round trips. Decode P-frames that
+        // are already in the ring up to the cursor so a 1-minute pin is 30 fps
+        // instead of one IDR per GOP. A GOP that is not resident stays on
+        // its keyframe (feedUpToMs = start) rather than fetching.
+        plan.keyframeOnly = false;
+        plan.feedUpToMs = plan.haveTarget ? videoMs : 0;
         return plan;
     }
 
@@ -548,8 +548,11 @@ CursorPlan CursorPlayback::update(std::uint64_t cursorMs, PlaybackMode mode) {
             }
         }
     }
-    const bool nearEnd = inside && !haveLater && plan.target.endMs > plan.target.startMs &&
-                         videoMs + kLocateLeadMs >= plan.target.endMs;
+    // haveLater is "a later pointer exists", not "those bytes are in the
+    // ring". Still ask before this GOP ends so Play does not sit on a still
+    // when the first locate only shipped one GOP of NALs.
+    const bool nearEnd = inside && plan.target.endMs > plan.target.startMs &&
+                         videoMs + kLocateLeadMs >= plan.target.endMs && !haveLater;
     if ((!inside || nearEnd) && !locatePending_) {
         plan.requestLocate = true;
         plan.locateAtMs = nearEnd ? plan.target.endMs + 1 : videoMs;

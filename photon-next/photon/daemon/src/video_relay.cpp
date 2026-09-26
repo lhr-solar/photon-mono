@@ -468,7 +468,7 @@ bool VideoRelay::replayWindow(std::uint64_t startMs, std::uint64_t endMs, std::v
     video::StreamParser parser;
     std::uint8_t buf[16 * 1024];
     std::size_t bytes = 0;
-    constexpr std::size_t kMaxBytes = 8 * 1024 * 1024;
+    constexpr std::size_t kMaxBytes = vidx::kReplayCacheBudget;
     for (int spin = 0; spin < 4000; ++spin) {
         const int n = sock.recvSome(buf, sizeof(buf));
         if (n < 0) {
@@ -486,7 +486,7 @@ bool VideoRelay::replayWindow(std::uint64_t startMs, std::uint64_t endMs, std::v
     }
     while (auto frame = parser.take()) {
         frames.push_back(std::move(*frame));
-        if (frames.size() >= 2000) {
+        if (frames.size() >= 8000) {
             break;
         }
     }

@@ -622,7 +622,8 @@ void photon_video_feed(const std::uint8_t* ptr, int len, double tsMs, int flags)
     });
 }
 
-int photon_video_upload(unsigned glTex) {
+int photon_video_upload(unsigned glTex, double cursorMs) {
+    (void)cursorMs;
     std::lock_guard<std::mutex> lock(gVid.mu);
     if (!gVid.haveRgba || gVid.width <= 0 || gVid.height <= 0 || glTex == 0) {
         return 0;

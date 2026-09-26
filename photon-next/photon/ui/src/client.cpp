@@ -877,7 +877,11 @@ void Client::sendTimeline(ctrl::TimelineMode mode, std::uint64_t cursorMs) {
         if (atV == 0) {
             atV = atCursorMs;
         }
-        videoDecoder().requestLocate(atV);
+        // Play/Pause must freeze or resume on the same CAN cursor. Re-locating
+        // a GOP already in the ring dumps 30 pictures and the video runs ahead.
+        if (!videoDecoder().hasVideoAt(atV)) {
+            videoDecoder().requestLocate(atV);
+        }
     };
     if (mode == ctrl::TimelineMode::Live) {
         arena_.clearVideoFollow();
@@ -1173,7 +1177,8 @@ void Client::flushVideoLocate() {
     if (locateSent_) {
         // Do not sit on Buffering for 8 s. Pointer lookup is ~30 ms; if the
         // GOP is not here in 2 s it is a hole, not a slow store.
-        if (lastLiveLocateMs_ > 0.0 && now - lastLiveLocateMs_ < 2000.0) {
+        const double waitMs = atMs == 0 ? 2000.0 : 15000.0;
+        if (lastLiveLocateMs_ > 0.0 && now - lastLiveLocateMs_ < waitMs) {
             return;
         }
         locateSent_ = false;
@@ -1192,7 +1197,12 @@ void Client::flushVideoLocate() {
     if (lastLiveLocateMs_ > 0.0 && now - lastLiveLocateMs_ < cooldownMs) {
         return;
     }
-    const std::uint16_t prefetch = atMs == 0 ? 0 : 1;
+    std::uint16_t prefetch = 0;
+    if (atMs != 0) {
+        const auto& pb = videoDecoder().playback();
+        prefetch = pb.replayWindowOn() ? vidx::replayPrefetchGops(pb.replayMinCursorMs(), pb.replayMaxCursorMs())
+                                       : static_cast<std::uint16_t>(8);
+    }
     if (send(ctrl::videoLocate(atMs, 0, prefetch))) {
         locateSent_ = true;
         lastLiveLocateMs_ = now;

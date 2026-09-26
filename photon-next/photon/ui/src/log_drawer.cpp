@@ -495,13 +495,13 @@ void LogDrawer::sendScrub(UiContext& ui, std::uint64_t cursorMs, bool force) {
     localCursorMs_ = cursorMs;
     ui.arena.setPreviewCursor(cursorMs, true);
     const double now = ImGui::GetTime();
-    if (!force && now - lastTlSendS_ < 0.05) {
+    if (!force && now - lastTlSendS_ < 0.2) {
         return;
     }
     lastTlSendS_ = now;
-    if (!force) {
-        return;
-    }
+    // Drag used to preview-only (no locate). Jumping the rail then sat on
+    // Buffering / the previous GOP until mouse-up, and a missed commit never
+    // opened the new time at all.
     ui.client.sendTimeline(ctrl::TimelineMode::Pause, cursorMs);
 }
 

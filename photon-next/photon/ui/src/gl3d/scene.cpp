@@ -845,11 +845,14 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay, bool hostMap
     if (th < 1) {
         th = 1;
     }
-    if (tw > 1920) {
-        tw = 1920;
-    }
-    if (th > 1080) {
-        th = 1080;
+    // Keep the pane's aspect. A hard 1920x1080 cap stretched the car on
+    // anything wider or taller than that framebuffer.
+    const int longEdge = std::max(tw, th);
+    constexpr int kMaxEdge = 2560;
+    if (longEdge > kMaxEdge) {
+        const float shrink = static_cast<float>(kMaxEdge) / static_cast<float>(longEdge);
+        tw = std::max(1, static_cast<int>(static_cast<float>(tw) * shrink));
+        th = std::max(1, static_cast<int>(static_cast<float>(th) * shrink));
     }
 
     auto mapsAnchor = [&](double& useLat, double& useLon) {
@@ -1002,7 +1005,6 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay, bool hostMap
     double useLon = kPresetAustinLon;
     mapsAnchor(useLat, useLon);
     const bool wantMaps = gMaps.on && (overlay || hostMaps);
-    const float dpi = (fb > 0.0f) ? fb : 1.0f;
     static float sLayout[4]{-1.0f, -1.0f, -1.0f, -1.0f};
     static int sCar = -1;
     static bool sShown = false;
@@ -1015,11 +1017,15 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay, bool hostMap
         gMaps.restart = false;
     }
     if (wantMaps) {
-        const float panel = overlay ? 308.0f : 0.0f;
-        const float lx = (origin.x + panel) / dpi;
-        const float ly = origin.y / dpi;
-        const float lw = std::max(8.0f, size.x - panel) / dpi;
-        const float lh = size.y / dpi;
+        // ImGui positions are already logical pixels. The native host
+        // multiplies by DPI, and the page overlay treats these as CSS pixels.
+        // Dividing by the framebuffer scale first placed the 3D view too small
+        // and up-left whenever the display was not 100%.
+        const float panel = overlay ? std::min(308.0f, std::max(0.0f, size.x * 0.34f)) : 0.0f;
+        const float lx = origin.x + panel;
+        const float ly = origin.y;
+        const float lw = std::max(8.0f, size.x - panel);
+        const float lh = size.y;
         if (std::fabs(lx - sLayout[0]) > 0.5f || std::fabs(ly - sLayout[1]) > 0.5f ||
             std::fabs(lw - sLayout[2]) > 0.5f || std::fabs(lh - sLayout[3]) > 0.5f) {
             sLayout[0] = lx;

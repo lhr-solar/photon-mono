@@ -19,7 +19,7 @@ compile_commands.json
 *.user
 CMakeUserPresets.json
 
-# Binaries / objects
+# bins
 *.exe
 *.obj
 *.o
@@ -33,7 +33,7 @@ CMakeUserPresets.json
 *.dylib
 *.out
 
-# CTest
+# Tests
 Testing/
 CTestTestfile.cmake
 DartConfiguration.tcl

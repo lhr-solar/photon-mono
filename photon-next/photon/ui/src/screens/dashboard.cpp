@@ -1489,8 +1489,8 @@ void DashboardScreen::draw(UiContext& ui) {
         ui.client.goLive();
     }
     ui.arena.signalMap().subscribe(ui.client, MapScreen::Pit | MapScreen::Dashboard);
-    videoDecoder().poll();
     videoDecoder().syncToCursor(ui.arena);
+    videoDecoder().poll();
 
     heartbeat_ = static_cast<std::uint8_t>((heartbeat_ + 1) % 256);
     DashView view = fillView(ui, heartbeat_);

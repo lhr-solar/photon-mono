@@ -3,6 +3,7 @@
 #include "photon/log_sessions.hpp"
 #include "photon/video_index.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -448,31 +449,50 @@ void SessionHub::handleText(ClientSession& client, std::string_view text, std::u
                              client.label.c_str());
                 break;
             }
-            // One extra RPC on the retained locate socket. Eight range reads
-            // plus live reconnect used to trip ClientGate and leave the UI on
-            // "loading GOP pointers". Prefer the fattest pointer (720p).
-            const vidx::GopRow* best = nullptr;
+            // Live t=0: entry GOP only (prefetch rows can be RTCP-future).
+            // Historical: every prefetch row, in time order, so a 1-minute pin
+            // is resident instead of one GOP (~1 s) per locate.
+            const bool livePoll = msg->startMs == 0;
+            std::vector<vidx::GopRow> loadRows;
+            const vidx::GopRow* liveEntry = nullptr;
             for (const auto& row : reply.rows) {
                 if (vidx::rowIsContinuation(row) || row.byteLength == 0) {
                     continue;
                 }
-                if (msg->startMs == 0) {
-                    // Live t=0: the locate Entry is first. Prefetch rows can
-                    // be RTCP-future GOPs that sort later; picking max
-                    // startMs froze Live on a 49-minute-ahead still (0 fps).
-                    if (best == nullptr) {
-                        best = &row;
+                if (livePoll) {
+                    if (liveEntry == nullptr) {
+                        liveEntry = &row;
                     }
                     continue;
                 }
-                if (best == nullptr || row.byteLength > best->byteLength) {
-                    best = &row;
+                loadRows.push_back(row);
+            }
+            if (!livePoll) {
+                std::sort(loadRows.begin(), loadRows.end(), [](const vidx::GopRow& a, const vidx::GopRow& b) {
+                    if (a.startMs != b.startMs) {
+                        return a.startMs < b.startMs;
+                    }
+                    return a.byteLength > b.byteLength;
+                });
+                std::vector<vidx::GopRow> uniq;
+                uniq.reserve(loadRows.size());
+                for (const auto& row : loadRows) {
+                    if (!uniq.empty() && uniq.back().startMs == row.startMs &&
+                        uniq.back().segmentId == row.segmentId && uniq.back().byteOffset == row.byteOffset) {
+                        continue;
+                    }
+                    if (!uniq.empty() && uniq.back().startMs == row.startMs) {
+                        continue;
+                    }
+                    uniq.push_back(row);
                 }
+                loadRows.swap(uniq);
             }
             vidx::GopRing loaded;
+            loaded.setBudget(vidx::kReplayCacheBudget);
             bool appended = false;
-            const bool livePoll = msg->startMs == 0;
-            const bool sameGop = best != nullptr && !client.videoCache.nals().empty() &&
+            const vidx::GopRow* best = livePoll ? liveEntry : (loadRows.empty() ? nullptr : &loadRows.front());
+            const bool sameGop = livePoll && best != nullptr && !client.videoCache.nals().empty() &&
                                  client.videoGopSegment == best->segmentId &&
                                  client.videoGopOffset == best->byteOffset;
             if (sameGop && best->byteLength <= client.videoGopSent) {
@@ -498,10 +518,6 @@ void SessionHub::handleText(ClientSession& client, std::string_view text, std::u
                 if (videoRelay_.readRange(best->segmentId, best->byteOffset + already, tailLen, tail,
                                           &rangeError) &&
                     tail.size() == tailLen) {
-                    // Stamp the tail over its share of the row's window. Row
-                    // offsets are NAL boundaries, so this resumes on a start
-                    // code; a short read cannot, which is why it falls through
-                    // to the full re-read below.
                     const std::uint64_t span = best->endMs > best->startMs ? best->endMs - best->startMs : 0;
                     const std::uint64_t tailStartMs =
                         best->byteLength == 0 ? best->startMs
@@ -525,23 +541,35 @@ void SessionHub::handleText(ClientSession& client, std::string_view text, std::u
                     client.videoGopLive = false;
                 }
             }
-            if (!appended && best != nullptr) {
+            auto pushGop = [&](const vidx::GopRow& row) -> bool {
+                if (loaded.bytes() + row.byteLength > loaded.budget() && !loaded.nals().empty()) {
+                    return false;
+                }
                 std::vector<std::uint8_t> gop;
                 std::string rangeError;
-                if (videoRelay_.readRange(best->segmentId, best->byteOffset, best->byteLength, gop, &rangeError)) {
-                    video::forEachStampedGopNal(gop, best->startMs, best->endMs,
-                                                [&](std::uint64_t ms, std::uint8_t flags,
-                                                    std::span<const std::uint8_t> nal) {
-                                                    if (video::nalIsTinyPslice(nal)) {
-                                                        return;
-                                                    }
-                                                    loaded.push(ms, flags, nal);
-                                                });
-                    if (!loaded.nals().empty()) {
-                        client.videoGopSegment = best->segmentId;
-                        client.videoGopOffset = best->byteOffset;
-                        client.videoGopSent = static_cast<std::uint32_t>(gop.size());
-                        client.videoGopLive = true;
+                if (!videoRelay_.readRange(row.segmentId, row.byteOffset, row.byteLength, gop, &rangeError)) {
+                    return true;
+                }
+                video::forEachStampedGopNal(gop, row.startMs, row.endMs,
+                                            [&](std::uint64_t ms, std::uint8_t flags,
+                                                std::span<const std::uint8_t> nal) {
+                                                if (video::nalIsTinyPslice(nal)) {
+                                                    return;
+                                                }
+                                                loaded.push(ms, flags, nal);
+                                            });
+                client.videoGopSegment = row.segmentId;
+                client.videoGopOffset = row.byteOffset;
+                client.videoGopSent = static_cast<std::uint32_t>(gop.size());
+                client.videoGopLive = livePoll;
+                return true;
+            };
+            if (!appended && livePoll && best != nullptr) {
+                pushGop(*best);
+            } else if (!appended && !livePoll) {
+                for (const auto& row : loadRows) {
+                    if (!pushGop(row)) {
+                        break;
                     }
                 }
             }

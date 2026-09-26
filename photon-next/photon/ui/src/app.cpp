@@ -2,7 +2,9 @@
 
 #include "photon_ui/alarms.hpp"
 #include "photon_ui/clock_format.hpp"
+#include "photon_ui/custom_view.hpp"
 #include "photon_ui/gl_api.hpp"
+#include "photon_ui/grafana_host.hpp"
 #include "photon_ui/page_url.hpp"
 #include "photon_ui/platform.hpp"
 #include "photon_ui/scene3d.hpp"
@@ -25,6 +27,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <span>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -225,6 +228,7 @@ bool App::init() {
     SDL_VERSION(&wminfo.version);
     if (SDL_GetWindowWMInfo(window_, &wminfo) && wminfo.subsystem == SDL_SYSWM_WINDOWS) {
         nativeHostAttach(wminfo.info.win.window);
+        grafanaAttach(wminfo.info.win.window);
     }
 #endif
 
@@ -264,6 +268,7 @@ void App::shutdown() {
     // destructors call glDelete* after this function has already killed the
     // context — that is an access violation on desktop.
     photonGlMarkContextLost();
+    grafanaShutdown();
     nativeHostShutdown();
 #endif
     ImGui_ImplOpenGL3_Shutdown();
@@ -365,8 +370,9 @@ void App::drawShell() {
     ImGui::Begin("##photon", nullptr, flags);
     ImGui::PopStyleVar(2);
 
-    const float barH = theme::kTitlebarH;
-    const float alarmH = kAlarmStripH;
+    const float barH =
+        std::max(theme::kTitlebarH, ImGui::GetFontSize() + theme::kTitlebarPadding.y * 2.0f + 6.0f);
+    const float alarmH = std::max(kAlarmStripH, ImGui::GetFontSize() + 16.0f);
     const float width = ImGui::GetContentRegionAvail().x;
     drawTitlebar(ImVec2(width, barH));
 
@@ -391,6 +397,9 @@ void App::drawShell() {
             std::strcmp(sid, "pit") != 0) {
             hideMaps3d();
         }
+        if (std::strcmp(sid, "plots") != 0) {
+            grafanaShow(0);
+        }
     }
     ImGui::EndChild();
     ImGui::End();
@@ -399,6 +408,9 @@ void App::drawShell() {
     setMaps3dInteractive(!popupOpen);
     if (logDrawer_.exportDialogOpen() || mapsOverlayHoldOff()) {
         hideMaps3d();
+    }
+    if (popupOpen || logDrawer_.exportDialogOpen()) {
+        grafanaShow(0);
     }
 }
 
@@ -466,6 +478,21 @@ void App::drawTitlebar(ImVec2 size) {
     const ImVec2 stateSz = ImGui::CalcTextSize(client_.stateLabel());
     const ImVec2 sourceSz = ImGui::CalcTextSize(source.c_str());
     const ImVec2 modeSz = showMode ? ImGui::CalcTextSize(mode) : ImVec2(0.0f, 0.0f);
+    const ctrl::CatalogSignal* antenna = findAntennaSignal(arena_);
+    char antBuf[72];
+    if (antenna != nullptr) {
+        const std::uint32_t antId = antenna->id;
+        client_.ensureSubscribed(std::span<const std::uint32_t>(&antId, 1));
+        const double antV = arena_.readout(antId, 0.0);
+        if (antenna->unit.empty()) {
+            std::snprintf(antBuf, sizeof(antBuf), "Ant  %.0f", antV);
+        } else {
+            std::snprintf(antBuf, sizeof(antBuf), "Ant  %.0f %s", antV, antenna->unit.c_str());
+        }
+    } else {
+        std::snprintf(antBuf, sizeof(antBuf), "Ant  n/a");
+    }
+    const ImVec2 antSz = ImGui::CalcTextSize(antBuf);
     const ImVec2 clockSz = ImGui::CalcTextSize(clock);
     const ImVec2 indexSz = buffering ? ImGui::CalcTextSize("indexing log") : ImVec2(0.0f, 0.0f);
     const float themeW = 64.0f;
@@ -496,7 +523,7 @@ void App::drawTitlebar(ImVec2 size) {
     const float dayW = dayChoices.empty() ? 0.0f : 128.0f;
     const float clusterW = themeW + clusterGap + (dayW > 0.0f ? dayW + clusterGap : 0.0f) + liveW +
                            (showTransport ? playW + pauseW + clusterGap : 0.0f) + clusterGap * 2.0f + clusterGap +
-                           stateSz.x + clusterGap + sourceSz.x +
+                           stateSz.x + clusterGap + sourceSz.x + clusterGap + antSz.x +
                            (showMode ? clusterGap + modeSz.x : 0.0f) +
                            (buffering ? clusterGap + indexSz.x : 0.0f) + clusterGap + clockSz.x;
     ImGui::SetCursorScreenPos(ImVec2(p1.x - clusterW - pad.x, p0.y + pad.y));
@@ -566,6 +593,8 @@ void App::drawTitlebar(ImVec2 size) {
     ImGui::TextColored(stateColor(client_.state()), "%s", client_.stateLabel());
     ImGui::SameLine();
     ImGui::TextColored(theme::primary(), "%s", source.c_str());
+    ImGui::SameLine();
+    ImGui::TextColored(antenna != nullptr ? theme::success() : theme::mutedFg(), "%s", antBuf);
     if (showMode) {
         ImGui::SameLine();
         ImGui::TextColored(modeColor, "%s", mode);

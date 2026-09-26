@@ -225,6 +225,7 @@ else()
         src/gl_loader.cpp
         src/native_maps.cpp
         src/native_video.cpp
+        src/grafana_host.cpp
     )
     target_include_directories(photon-ui PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
