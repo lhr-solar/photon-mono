@@ -1,0 +1,17 @@
+[Unit]
+Description=Photon Oracle UDP video tee (RTP :6200 -> store + PVU1 :6800)
+After=network-online.target photon-wg-pipe.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PHOTON_PASSWORD=laptop
+Environment=PHOTON_VIDEO_STORE=10.66.0.2:6200
+Environment=PHOTON_VIDEO_INGRESS_PORT=6200
+Environment=PHOTON_VIDEO_FANOUT_PORT=6800
+ExecStart=/usr/bin/python3 /usr/local/sbin/photon-video-relay.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
