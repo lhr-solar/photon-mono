@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>photon OSM 3D</title>
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.css">
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+        }
+      }
+    </script>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #8eb4d4;
+      }
+      #photon-maps3d {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #8eb4d4;
+      }
+      #photon-maps3d .maplibregl-map,
+      #photon-maps3d .maplibregl-canvas-container,
+      #photon-maps3d .maplibregl-canvas {
+        width: 100%;
+        height: 100%;
+      }
+      #photon-maps3d .maplibregl-ctrl-top-right,
+      #photon-maps3d .maplibregl-ctrl-top-left,
+      #photon-maps3d .maplibregl-ctrl-bottom-left,
+      #photon-maps3d .maplibregl-ctrl-group,
+      #photon-maps3d .maplibregl-ctrl-logo {
+        display: none !important;
+      }
+      #photon-maps3d .maplibregl-ctrl-attrib {
+        background: rgba(11, 13, 18, 0.72) !important;
+        color: #c8c8cc;
+        font-size: 10px;
+      }
+      #photon-maps3d .maplibregl-ctrl-attrib a {
+        color: #d0d0d4;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="photon-maps3d" aria-hidden="false" oncontextmenu="event.preventDefault()"></div>
+    <script src="maps3d.js"></script>
+    <script>
+      (function () {
+        function report() {
+          if (!window.chrome || !chrome.webview) {
+            return;
+          }
+          var ready = !!(window.photonMaps3d && photonMaps3d.ready());
+          var status = window.photonMaps3d ? String(photonMaps3d.status() || '') : '';
+          chrome.webview.postMessage(JSON.stringify({ ready: ready, status: status }));
+        }
+        setInterval(report, 200);
+        report();
+      })();
+    </script>
+  </body>
+</html>

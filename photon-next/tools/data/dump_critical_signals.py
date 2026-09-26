@@ -1,0 +1,15 @@
+import re
+
+TEXT = open(r"F:\lhr\photon-next\assets\dbc\carcan_telemcan.dbc", encoding="utf-8", errors="ignore").read()
+TARGETS = [
+    "BPS_Status", "MC_Status", "MC_BusMeasurement", "Supp_Battery_Status",
+    "Coolant_Temperature", "Pump_Status", "ChargerInterface_Status", "VCU_Status",
+    "MC_Motor_TempMeasurement", "Telemetry_Status", "LV_Carrier_Status", "BPS_Fault_Val_Arr",
+]
+
+for block in re.split(r"\n(?=BO_ )", TEXT):
+    m = re.match(r"BO_ \d+ (\w+):", block)
+    if m and m.group(1) in TARGETS:
+        print("##", m.group(1))
+        for name, rng, unit in re.findall(r"SG_ (\w+) [^\n]*?\[([^\]]*)\] \"([^\"]*)\"", block):
+            print(f"    {name} [{rng}] {unit}")

@@ -1,0 +1,16 @@
+BasedOnStyle: Google
+Language: Cpp
+IndentWidth: 4
+ColumnLimit: 110
+PointerAlignment: Left
+DerivePointerAlignment: false
+AccessModifierOffset: -4
+NamespaceIndentation: None
+SortIncludes: true
+IncludeBlocks: Preserve
+ReflowComments: false
+AllowShortFunctionsOnASingleLine: InlineOnly
+AllowShortBlocksOnASingleLine: Never
+BreakConstructorInitializers: BeforeComma
+PackConstructorInitializers: CurrentLine
+ConstructorInitializerAllOnOneLineOrOnePerLine: true

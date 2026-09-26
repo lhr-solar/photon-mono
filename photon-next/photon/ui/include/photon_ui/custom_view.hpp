@@ -1,0 +1,112 @@
+#pragma once
+
+#include "imgui.h"
+#include "photon/control.hpp"
+#include "photon_ui/arena.hpp"
+#include "photon_ui/view_types.hpp"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace photon::ui {
+
+struct UiContext;
+
+class CustomViews {
+public:
+    void ensureLoaded();
+    void draw(UiContext& ui);
+    // Play/Live chrome: drop on-plot scrub holds, keep a Freeze the user checked.
+    void releasePlayheadScrub();
+    // Catalog pin / run switch: drop Freeze, range, and scrub so the plot
+    // follows the new session instead of staying on the previous window.
+    void followSessionWindow();
+
+private:
+    CustomViewDocument doc_{};
+    bool loaded_ = false;
+    bool dirty_ = false;
+    int selectedCell_ = -1;
+    int nextView_ = 2;
+    int nextCell_ = 2;
+    char search_[128]{};
+    char renameBuf_[64]{};
+    bool renameOpen_ = false;
+    bool pickerOpen_ = false;
+    std::string status_;
+    int pickerDayIndex_ = -1;
+    struct PlotExportJob {
+        bool active = false;
+        bool waitDay = false;
+        int settleFrames = 0;
+        int cell = -1;
+        std::string date;
+        std::string path;
+        std::string filename;
+        double startMs = 0.0;
+        double readySinceMs = 0.0;
+    };
+    PlotExportJob export_{};
+    enum class DragKind { None, Move, Resize };
+    bool plotScrubbing_ = false;
+    DragKind drag_ = DragKind::None;
+    int dragIndex_ = -1;
+    ViewRect dragStart_{};
+    ImVec2 dragMouse0_{};
+    bool dragDirty_ = false;
+    struct LayoutUndo {
+        bool have = false;
+        int viewIndex = -1;
+        std::vector<ViewCell> cells;
+        int selectedCell = -1;
+        int nextCell = 0;
+    };
+    LayoutUndo undo_{};
+    LayoutUndo dragUndoPrev_{};
+    bool dragUndoPushed_ = false;
+
+    CustomView& active();
+    const CustomView& active() const;
+    void ensureDefault();
+    void pushLayoutUndo();
+    void undoLastLayout();
+    void markDirty();
+    void touchDirty();
+    void save() const;
+    void flushDirty();
+    bool anyScrubHold() const;
+    void exportFile() const;
+    void requestImport();
+    void pollImport();
+    bool applyJson(std::string_view text, std::string* error);
+    void addView();
+    void deleteActiveView();
+    void addCell(ViewCellKind kind);
+    void addGgCell();
+    void addPitVitalsView();
+    CustomView makePitVitalsView() const;
+    void migrateView(CustomView& view);
+    ViewCell* targetCell();
+    void assignSignal(const ctrl::CatalogSignal& sig);
+    void resolve(const ClientArena& arena);
+    void subscribe(UiContext& ui);
+    void drawToolbar(UiContext& ui);
+    void openPicker();
+    void drawPicker(UiContext& ui);
+    void drawGrid(UiContext& ui, ImVec2 size);
+    void drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index);
+    void updateDrag(ImVec2 origin, float unitW, float unitH);
+    void syncPickerDay(const ClientArena& arena);
+    bool drawDriveDayCombo(UiContext& ui, const char* id, float width);
+    void requestPlotPng(UiContext& ui);
+    void tickPlotExport(UiContext& ui);
+    bool cellHasSamples(const ClientArena& arena, int index) const;
+};
+
+void flushPlotImageExport();
+
+std::string serializeCustomViews(const CustomViewDocument& doc);
+bool parseCustomViews(std::string_view text, CustomViewDocument* out, std::string* error);
+
+}  // namespace photon::ui
