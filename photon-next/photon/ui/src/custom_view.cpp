@@ -1331,43 +1331,6 @@ void CustomViews::addGgCell() {
     cell.sources.push_back(std::move(lat));
 }
 
-const ctrl::CatalogSignal* findAntennaSignal(const ClientArena& arena) {
-    auto has = [](const std::string& hay, const char* needle) {
-        if (needle == nullptr || needle[0] == '\0') {
-            return false;
-        }
-        const std::size_t n = std::strlen(needle);
-        if (n > hay.size()) {
-            return false;
-        }
-        for (std::size_t i = 0; i + n <= hay.size(); ++i) {
-            bool ok = true;
-            for (std::size_t j = 0; j < n; ++j) {
-                const auto a = static_cast<unsigned char>(hay[i + j]);
-                const auto b = static_cast<unsigned char>(needle[j]);
-                if (std::tolower(a) != std::tolower(b)) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (ok) {
-                return true;
-            }
-        }
-        return false;
-    };
-    const ctrl::CatalogSignal* onTelemetry = nullptr;
-    for (const ctrl::CatalogSignal& cat : arena.signalCatalog) {
-        if (has(cat.name, "antenna") || has(cat.name, "rssi") || has(cat.name, "snr")) {
-            return &cat;
-        }
-        if (onTelemetry == nullptr && has(cat.message, "Telemetry_Status") && !cat.name.empty()) {
-            onTelemetry = &cat;
-        }
-    }
-    return onTelemetry;
-}
-
 void CustomViews::resolve(const ClientArena& arena) {
     if (!arena.haveSignalCatalog) {
         return;
@@ -1376,7 +1339,7 @@ void CustomViews::resolve(const ClientArena& arena) {
         for (ViewCell& cell : view.cells) {
             for (ViewSignal& src : cell.sources) {
                 if (src.signalName == "__antenna__") {
-                    if (const ctrl::CatalogSignal* ant = findAntennaSignal(arena)) {
+                    if (const ctrl::CatalogSignal* ant = arena.antennaSignal()) {
                         src.id = ant->id;
                         src.messageName = ant->message;
                         src.signalName = ant->name;

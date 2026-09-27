@@ -136,6 +136,8 @@ public:
     void resetTrackSimCatalog();
     void beginTrackSimSolve(double timeBudgetS);
     void applySignalCatalog(const ctrl::Message& msg);
+    // Radio reading chosen when the catalog arrived. Null when the DBC has none.
+    const ctrl::CatalogSignal* antennaSignal() const;
     void resetSignalMap();
     void refreshMappedCells();
     void maybePrimeHistory(HistoryIO& io);
@@ -243,6 +245,7 @@ private:
     bool mapsResetPulse_ = false;
     TileCache tiles_{};
     std::string primedHistoryKey_;
+    std::uint32_t antennaId_ = 0;
     bool catalogPinned_ = false;
     std::string pinnedCatalogId_;
     double pinnedPlayWallMs_ = 0.0;

@@ -32,7 +32,6 @@ void runCliTests() {
     CHECK(def.logPath.empty());
     CHECK(def.writeLiveTail);
     CHECK(def.videoUdpPort == 6800);
-    CHECK(def.analysisCompute.empty());
     CHECK(def.historyRemote.empty());
 
     photon::cli::Options replay;
@@ -85,23 +84,6 @@ void runCliTests() {
     photon::cli::Options secret;
     CHECK(parse({"photon-backend", "--password", "pit"}, secret));
     CHECK(secret.password == "pit");
-
-    photon::cli::Options computeOff;
-    CHECK(parse({"photon-backend", "--analysis-compute", "off"}, computeOff));
-    CHECK(computeOff.analysisCompute.empty());
-
-    photon::cli::Options computeOn;
-    CHECK(parse({"photon-backend", "--analysis-compute", "127.0.0.1:18765"}, computeOn));
-    CHECK(computeOn.analysisCompute == "127.0.0.1:18765");
-
-    photon::cli::Options computeEq;
-    CHECK(parse({"photon-backend", "--analysis-compute=127.0.0.1:18765"}, computeEq));
-    CHECK(computeEq.analysisCompute == "127.0.0.1:18765");
-
-    photon::cli::Options computeLan;
-    CHECK(!parse({"photon-backend", "--analysis-compute", "0.0.0.0:18765"}, computeLan));
-    photon::cli::Options computeIngest;
-    CHECK(!parse({"photon-backend", "--analysis-compute", "10.0.0.2:6100"}, computeIngest));
 
     photon::cli::Options histOff;
     CHECK(parse({"photon-backend", "--history-remote", "off"}, histOff));

@@ -90,6 +90,7 @@ set(PHOTON_UI_SOURCES
     src/screens/network.cpp
     src/screens/pit.cpp
     src/screens/plots.cpp
+    src/grafana_host.cpp
     src/screens/scene3d.cpp
     src/screens/stubs.cpp
     src/screens/tracksim.cpp
@@ -225,7 +226,7 @@ else()
         src/gl_loader.cpp
         src/native_maps.cpp
         src/native_video.cpp
-        src/grafana_host.cpp
+        src/overlay_host.cpp
     )
     target_include_directories(photon-ui PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -247,7 +248,6 @@ else()
         photon-core
         photon-imgui
         photon-tinygltf
-        photon_net
         ${PHOTON_SDL2_TARGET}
     )
     if(WIN32)
@@ -292,9 +292,14 @@ else()
         )
         message(STATUS "photon-ui WebView2 -> ${PHOTON_WEBVIEW2_DIR}")
     endif()
+    if(PHOTON_SHIP_DIR)
+        set(_photon_ui_dir "${PHOTON_SHIP_DIR}")
+    else()
+        set(_photon_ui_dir "${CMAKE_BINARY_DIR}")
+    endif()
     set_target_properties(photon-ui PROPERTIES
         OUTPUT_NAME photon-ui
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${_photon_ui_dir}"
     )
     add_custom_command(TARGET photon-ui POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -303,5 +308,5 @@ else()
         COMMENT "Copy Photon assets next to photon-ui"
     )
     photon_apply_warnings(photon-ui)
-    message(STATUS "photon-ui -> ${CMAKE_BINARY_DIR}/photon-ui${CMAKE_EXECUTABLE_SUFFIX}")
+    message(STATUS "photon-ui -> ${_photon_ui_dir}/photon-ui${CMAKE_EXECUTABLE_SUFFIX}")
 endif()

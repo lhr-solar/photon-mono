@@ -373,6 +373,10 @@ void Client::handleText(std::string_view text) {
             break;
         case ctrl::Type::SignalCatalog: {
             arena_.applySignalCatalog(*msg);
+            if (const ctrl::CatalogSignal* ant = arena_.antennaSignal()) {
+                const std::uint32_t id = ant->id;
+                ensureSubscribed(std::span<const std::uint32_t>(&id, 1));
+            }
             arena_.pushLog("rx signal_catalog n=" + std::to_string(msg->catalog.size()));
             break;
         }
@@ -1200,8 +1204,7 @@ void Client::flushVideoLocate() {
     std::uint16_t prefetch = 0;
     if (atMs != 0) {
         const auto& pb = videoDecoder().playback();
-        prefetch = pb.replayWindowOn() ? vidx::replayPrefetchGops(pb.replayMinCursorMs(), pb.replayMaxCursorMs())
-                                       : static_cast<std::uint16_t>(8);
+        prefetch = pb.replayWindowOn() ? vidx::kReplayLocateGops : vidx::kHistoryLocateGops;
     }
     if (send(ctrl::videoLocate(atMs, 0, prefetch))) {
         locateSent_ = true;

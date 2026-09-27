@@ -27,7 +27,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <span>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -337,7 +336,9 @@ void App::frame() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+    grafanaBeginFrame();
     drawShell();
+    grafanaEndFrame();
     client_.commitInterest();
     ImGui::Render();
 
@@ -396,9 +397,6 @@ void App::drawShell() {
         if (std::strcmp(sid, "scene3d") != 0 && std::strcmp(sid, "live") != 0 &&
             std::strcmp(sid, "pit") != 0) {
             hideMaps3d();
-        }
-        if (std::strcmp(sid, "plots") != 0) {
-            grafanaShow(0);
         }
     }
     ImGui::EndChild();
@@ -478,12 +476,10 @@ void App::drawTitlebar(ImVec2 size) {
     const ImVec2 stateSz = ImGui::CalcTextSize(client_.stateLabel());
     const ImVec2 sourceSz = ImGui::CalcTextSize(source.c_str());
     const ImVec2 modeSz = showMode ? ImGui::CalcTextSize(mode) : ImVec2(0.0f, 0.0f);
-    const ctrl::CatalogSignal* antenna = findAntennaSignal(arena_);
+    const ctrl::CatalogSignal* antenna = arena_.antennaSignal();
     char antBuf[72];
     if (antenna != nullptr) {
-        const std::uint32_t antId = antenna->id;
-        client_.ensureSubscribed(std::span<const std::uint32_t>(&antId, 1));
-        const double antV = arena_.readout(antId, 0.0);
+        const double antV = arena_.readout(antenna->id, 0.0);
         if (antenna->unit.empty()) {
             std::snprintf(antBuf, sizeof(antBuf), "Ant  %.0f", antV);
         } else {

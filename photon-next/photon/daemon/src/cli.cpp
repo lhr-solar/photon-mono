@@ -25,46 +25,9 @@ void usage(const char* argv0) {
                  "  --tsdb-dir    Photon TSDB root (default data/tsdb or PHOTON_TSDB)\n"
                  "  --no-live-tail  Do not write a TSDB (PC photon-index owns the store)\n"
                  "  --password    Shared client password (env: PHOTON_PASSWORD)\n"
-                 "  --analysis-compute ADDR  grok-analyst loopback host:port (default off)\n"
                  "  --history-remote HOST:PORT|off  catalog/history hop (default: daq_host:8080 "
                  "when daq_host is not loopback)\n",
                  argv0);
-}
-
-bool normalizeAnalysisCompute(std::string& value, std::string* error) {
-    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
-        value.erase(value.begin());
-    }
-    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
-        value.pop_back();
-    }
-    if (value.empty() || value == "off" || value == "-" || value == "0") {
-        value.clear();
-        return true;
-    }
-    const auto colon = value.rfind(':');
-    if (colon == std::string::npos || colon == 0 || colon + 1 >= value.size()) {
-        if (error) {
-            *error = "--analysis-compute must be off or 127.0.0.1:PORT";
-        }
-        return false;
-    }
-    const std::string host = value.substr(0, colon);
-    if (host != "127.0.0.1" && host != "localhost") {
-        if (error) {
-            *error = "--analysis-compute binds loopback only (127.0.0.1)";
-        }
-        return false;
-    }
-    std::uint16_t port = 0;
-    if (!parseU16(value.c_str() + colon + 1, port) || port == 0) {
-        if (error) {
-            *error = "--analysis-compute port must be 1-65535";
-        }
-        return false;
-    }
-    value = "127.0.0.1:" + std::to_string(static_cast<unsigned>(port));
-    return true;
 }
 
 bool parseU16(const char* text, std::uint16_t& out) {
@@ -158,22 +121,6 @@ bool parseArgs(int argc, char** argv, Options& opt) {
             opt.writeLiveTail = false;
         } else if (arg == "--password") {
             if (!needStr(opt.password, "--password")) {
-                return false;
-            }
-        } else if (arg == "--analysis-compute") {
-            if (!needStr(opt.analysisCompute, "--analysis-compute")) {
-                return false;
-            }
-            std::string err;
-            if (!normalizeAnalysisCompute(opt.analysisCompute, &err)) {
-                std::fprintf(stderr, "[photon-backend] %s\n", err.c_str());
-                return false;
-            }
-        } else if (arg.rfind("--analysis-compute=", 0) == 0) {
-            opt.analysisCompute = arg.substr(std::strlen("--analysis-compute="));
-            std::string err;
-            if (!normalizeAnalysisCompute(opt.analysisCompute, &err)) {
-                std::fprintf(stderr, "[photon-backend] %s\n", err.c_str());
                 return false;
             }
         } else if (arg == "--history-remote") {

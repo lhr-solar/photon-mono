@@ -104,7 +104,6 @@ public:
     void setWriteLiveTail(bool on) { writeLiveTail_ = on; }
     void setClientPassword(std::string password);
     void setVideoUdpHost(std::string host) { videoRelay_.setUdpHost(std::move(host)); }
-    void setAnalysisCompute(std::string addr);
     void setHistoryRemote(std::string host, std::uint16_t port, std::string path, std::string password);
 
     std::size_t clientCount() const { return clients_.size(); }
@@ -128,15 +127,6 @@ private:
         std::future<ctrl::Message> future;
     };
     std::vector<TrackSimJob> trackSimJobs_;
-    struct AnalysisJob {
-        std::uint64_t clientId = 0;
-        std::string jobId;
-        std::string sidecarClientId;
-        std::shared_ptr<std::atomic<bool>> cancel;
-        std::future<ctrl::Message> future;
-    };
-    std::vector<AnalysisJob> analysisJobs_;
-    std::string analysisComputeAddr_;
     struct HistoryJob {
         std::uint64_t clientId = 0;
         std::uint32_t queryId = 0;
@@ -175,10 +165,6 @@ private:
     void checkTxWatchdog(std::uint64_t nowMs);
     void enqueueTrackSim(ClientSession& client, const ctrl::Message& req);
     void pollTrackSimJobs();
-    void handleAnalysisCompute(ClientSession& client, const ctrl::Message& req);
-    void handleAnalysisCancel(ClientSession& client, const ctrl::Message& req);
-    void pollAnalysisJobs();
-    void cancelAllAnalysisJobs();
     ClientSession* findClient(std::uint64_t id);
     bool loadDbcFile(const std::string& path, std::string& error);
     bool loadBundledDbc(const std::string& id, std::string& error);

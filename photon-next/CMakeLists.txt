@@ -29,6 +29,10 @@ endif()
 
 project(photon-next VERSION 0.1.0 LANGUAGES C CXX)
 
+# Empty keeps daemon binaries under the build tree. The repo `photon build`
+# sets this to <repo>/build so the server finds them beside its own exe.
+set(PHOTON_SHIP_DIR "" CACHE PATH "Directory for photon-backend, photon-index, and photon-ui")
+
 if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(WARNING
         "photon-next is developed with clang. Current compilers: "

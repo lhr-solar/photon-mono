@@ -34,8 +34,6 @@ func resolveLiveWriter(cfg *Config) string {
 	candidates := []string{
 		filepath.Join(dir, "photon-index.exe"),
 		filepath.Join(dir, "photon-index"),
-		filepath.Join(dir, "..", "photon-next", ".artifacts", "backend", "photon-index.exe"),
-		filepath.Join(dir, "..", "photon-next", ".artifacts", "photon-index.exe"),
 	}
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {
@@ -56,7 +54,6 @@ func resolveDbc(cfg *Config) string {
 	dir := filepath.Dir(exe)
 	candidates := []string{
 		filepath.Join(dir, "assets", "dbc", "carcan_telemcan.dbc"),
-		filepath.Join(dir, "..", "photon-next", "assets", "dbc", "carcan_telemcan.dbc"),
 	}
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {

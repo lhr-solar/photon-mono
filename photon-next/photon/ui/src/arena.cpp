@@ -4,12 +4,52 @@
 #include "photon/interp.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace photon::ui {
 namespace {
+
+bool containsFold(const std::string& hay, const char* needle) {
+    if (needle == nullptr || needle[0] == '\0') {
+        return false;
+    }
+    const std::size_t n = std::strlen(needle);
+    if (n > hay.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i + n <= hay.size(); ++i) {
+        bool ok = true;
+        for (std::size_t j = 0; j < n; ++j) {
+            const auto a = static_cast<unsigned char>(hay[i + j]);
+            const auto b = static_cast<unsigned char>(needle[j]);
+            if (std::tolower(a) != std::tolower(b)) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::uint32_t chooseAntennaId(const std::vector<ctrl::CatalogSignal>& catalog) {
+    std::uint32_t onTelemetry = 0;
+    for (const ctrl::CatalogSignal& cat : catalog) {
+        if (containsFold(cat.name, "antenna") || containsFold(cat.name, "rssi") || containsFold(cat.name, "snr")) {
+            return cat.id;
+        }
+        if (onTelemetry == 0 && containsFold(cat.message, "Telemetry_Status") && !cat.name.empty()) {
+            onTelemetry = cat.id;
+        }
+    }
+    return onTelemetry;
+}
 
 std::uint64_t wallMs() {
     using clock = std::chrono::system_clock;
@@ -485,6 +525,7 @@ void ClientArena::applySignalCatalog(const ctrl::Message& msg) {
     }
     signalCatalog = msg.catalog;
     haveSignalCatalog = true;
+    antennaId_ = chooseAntennaId(signalCatalog);
     for (const auto& sig : signalCatalog) {
         SignalRing& ring = rings_[sig.id];
         ring.id = sig.id;
@@ -498,6 +539,18 @@ void ClientArena::applySignalCatalog(const ctrl::Message& msg) {
         tiles_.setSession(tiles_.sessionId(), dbcId.empty() ? tiles_.dbcHash() : dbcId, tiles_.sessionMinMs(),
                           tiles_.sessionMaxMs());
     }
+}
+
+const ctrl::CatalogSignal* ClientArena::antennaSignal() const {
+    if (antennaId_ == 0) {
+        return nullptr;
+    }
+    for (const ctrl::CatalogSignal& cat : signalCatalog) {
+        if (cat.id == antennaId_) {
+            return &cat;
+        }
+    }
+    return nullptr;
 }
 
 void ClientArena::resetSignalMap() {

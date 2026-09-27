@@ -81,8 +81,6 @@ func resolveUiBackend(cfg *Config) string {
 	return firstExisting([]string{
 		filepath.Join(dir, "photon-backend.exe"),
 		filepath.Join(dir, "photon-backend"),
-		filepath.Join(dir, "..", "photon-next", ".artifacts", "backend", "photon-backend.exe"),
-		filepath.Join(dir, "..", "photon-next", ".artifacts", "photon-backend.exe"),
 	})
 }
 
@@ -90,7 +88,6 @@ func resolveUiDir() string {
 	dir := exeDir()
 	for _, candidate := range []string{
 		filepath.Join(dir, "ui"),
-		filepath.Join(dir, "..", "photon-next", ".artifacts-web"),
 	} {
 		if st, err := os.Stat(filepath.Join(candidate, "photon.html")); err == nil && !st.IsDir() {
 			return candidate
@@ -100,10 +97,8 @@ func resolveUiDir() string {
 }
 
 func resolveAssetsDir() string {
-	dir := exeDir()
 	return firstExistingDir([]string{
-		filepath.Join(dir, "assets"),
-		filepath.Join(dir, "..", "photon-next", "assets"),
+		filepath.Join(exeDir(), "assets"),
 	})
 }
 
@@ -195,7 +190,7 @@ func startLocalUI(cfg *Config) *LocalUI {
 
 	uiDir := resolveUiDir()
 	if uiDir == "" {
-		log.Printf("[photon-server] local UI page missing (expected photon.html next to the binary or in photon-next/.artifacts-web)")
+		log.Printf("[photon-server] local UI page missing (expected ui/photon.html next to the binary)")
 		return ui
 	}
 

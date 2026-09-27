@@ -57,6 +57,10 @@ public:
 
 private:
     CustomViews views_;
+    int grafanaMode_ = 0;
+    bool grafanaUrlReady_ = false;
+    bool grafanaOpened_ = false;
+    char grafanaUrl_[256]{};
 };
 
 class DynamicsScreen final : public Screen {
@@ -79,7 +83,8 @@ private:
     std::uint64_t replayMs_ = 0;
     bool showScene_ = true;
     bool showVideo_ = true;
-    float sceneFraction_ = 0.5f;
+    float sceneFractionSide_ = 0.5f;
+    float sceneFractionStack_ = 0.5f;
 };
 
 class Scene3dScreen final : public Screen {

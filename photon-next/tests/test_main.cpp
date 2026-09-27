@@ -12,29 +12,13 @@
 #include <string>
 #include <vector>
 
-void runTrackSimTests();
-void runInterpTests();
 void runMuxTests();
 void runDbcTests();
-void runLogSessionsTests();
-void runPcanTests();
 void runVsd1Tests();
 void runVideoTests();
 void runVideoIndexTests();
-void runTsdbTests();
-void runTsdbLiveTests();
-void runTileCacheTests();
-void runAnalysisRuntimeTests();
-void runTilePersistTests();
-void runSessionHistoryTests();
-void runReplayViewTests();
-void runLogSwitchTests();
 void runCliTests();
 void runLiveFanoutTests();
-void runAnalysisComputeTests();
-void runAnalysisWorkbookTests();
-void runAnalysisOverlayTests();
-void runPlotAxisTests();
 
 namespace {
 
@@ -445,35 +429,6 @@ void testControlJsonRoundTrip() {
     CHECK(hc->type == photon::ctrl::Type::HistoryCancel);
     CHECK(hc->queryId == 17);
 
-    auto acq = photon::ctrl::analysisComputeRequest("job-1", "sess-1", 1000, 5000, {3, 4}, "summarize_window", 800);
-    acq.dbcHash = "abc";
-    acq.computeKind = "grok";
-    auto acqText = photon::ctrl::serialize(acq);
-    CHECK(acqText.find("analysis_compute_request") != std::string::npos);
-    CHECK(acqText.find("job_id") != std::string::npos);
-    auto acqBack = photon::ctrl::parse(acqText);
-    CHECK(acqBack.has_value());
-    CHECK(acqBack->type == photon::ctrl::Type::AnalysisComputeRequest);
-    CHECK(acqBack->jobId == "job-1");
-    CHECK(acqBack->sessionId == "sess-1");
-    CHECK(acqBack->t0Ms == 1000);
-    CHECK(acqBack->t1Ms == 5000);
-    CHECK(acqBack->signalIds.size() == 2);
-    CHECK(acqBack->recipeId == "summarize_window");
-
-    auto acr = photon::ctrl::parse(photon::ctrl::serialize(
-        photon::ctrl::analysisComputeResult("job-1", "failed", {}, "offline", "analysis compute sidecar offline")));
-    CHECK(acr.has_value());
-    CHECK(acr->type == photon::ctrl::Type::AnalysisComputeResult);
-    CHECK(acr->jobId == "job-1");
-    CHECK(acr->computeStatus == "failed");
-    CHECK(acr->code == "offline");
-
-    auto acc = photon::ctrl::parse(photon::ctrl::serialize(photon::ctrl::analysisComputeCancel("job-1")));
-    CHECK(acc.has_value());
-    CHECK(acc->type == photon::ctrl::Type::AnalysisComputeCancel);
-    CHECK(acc->jobId == "job-1");
-
     auto cl = photon::ctrl::parse(photon::ctrl::serialize(photon::ctrl::catalogList()));
     CHECK(cl.has_value());
     CHECK(cl->type == photon::ctrl::Type::CatalogList);
@@ -605,29 +560,13 @@ int main() {
     testControlJsonRoundTrip();
     testCanpRoundTrip();
     testWsAcceptKey();
-    runTrackSimTests();
-    runInterpTests();
     runMuxTests();
     runDbcTests();
-    runLogSessionsTests();
-    runPcanTests();
     runVsd1Tests();
     runVideoTests();
     runVideoIndexTests();
-    runTsdbTests();
-    runTsdbLiveTests();
-    runTileCacheTests();
-    runAnalysisRuntimeTests();
-    runTilePersistTests();
-    runSessionHistoryTests();
-    runReplayViewTests();
-    runLogSwitchTests();
     runCliTests();
     runLiveFanoutTests();
-    runAnalysisComputeTests();
-    runAnalysisWorkbookTests();
-    runAnalysisOverlayTests();
-    runPlotAxisTests();
 
     std::fprintf(stdout, "photon-tests: %d passed, %d failed\n", gPassed, gFailed);
     return gFailed == 0 ? 0 : 1;

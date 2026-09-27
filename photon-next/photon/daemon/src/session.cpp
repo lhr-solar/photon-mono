@@ -66,10 +66,6 @@ void SessionHub::setClientPassword(std::string password) {
     videoRelay_.setPassword(std::move(password));
 }
 
-void SessionHub::setAnalysisCompute(std::string addr) {
-    analysisComputeAddr_ = std::move(addr);
-}
-
 void SessionHub::setHistoryRemote(std::string host, std::uint16_t port, std::string path, std::string password) {
     historyRemote_.setTarget(std::move(host), port, std::move(path), std::move(password));
     if (historyRemote_.enabled()) {
@@ -89,11 +85,6 @@ bool SessionHub::start() {
     std::fprintf(stdout, "[photon-backend] video default %s:%u\n", videoRelay_.host().c_str(),
                  static_cast<unsigned>(videoRelay_.port()));
     std::fprintf(stdout, "[photon-backend] track_sim catalog %s\n", catalog_.tracksDir().c_str());
-    if (analysisComputeAddr_.empty()) {
-        std::fprintf(stdout, "[photon-backend] analysis-compute off\n");
-    } else {
-        std::fprintf(stdout, "[photon-backend] analysis-compute %s\n", analysisComputeAddr_.c_str());
-    }
     std::string dbcError;
     if (loadBundledDbc("carcan_telemcan", dbcError)) {
         std::fprintf(stdout, "[photon-backend] dbc bundled carcan_telemcan (%zu messages)\n",
@@ -167,7 +158,6 @@ void SessionHub::detachClientLog(ClientSession& client) {
 }
 
 void SessionHub::stop() {
-    cancelAllAnalysisJobs();
     for (auto& job : historyJobs_) {
         if (job.cancel) {
             job.cancel->store(true);
@@ -195,7 +185,6 @@ void SessionHub::stop() {
         }
     }
     trackSimJobs_.clear();
-    cancelAllAnalysisJobs();
     sources_.stop();
     videoRelay_.stop();
     listener_.close();
@@ -368,7 +357,6 @@ void SessionHub::tick(std::uint64_t nowTick) {
     streamVideoStatus(nowTick, false);
     checkTxWatchdog(nowTick);
     pollTrackSimJobs();
-    pollAnalysisJobs();
     pollHistoryJobs();
     historyRemote_.tick(nowTick);
     flushHistoryRemote();

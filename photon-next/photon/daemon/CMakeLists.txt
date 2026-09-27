@@ -1,5 +1,4 @@
 add_library(photon_daemon STATIC
-    src/analysis_compute.cpp
     src/cli.cpp
     src/csv_export.cpp
     src/history_remote.cpp
@@ -31,6 +30,11 @@ photon_apply_warnings(photon_daemon)
 
 add_executable(photon-backend main.cpp)
 target_link_libraries(photon-backend PRIVATE photon_daemon)
+if(PHOTON_SHIP_DIR)
+    set_target_properties(photon-backend PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${PHOTON_SHIP_DIR}"
+    )
+endif()
 
 add_custom_command(TARGET photon-backend POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -51,5 +55,10 @@ if(WIN32)
 endif()
 if(CMAKE_BUILD_TYPE)
     target_compile_definitions(photon-index PRIVATE PHOTON_BUILD_TYPE=${CMAKE_BUILD_TYPE})
+endif()
+if(PHOTON_SHIP_DIR)
+    set_target_properties(photon-index PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${PHOTON_SHIP_DIR}"
+    )
 endif()
 photon_apply_warnings(photon-index)

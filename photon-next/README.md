@@ -26,13 +26,7 @@ PCAN / DAQ TCP / log replay
 
 | Path | Role |
 | --- | --- |
-| `photon/base` | JSON, endian |
-| `photon/wire` | protocol v1, control plane, CANP, video framing |
-| `photon/decode` | DBC parse/decode, interp |
-| `photon/store` | TSDB, VSD1, video index, log sessions |
-| `photon/net` | sockets, WebSocket, client auth |
-| `photon/hw` | PCAN (native only) |
-| `photon/synth` | track-sim solver, analysis |
+| `photon/core` | Protocol, DBC, logs, video index, sockets, PCAN, track-sim |
 | `photon/daemon` | `photon-backend`, `photon-index` |
 | `photon/ui` | ImGui client (`photon-ui` / `photon.html`) |
 | `web/` | shell + Emscripten build/serve scripts |

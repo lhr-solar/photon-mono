@@ -1,4 +1,5 @@
 # Build trees and binaries at any level
+/build/
 .artifacts/
 .artifacts-*/
 .external/

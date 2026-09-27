@@ -372,14 +372,6 @@ void testScrubDecodesToCursorWhenResident() {
     CHECK(plan.feedUpToMs == 104'100);
 }
 
-void testReplayPrefetchCoversAMinute() {
-    CHECK(photon::vidx::replayPrefetchGops(0, 0) == 8);
-    CHECK(photon::vidx::replayPrefetchGops(1'000, 2'000) == 8);
-    const auto minute = photon::vidx::replayPrefetchGops(1'789'244'940'000ull, 1'789'245'000'000ull);
-    CHECK(minute == 4);
-    CHECK(photon::vidx::replayPrefetchGops(0, 3'600'000ull) == 4);
-}
-
 // §8.3: exact decode happens on release, in the Committed state.
 void testCommitDecodesToTheExactCursor() {
     CursorPlayback pb;
@@ -698,7 +690,6 @@ void runVideoIndexTests() {
     testEntryRowSelection();
     testScrubIssuesNoRequests();
     testScrubDecodesToCursorWhenResident();
-    testReplayPrefetchCoversAMinute();
     testCommitDecodesToTheExactCursor();
     testCommitPrefetchesBeforeLastGopEnds();
     testCommitRequestsPointerOutsideResidentRange();

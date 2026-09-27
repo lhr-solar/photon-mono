@@ -96,6 +96,18 @@ $pyFile = Join-Path $Build "_check_glue.py"
 python $pyFile $js $wasm
 if ($LASTEXITCODE -ne 0) { throw "photon.js / photon.wasm import modules do not match" }
 
+$Repo = Split-Path $Root -Parent
+if (Test-Path (Join-Path $Repo 'photon.cmd')) {
+    $ShipUi = Join-Path $Repo 'build\ui'
+    New-Item -ItemType Directory -Force -Path $ShipUi | Out-Null
+    foreach ($name in @("photon.html", "photon.js", "photon.wasm", "photon.data")) {
+        $src = Join-Path $Build $name
+        if (Test-Path $src) {
+            Copy-Item $src (Join-Path $ShipUi $name) -Force
+        }
+    }
+    Write-Host "Copied UI to $ShipUi"
+}
 $Ui = Join-Path $Root "..\photon-server\ui"
 if (Test-Path $Ui) {
     foreach ($name in @("photon.html", "photon.js", "photon.wasm", "photon.data")) {

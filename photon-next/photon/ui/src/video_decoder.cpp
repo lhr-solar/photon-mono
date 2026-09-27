@@ -556,6 +556,9 @@ bool VideoDecoder::hasVideoAt(std::uint64_t videoMs) const {
     if (videoMs == 0 || ring_.nals().empty()) {
         return false;
     }
+    if (videoMs + 80 < ring_.oldestMs()) {
+        return false;
+    }
     return ring_.keyframeAtOrBefore(videoMs) >= 0 && videoMs <= ring_.newestMs() + 80;
 }
 
@@ -872,6 +875,10 @@ void VideoDecoder::syncToCursor(const ClientArena& arena) {
     }
     const bool modeChanged = next != mode_;
     mode_ = next;
+    if (modeChanged) {
+        ring_.setBudget(next == vidx::PlaybackMode::Live || next == vidx::PlaybackMode::Idle ? vidx::kLiveCacheBudget
+                                                                                            : vidx::kReplayCacheBudget);
+    }
 
     auto forceCachedStill = [&]() {
         if (haveFrame_ || ring_.nals().empty() || mode_ == vidx::PlaybackMode::Idle) {
