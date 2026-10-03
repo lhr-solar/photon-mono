@@ -16,7 +16,9 @@ type SignalID struct {
 
 // SignalDef is loaded from the DBC and does not change during a session.
 type SignalDef struct {
-	ID SignalID
+	ID        SignalID
+	Message   string
+	ValueType int
 
 	StartBit     uint16
 	BitLength    uint16
@@ -55,25 +57,29 @@ type SessionCache struct {
 
 	Definitions map[SignalID]SignalDef
 	Samples     map[SampleKey]*Sample
+	byCANID     map[uint32][]SignalDef
 }
 
-// Map is one open recording. Clients do not read it.
-type Map struct{}
+// New creates the definitions and samples for one recording.
+func New() *SessionCache {
+	return &SessionCache{
+		Definitions: make(map[SignalID]SignalDef),
+		Samples:     make(map[SampleKey]*Sample),
+	}
+}
 
-func New() *Map { return &Map{} }
-
-func (m *Map) Len() int { return 0 }
+func (s *SessionCache) Len() int { return 0 }
 
 // Add updates one raw tally. raw is the integer from the frame.
-func (m *Map) Add(signal string, sec, raw int64, tap int, hasTap bool, age int64, hasAge bool) {
+func (s *SessionCache) Add(signal string, sec, raw int64, tap int, hasTap bool, age int64, hasAge bool) {
 
 }
 
 // OpenLines returns the open tallies and leaves them in place.
-func (m *Map) OpenLines(session string) []string { return nil }
+func (s *SessionCache) OpenLines(session string) []string { return nil }
 
 // TakeClosed returns tallies older than keepSec and drops those buckets.
-func (m *Map) TakeClosed(session string, keepSec int64) []string { return nil }
+func (s *SessionCache) TakeClosed(session string, keepSec int64) []string { return nil }
 
 // Frame is one decoded CAN frame. TimeMs is the frame clock in milliseconds.
 type Frame struct {
@@ -90,6 +96,6 @@ func SignalDefLines(db *SessionCache, sha string, start int64) []string { return
 // Fold adds one frame. An index signal is the tap, not its own row.
 // An age signal updates age and is not its own row.
 // IEEE float and double signals are skipped.
-func (m *Map) Fold(db *SessionCache, fr Frame) (added, skippedFloat int) {
+func (s *SessionCache) Fold(fr Frame) (added, skippedFloat int) {
 	return 0, 0
 }

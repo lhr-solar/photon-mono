@@ -10,15 +10,18 @@ import (
 )
 
 var (
-	messageLine = regexp.MustCompile(`^BO_\s+(\d+)\s+(\S+):\s*(\d+)\s+\S+`)
-	signalLine  = regexp.MustCompile(`^SG_\s+(\S+)\s*:\s*(\d+)\|(\d+)@(0|1)([+-])\s*\(([^,]+),([^)]+)\)\s*\[([^|]+)\|([^]]+)\]\s*"([^"]*)"`)
+	messageLine   = regexp.MustCompile(`^BO_\s+(\d+)\s+(\S+):\s*(\d+)\s+\S+`)
+	signalLine    = regexp.MustCompile(`^SG_\s+(\S+)\s*:\s*(\d+)\|(\d+)@(0|1)([+-])\s*\(([^,]+),([^)]+)\)\s*\[([^|]+)\|([^]]+)\]\s*"([^"]*)"`)
+	valueTypeLine = regexp.MustCompile(`^SIG_VALTYPE_\s+(\d+)\s+(\S+)\s*:\s*([12])\s*;`)
 )
 
 func ParseDBC(text string) (*SessionCache, error) {
-	cache := &SessionCache{Definitions: make(map[SignalID]SignalDef)}
+	cache := New()
 	var currentID uint32
 	var currentExtended bool
+	var currentMessage string
 	var hasMessage bool
+	valueTypes := make(map[SignalID]int)
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	scanner.Buffer(make([]byte, 4096), 4*1024*1024)
 	for scanner.Scan() {
@@ -37,6 +40,7 @@ func ParseDBC(text string) (*SessionCache, error) {
 			}
 			currentID = uint32(id) & 0x1fffffff
 			currentExtended = uint32(id)&0x80000000 != 0
+			currentMessage = parts[2]
 			hasMessage = true
 		case strings.HasPrefix(line, "SG_ ") && hasMessage:
 			parts := signalLine.FindStringSubmatch(line)
@@ -55,10 +59,21 @@ func ParseDBC(text string) (*SessionCache, error) {
 			}
 			id := SignalID{CANID: currentID, Extended: currentExtended, Name: parts[1]}
 			cache.Definitions[id] = SignalDef{
-				ID: id, StartBit: uint16(start), BitLength: uint16(length),
+				ID: id, Message: currentMessage, StartBit: uint16(start), BitLength: uint16(length),
 				LittleEndian: parts[4] == "1", Signed: parts[5] == "-",
 				Factor: factor, Offset: offset, Unit: parts[10],
 			}
+		case strings.HasPrefix(line, "SIG_VALTYPE_ "):
+			parts := valueTypeLine.FindStringSubmatch(line)
+			if parts == nil {
+				continue
+			}
+			id, err := strconv.ParseUint(parts[1], 10, 32)
+			if err != nil {
+				continue
+			}
+			key := SignalID{CANID: uint32(id) & 0x1fffffff, Extended: uint32(id)&0x80000000 != 0, Name: parts[2]}
+			valueTypes[key], _ = strconv.Atoi(parts[3])
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -66,6 +81,12 @@ func ParseDBC(text string) (*SessionCache, error) {
 	}
 	if len(cache.Definitions) == 0 {
 		return nil, fmt.Errorf("DBC contains no supported signals")
+	}
+	cache.byCANID = make(map[uint32][]SignalDef)
+	for id, def := range cache.Definitions {
+		def.ValueType = valueTypes[id]
+		cache.Definitions[id] = def
+		cache.byCANID[id.CANID] = append(cache.byCANID[id.CANID], def)
 	}
 	return cache, nil
 }

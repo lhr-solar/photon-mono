@@ -8,10 +8,10 @@ import (
 )
 
 func TestBucketFoldsOneSecond(t *testing.T) {
-	m := New()
-	m.Add("IMU_Accel_FR.Accel_X", 100, 1000, 0, false, 0, false)
-	m.Add("IMU_Accel_FR.Accel_X", 100, 2000, 0, false, 0, false)
-	lines := m.OpenLines("dev")
+	session := New()
+	session.Add("IMU_Accel_FR.Accel_X", 100, 1000, 0, false, 0, false)
+	session.Add("IMU_Accel_FR.Accel_X", 100, 2000, 0, false, 0, false)
+	lines := session.OpenLines("dev")
 	if len(lines) != 1 {
 		t.Fatalf("lines=%d", len(lines))
 	}
@@ -19,16 +19,16 @@ func TestBucketFoldsOneSecond(t *testing.T) {
 	if lines[0] != want {
 		t.Fatalf("got %s", lines[0])
 	}
-	if got := m.Len(); got != 1 {
+	if got := session.Len(); got != 1 {
 		t.Fatalf("open overwrite dropped the bucket: %d", got)
 	}
 }
 
 func TestTapAndAgeStayApart(t *testing.T) {
-	m := New()
-	m.Add("BPS_Temperature_Aggregate_Arr.BPS_Temperature_Tap_Data", 50, 25000, 12, true, 100, true)
-	m.Add("BPS_Temperature_Aggregate_Arr.BPS_Temperature_Tap_Data", 50, 26000, 13, true, 80, true)
-	lines := m.OpenLines("dev")
+	session := New()
+	session.Add("BPS_Temperature_Aggregate_Arr.BPS_Temperature_Tap_Data", 50, 25000, 12, true, 100, true)
+	session.Add("BPS_Temperature_Aggregate_Arr.BPS_Temperature_Tap_Data", 50, 26000, 13, true, 80, true)
+	lines := session.OpenLines("dev")
 	if len(lines) != 2 {
 		t.Fatalf("lines=%v", lines)
 	}
@@ -41,17 +41,17 @@ func TestTapAndAgeStayApart(t *testing.T) {
 }
 
 func TestClosedSecondDrops(t *testing.T) {
-	m := New()
-	m.Add("IMU_Accel_FR.Accel_X", 100, 1000, 0, false, 0, false)
-	m.Add("IMU_Accel_FR.Accel_X", 101, 5, 0, false, 0, false)
-	closed := m.TakeClosed("dev", 101)
+	session := New()
+	session.Add("IMU_Accel_FR.Accel_X", 100, 1000, 0, false, 0, false)
+	session.Add("IMU_Accel_FR.Accel_X", 101, 5, 0, false, 0, false)
+	closed := session.TakeClosed("dev", 101)
 	if len(closed) != 1 || !strings.Contains(closed[0], " 100000") {
 		t.Fatalf("closed=%v", closed)
 	}
-	if m.Len() != 1 {
-		t.Fatalf("open second dropped, len=%d", m.Len())
+	if session.Len() != 1 {
+		t.Fatalf("open second dropped, len=%d", session.Len())
 	}
-	if lines := m.OpenLines("dev"); len(lines) != 1 || !strings.Contains(lines[0], " 101000") {
+	if lines := session.OpenLines("dev"); len(lines) != 1 || !strings.Contains(lines[0], " 101000") {
 		t.Fatalf("open=%v", lines)
 	}
 }
@@ -83,16 +83,16 @@ func TestCarDBCFoldsIMUAndBPS(t *testing.T) {
 		t.Fatalf("accel def %s", accel)
 	}
 
-	m := New()
+	session := db
 	imu := Frame{TimeMs: 100_500, CANID: 4512, DLC: 8}
 	imu.Data[6] = 0x03
 	imu.Data[7] = 0xE8
-	if added, skipped := m.Fold(db, imu); added == 0 || skipped != 0 {
+	if added, skipped := session.Fold(imu); added == 0 || skipped != 0 {
 		t.Fatalf("imu added=%d skipped=%d", added, skipped)
 	}
 	imu.Data[6] = 0x07
 	imu.Data[7] = 0xD0
-	m.Fold(db, imu)
+	session.Fold(imu)
 
 	bps := Frame{TimeMs: 100_500, CANID: 12, DLC: 8}
 	bps.Data[0] = 12
@@ -100,12 +100,12 @@ func TestCarDBCFoldsIMUAndBPS(t *testing.T) {
 	bps.Data[2] = 0x61
 	bps.Data[5] = 100
 	bps.Data[7] = 7
-	if added, _ := m.Fold(db, bps); added == 0 {
+	if added, _ := session.Fold(bps); added == 0 {
 		t.Fatal("bps added nothing")
 	}
 
 	var sawAccel, sawTap, sawFrame bool
-	for _, line := range m.OpenLines("dev") {
+	for _, line := range session.OpenLines("dev") {
 		if strings.Contains(line, "signal=IMU_Accel_FR.Accel_X ") {
 			sawAccel = true
 			if !strings.Contains(line, "min=1000i,max=2000i,sum=3000i,count=2i") {
@@ -142,11 +142,11 @@ func TestFloatSignalsAreSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New()
+	session := db
 	fr := Frame{TimeMs: 1000, CANID: 1059, DLC: 8}
-	added, skipped := m.Fold(db, fr)
-	if added != 0 || skipped != 2 || m.Len() != 0 {
-		t.Fatalf("added=%d skipped=%d len=%d", added, skipped, m.Len())
+	added, skipped := session.Fold(fr)
+	if added != 0 || skipped != 2 || session.Len() != 0 {
+		t.Fatalf("added=%d skipped=%d len=%d", added, skipped, session.Len())
 	}
 }
 
@@ -158,13 +158,32 @@ BO_ 1 T: 8 X
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New()
+	session := db
 	fr := Frame{TimeMs: 2000, CANID: 1, DLC: 8}
 	fr.Data[0] = 0x18
 	fr.Data[1] = 0xFC
-	m.Fold(db, fr)
-	lines := m.OpenLines("dev")
+	session.Fold(fr)
+	lines := session.OpenLines("dev")
 	if len(lines) != 1 || !strings.Contains(lines[0], "min=-1000i") {
 		t.Fatalf("%v", lines)
+	}
+}
+
+func TestFoldRespectsDLCAndBigEndian(t *testing.T) {
+	db, err := ParseDBC("BO_ 7 T: 8 X\n SG_ V : 7|16@0- (1,0) [0|0] \"\" X\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := db
+	fr := Frame{TimeMs: 2500, CANID: 7, DLC: 1, Data: [8]byte{0xff, 0xfe}}
+	if added, _ := session.Fold(fr); added != 0 || session.Len() != 0 {
+		t.Fatalf("short DLC added=%d len=%d", added, session.Len())
+	}
+	fr.DLC = 2
+	if added, _ := session.Fold(fr); added != 1 {
+		t.Fatalf("added=%d", added)
+	}
+	if lines := session.OpenLines("dev"); len(lines) != 1 || !strings.Contains(lines[0], "min=-2i") {
+		t.Fatalf("lines=%v", lines)
 	}
 }

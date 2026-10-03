@@ -130,6 +130,7 @@ func (s *StreamStore) Append(payload []byte) (MessageID, error) {
 
 	id := s.nextID
 	frame := encodeFrame(id, payload)
+	
 	offset := s.activeOffset
 	n, err := s.activeFile.Write(frame)
 	if err != nil {

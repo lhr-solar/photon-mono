@@ -35,6 +35,10 @@ func main() {
 	}
 	defer store.Close()
 
+	SessionCache := cache.New()
+	cache.LoadDBC("")
+
+
 	stats := store.Stats()
 	log.Printf("[photon-server] Store initialized: %d segments recovered (oldest ID: %d, latest ID: %d, disk bytes: %d)",
 		stats.Segments, stats.OldestID, stats.LatestID, stats.DiskBytes)
@@ -70,8 +74,6 @@ func main() {
 		log.Fatalf("[photon-server] Failed to bind client listener on %s: %v", cfg.ClientAddr(), err)
 	}
 	defer clientListener.Close()
-
-	
 
 	observerListener, err := net.Listen("tcp", cfg.ObserverAddr())
 	if err != nil {
@@ -161,7 +163,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		appendLoop(store, ingress)
+		appendLoop(store, ingress, SessionCache)
 	}()
 
 	// Ingress listener & connection tracking
@@ -282,7 +284,7 @@ func main() {
 
 // Segment files stay. Plot rows are the one-second tally in package cache.
 // That package is not called from here. go test ./cache is the proof.
-func appendLoop(store *StreamStore, ingress <-chan []byte) {
+func appendLoop(store *StreamStore, ingress <-chan []byte, sessionCache *cache.SessionCache) {
 	for payload := range ingress {
 		if store.StoragePressureHigh() {
 			started := time.Now()
@@ -296,6 +298,7 @@ func appendLoop(store *StreamStore, ingress <-chan []byte) {
 		if _, err := store.Append(payload); err != nil {
 			// Append error during store closure or write failure
 		}
+		
 	}
 }
 
@@ -335,7 +338,7 @@ func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []
 	defer conn.Close()
 	defer ingressStats.active.Add(-1)
 
-	// Closing the connection on shutdown unblocks a pending Read. 
+	// Closing the connection on shutdown unblocks a pending Read.
 	// When the reader returns first, done stops this helper without closing it early.
 	done := make(chan struct{})
 	defer close(done)
@@ -364,6 +367,10 @@ func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []
 		copy(payload, buf[:n])
 		// All ingress connections feed the same channel and append loop.
 		ingress <- payload
+
+		
+		// decode frame and pass back to parent funciton
+
 		observeQueueDepth(len(ingress))
 	}
 }
