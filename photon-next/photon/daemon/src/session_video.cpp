@@ -33,9 +33,21 @@ void SessionHub::streamVideo() {
             if (!client->helloOk || !client->videoSubscribed) {
                 continue;
             }
-            // Slow-WS-client: drop non-keyframe (and non-config) when the send buffer is congested.
-            // Config NALs stay — they are tiny and required for decoder init.
-            if (client->conn.outboundBytes() > kVideoCongestBytes && !key && !cfg) {
+            // History tiles share this socket. Counting them as video congestion
+            // dropped every P-frame, so the picture only changed on the next
+            // keyframe (about once a GOP). Only a backed-up video/telemetry
+            // queue should skip deltas.
+            std::size_t history = 0;
+            for (const auto& tag : client->outboundTags) {
+                if (tag.history) {
+                    history += tag.bytes;
+                }
+            }
+            const std::size_t out = client->conn.outboundBytes();
+            if (history > out) {
+                history = out;
+            }
+            if (out - history > kVideoCongestBytes && !key && !cfg) {
                 videoRelay_.noteDropped();
                 continue;
             }

@@ -159,15 +159,15 @@ void LiveViewScreen::draw(UiContext& ui) {
     float videoW = 0.0f;
     float videoH = bodyH;
     if (split) {
-        sceneW = std::clamp(bodyW * sceneFractionSide_, minPane, bodyW - minPane - kSplitterW);
+        sceneW = std::clamp(bodyW * sceneFraction_, minPane, bodyW - minPane - kSplitterW);
         videoW = bodyW - sceneW - kSplitterW;
-        sceneFractionSide_ = sceneW / bodyW;
+        sceneFraction_ = sceneW / bodyW;
     } else if (stack) {
         sceneW = bodyW;
         videoW = bodyW;
-        sceneH = std::clamp(bodyH * sceneFractionStack_, minPane, bodyH - minPane - kSplitterW);
+        sceneH = std::clamp(bodyH * sceneFraction_, minPane, bodyH - minPane - kSplitterW);
         videoH = bodyH - sceneH - kSplitterW;
-        sceneFractionStack_ = sceneH / bodyH;
+        sceneFraction_ = sceneH / bodyH;
     } else if (showScene_) {
         sceneW = bodyW;
     } else if (showVideo_) {
@@ -205,8 +205,8 @@ void LiveViewScreen::draw(UiContext& ui) {
         const bool active = ImGui::IsItemActive();
         if (active && along > 1.0f) {
             const float delta = split ? ImGui::GetIO().MouseDelta.x : ImGui::GetIO().MouseDelta.y;
-            float& fraction = split ? sceneFractionSide_ : sceneFractionStack_;
-            fraction = std::clamp(fraction + delta / along, minPane / along, 1.0f - minPane / along - kSplitterW / along);
+            sceneFraction_ = std::clamp(sceneFraction_ + delta / along, minPane / along,
+                                        1.0f - minPane / along - kSplitterW / along);
         }
         const ImVec2 s0 = ImGui::GetItemRectMin();
         const ImVec2 s1 = ImGui::GetItemRectMax();

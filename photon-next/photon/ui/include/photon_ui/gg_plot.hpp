@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,6 +37,7 @@ struct GgPeak {
     double x = 0.0;
     double y = 0.0;
     double value = 0.0;
+    std::uint64_t timestampMs = 0;
 };
 
 struct GgPeaks {
@@ -47,6 +49,8 @@ struct GgPeaks {
 };
 
 void findGgPeaks(const std::vector<double>& x, const std::vector<double>& y, GgPeaks* out);
+void findGgPeaks(const std::vector<double>& x, const std::vector<double>& y,
+                 const std::vector<double>& timestamps, GgPeaks* out);
 void mergeGgPeaks(GgPeaks* dst, const GgPeaks& src);
 double ggPeakSpan(const GgPeaks& peaks, double floor = 2.0);
 double ggViewSpan(const GgPeaks& window, double floor = 2.0);

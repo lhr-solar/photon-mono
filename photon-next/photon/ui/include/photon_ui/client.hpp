@@ -115,6 +115,8 @@ private:
     std::uint64_t videoStartMs_ = 0;
     bool locateSent_ = false;
     double lastLiveLocateMs_ = 0.0;
+    std::uint64_t lastReplayLocateAtMs_ = 0;
+    std::uint64_t lastReplayLocateNewestMs_ = 0;
     double locateBackoffMs_ = 0.0;
     // The live t=0 poll runs 2.5x a second. One log line per poll buried
     // everything else in the drawer, so live locates log on this interval.

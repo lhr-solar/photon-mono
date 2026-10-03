@@ -556,9 +556,6 @@ bool VideoDecoder::hasVideoAt(std::uint64_t videoMs) const {
     if (videoMs == 0 || ring_.nals().empty()) {
         return false;
     }
-    if (videoMs + 80 < ring_.oldestMs()) {
-        return false;
-    }
     return ring_.keyframeAtOrBefore(videoMs) >= 0 && videoMs <= ring_.newestMs() + 80;
 }
 
@@ -657,6 +654,15 @@ void VideoDecoder::pushToRing(std::uint64_t timestampMs, std::uint8_t flags, std
         if (mode_ == vidx::PlaybackMode::Live && haveVcl_) {
             stamp = nextPicMs_;
         }
+    } else if (mode_ == vidx::PlaybackMode::Live) {
+        LivePictureClock clock;
+        clock.lastRawMs = lastRawMs_;
+        clock.nextPicMs = nextPicMs_;
+        clock.haveVcl = haveVcl_;
+        stamp = stampLivePicture(clock, timestampMs, video::nalStartsPicture(nal) || !haveVcl_);
+        lastRawMs_ = clock.lastRawMs;
+        nextPicMs_ = clock.nextPicMs;
+        haveVcl_ = clock.haveVcl;
     } else {
         const bool newPic = video::nalStartsPicture(nal) || !haveVcl_;
         if (newPic) {
@@ -875,10 +881,6 @@ void VideoDecoder::syncToCursor(const ClientArena& arena) {
     }
     const bool modeChanged = next != mode_;
     mode_ = next;
-    if (modeChanged) {
-        ring_.setBudget(next == vidx::PlaybackMode::Live || next == vidx::PlaybackMode::Idle ? vidx::kLiveCacheBudget
-                                                                                            : vidx::kReplayCacheBudget);
-    }
 
     auto forceCachedStill = [&]() {
         if (haveFrame_ || ring_.nals().empty() || mode_ == vidx::PlaybackMode::Idle) {
@@ -936,14 +938,8 @@ void VideoDecoder::syncToCursor(const ClientArena& arena) {
         }
         releaseLivePaced(ImGui::GetTime() * 1000.0);
         forceCachedStill();
-        // Always probe t=0 (newest GOP). Locating at the previous maxMs
-        // stuck on that GOP: locate(endMs) is "at or before", so the next
-        // camera GOP never became the entry. flushVideoLocate rate-limits
-        // the RPC; skip-same-IDR keeps a growing GOP from replaying.
-        if (!havePendingLocate_) {
-            pendingLocateMs_ = 0;
-            havePendingLocate_ = true;
-        }
+        // The client requests a newest-GOP seed only when live frames stall.
+        // Queuing it on every paint makes pointer RPCs interrupt UDP playback.
         return;
     }
 

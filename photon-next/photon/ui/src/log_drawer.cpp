@@ -423,14 +423,26 @@ std::string formatBytes(double bytes) {
 }  // namespace
 
 void LogDrawer::ensureCalendar(const UiContext& ui) {
-    if (ui.client.haveHistoryCatalog() && !catalogDateApplied_) {
-        const auto latest = latestCatalogDate(ui.client);
-        if (!latest.empty()) {
-            selectedDate_ = latest;
+    // Drive-day logs are the archive. A two-minute catalog row must not
+    // hide them by opening the calendar on today.
+    if (!catalogDateApplied_) {
+        std::string latestDay;
+        for (const auto& day : ui.arena.driveDays) {
+            if (isReplayLogDate(day.date) && day.date > latestDay) {
+                latestDay = day.date;
+            }
+        }
+        if (!latestDay.empty()) {
+            selectedDate_ = latestDay;
             catalogDateApplied_ = true;
             calReady_ = false;
-        } else {
+        } else if (ui.client.haveHistoryCatalog()) {
+            const auto latest = latestCatalogDate(ui.client);
+            if (!latest.empty()) {
+                selectedDate_ = latest;
+            }
             catalogDateApplied_ = true;
+            calReady_ = false;
         }
     }
     if (selectedDate_.empty()) {
@@ -690,7 +702,8 @@ void LogDrawer::drawCalendar(UiContext& ui) {
             }
             char ymd[16];
             std::snprintf(ymd, sizeof(ymd), "%04d-%02d-%02d", calYear_, calMonth_, day);
-            const bool hasLog = findDay(ui.arena, ymd) != nullptr || catalogHasDate(ui.client, ymd);
+            const bool hasLog = (findDay(ui.arena, ymd) != nullptr && isReplayLogDate(ymd)) ||
+                                catalogHasDate(ui.client, ymd);
             const bool selected = selectedDate_ == ymd;
             char label[12];
             std::snprintf(label, sizeof(label), "%d##cal%d", day, day);
@@ -722,7 +735,7 @@ void LogDrawer::drawCalendar(UiContext& ui) {
 
 void LogDrawer::drawRuns(UiContext& ui) {
     drawSectionLabel("Runs");
-    const auto* day = findDay(ui.arena, selectedDate_);
+    const auto* day = isReplayLogDate(selectedDate_) ? findDay(ui.arena, selectedDate_) : nullptr;
     if (!ui.client.haveHistoryCatalog() && day == nullptr) {
         ImGui::TextColored(theme::mutedFg(), "Loading runs…");
         return;
@@ -894,6 +907,41 @@ void LogDrawer::drawPanel(UiContext& ui, ImVec2 size) {
     theme::pushSmallFont();
     ImGui::TextColored(theme::mutedFg(), "Pick a run. Live to leave.");
     theme::popSmallFont();
+    std::vector<std::string> dates;
+    for (const auto& day : ui.arena.driveDays) {
+        if (isReplayLogDate(day.date)) {
+            dates.push_back(day.date);
+        }
+    }
+    for (const auto& row : ui.client.historyCatalog()) {
+        if (row.maxMs <= row.minMs) {
+            continue;
+        }
+        const auto a = localYmdFromUnixMs(row.minMs);
+        const auto b = localYmdFromUnixMs(row.maxMs);
+        if (isReplayLogDate(a)) {
+            dates.push_back(a);
+        }
+        if (isReplayLogDate(b) && b != a) {
+            dates.push_back(b);
+        }
+    }
+    std::sort(dates.begin(), dates.end());
+    dates.erase(std::unique(dates.begin(), dates.end()), dates.end());
+    if (!dates.empty()) {
+        theme::pushSmallFont();
+        for (int i = 0; i < static_cast<int>(dates.size()); ++i) {
+            if (i > 0) {
+                ImGui::SameLine();
+            }
+            if (ImGui::SmallButton((dates[static_cast<std::size_t>(i)] + "##logdate").c_str())) {
+                selectedDate_ = dates[static_cast<std::size_t>(i)];
+                calReady_ = false;
+                ui.client.playDate(selectedDate_);
+            }
+        }
+        theme::popSmallFont();
+    }
     ImGui::Separator();
     drawTimeline(ui);
     ImGui::Dummy(ImVec2(0.0f, 6.0f));

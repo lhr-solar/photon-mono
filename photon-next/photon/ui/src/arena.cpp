@@ -4,52 +4,12 @@
 #include "photon/interp.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 
 namespace photon::ui {
 namespace {
-
-bool containsFold(const std::string& hay, const char* needle) {
-    if (needle == nullptr || needle[0] == '\0') {
-        return false;
-    }
-    const std::size_t n = std::strlen(needle);
-    if (n > hay.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i + n <= hay.size(); ++i) {
-        bool ok = true;
-        for (std::size_t j = 0; j < n; ++j) {
-            const auto a = static_cast<unsigned char>(hay[i + j]);
-            const auto b = static_cast<unsigned char>(needle[j]);
-            if (std::tolower(a) != std::tolower(b)) {
-                ok = false;
-                break;
-            }
-        }
-        if (ok) {
-            return true;
-        }
-    }
-    return false;
-}
-
-std::uint32_t chooseAntennaId(const std::vector<ctrl::CatalogSignal>& catalog) {
-    std::uint32_t onTelemetry = 0;
-    for (const ctrl::CatalogSignal& cat : catalog) {
-        if (containsFold(cat.name, "antenna") || containsFold(cat.name, "rssi") || containsFold(cat.name, "snr")) {
-            return cat.id;
-        }
-        if (onTelemetry == 0 && containsFold(cat.message, "Telemetry_Status") && !cat.name.empty()) {
-            onTelemetry = cat.id;
-        }
-    }
-    return onTelemetry;
-}
 
 std::uint64_t wallMs() {
     using clock = std::chrono::system_clock;
@@ -394,26 +354,41 @@ void ClientArena::ingestTimeline(const proto::TimelineStatus& status) {
 
 void ClientArena::ingestVideo(const proto::VideoFrame& frame) {
     video.lastTsMs = frame.timestampMs;
+    video.lastFrameArrivalMs = wallMs();
     // SPS/PPS are restamped on every access unit. Counting them made a 30 fps
     // camera read as ~90 fps. Config NALs are not pictures.
     if (proto::videoConfig(frame.flags)) {
         return;
     }
-    if (video.fpsWindowCount != 0 && frame.timestampMs == video.fpsLastPictureMs) {
+    if (video.fpsHaveLast && frame.timestampMs == video.fpsLastPictureMs) {
         return;
     }
-    video.fpsLastPictureMs = frame.timestampMs;
-    ++video.frames;
-    ++video.fpsWindowCount;
-    const std::uint64_t now = wallMs();
-    if (video.fpsWindowStartMs == 0) {
-        video.fpsWindowStartMs = now;
+    // Arrival time is not the frame rate: a GOP lands in one burst, and the
+    // camera also pauses. The picture timestamp step is the rate.
+    if (video.fpsHaveLast && frame.timestampMs + 2000 < video.fpsLastPictureMs) {
+        video.fpsDeltaN = 0;
+        video.fpsDeltaI = 0;
+    } else if (video.fpsHaveLast && frame.timestampMs > video.fpsLastPictureMs) {
+        const auto d = frame.timestampMs - video.fpsLastPictureMs;
+        if (d >= 8 && d <= 200) {
+            video.fpsDeltaMs[video.fpsDeltaI] = static_cast<std::uint32_t>(d);
+            video.fpsDeltaI = (video.fpsDeltaI + 1) % VideoState::kFpsDeltas;
+            if (video.fpsDeltaN < VideoState::kFpsDeltas) {
+                ++video.fpsDeltaN;
+            }
+        }
     }
-    const std::uint64_t dt = now - video.fpsWindowStartMs;
-    if (dt >= 1000) {
-        video.fps = static_cast<double>(video.fpsWindowCount) * 1000.0 / static_cast<double>(dt);
-        video.fpsWindowCount = 0;
-        video.fpsWindowStartMs = now;
+    video.fpsLastPictureMs = frame.timestampMs;
+    video.fpsHaveLast = true;
+    ++video.frames;
+    if (video.fpsDeltaN >= 5) {
+        std::uint32_t tmp[VideoState::kFpsDeltas];
+        std::copy_n(video.fpsDeltaMs, video.fpsDeltaN, tmp);
+        std::sort(tmp, tmp + video.fpsDeltaN);
+        const std::uint32_t mid = tmp[video.fpsDeltaN / 2];
+        if (mid > 0) {
+            video.fps = 1000.0 / static_cast<double>(mid);
+        }
     }
 }
 
@@ -525,7 +500,6 @@ void ClientArena::applySignalCatalog(const ctrl::Message& msg) {
     }
     signalCatalog = msg.catalog;
     haveSignalCatalog = true;
-    antennaId_ = chooseAntennaId(signalCatalog);
     for (const auto& sig : signalCatalog) {
         SignalRing& ring = rings_[sig.id];
         ring.id = sig.id;
@@ -539,18 +513,6 @@ void ClientArena::applySignalCatalog(const ctrl::Message& msg) {
         tiles_.setSession(tiles_.sessionId(), dbcId.empty() ? tiles_.dbcHash() : dbcId, tiles_.sessionMinMs(),
                           tiles_.sessionMaxMs());
     }
-}
-
-const ctrl::CatalogSignal* ClientArena::antennaSignal() const {
-    if (antennaId_ == 0) {
-        return nullptr;
-    }
-    for (const ctrl::CatalogSignal& cat : signalCatalog) {
-        if (cat.id == antennaId_) {
-            return &cat;
-        }
-    }
-    return nullptr;
 }
 
 void ClientArena::resetSignalMap() {

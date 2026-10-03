@@ -23,6 +23,44 @@ void releaseVideoThrough(const vidx::GopRing& ring, std::uint64_t releasedSeq,
 // latency. Behind by kLiveResyncMs: the buffer got far ahead (hidden tab, a
 // stall, a camera burst) and playing it out would be a replay, so re-enter on
 // the newest keyframe instead.
+inline constexpr std::uint64_t kLivePictureStepMs = 33;
+// A real camera timestamp may land a frame or two ahead. A GOP locate stamp
+// jumps by the whole GOP (about 1–2 s). That jump is not a picture to wait for.
+inline constexpr std::uint64_t kLiveStampSlackMs = 80;
+
+struct LivePictureClock {
+    std::uint64_t lastRawMs = 0;
+    std::uint64_t nextPicMs = 0;
+    bool haveVcl = false;
+};
+
+// Live locate stamps every NAL in a GOP with one wall time, then the next GOP
+// jumps forward by the GOP length. Pacing will not show a picture until the
+// release clock reaches its stamp, so that jump is a freeze at every keyframe.
+// Keep the 33 ms picture clock across the jump. Timestamps that already step
+// about one frame stay on the camera clock.
+inline std::uint64_t stampLivePicture(LivePictureClock& clock, std::uint64_t timestampMs, bool newPic) {
+    if (!newPic && clock.haveVcl) {
+        return clock.nextPicMs;
+    }
+    if (!clock.haveVcl) {
+        clock.nextPicMs = timestampMs;
+        clock.lastRawMs = timestampMs;
+        clock.haveVcl = true;
+        return clock.nextPicMs;
+    }
+    if (timestampMs == clock.lastRawMs) {
+        clock.nextPicMs += kLivePictureStepMs;
+    } else if (timestampMs > clock.nextPicMs && timestampMs <= clock.nextPicMs + kLiveStampSlackMs) {
+        clock.nextPicMs = timestampMs;
+        clock.lastRawMs = timestampMs;
+    } else {
+        clock.nextPicMs += kLivePictureStepMs;
+        clock.lastRawMs = timestampMs;
+    }
+    return clock.nextPicMs;
+}
+
 inline constexpr std::uint64_t kLiveCatchUpMs = 700;
 // Must exceed a synthetic 33 ms × ~90-NAL GOP (~3 s). 2.5 s re-entered the
 // IDR every paint and Live froze on one still.

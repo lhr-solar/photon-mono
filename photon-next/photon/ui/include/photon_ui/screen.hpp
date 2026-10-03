@@ -6,6 +6,7 @@
 #include "photon_ui/custom_view.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -57,10 +58,6 @@ public:
 
 private:
     CustomViews views_;
-    int grafanaMode_ = 0;
-    bool grafanaUrlReady_ = false;
-    bool grafanaOpened_ = false;
-    char grafanaUrl_[256]{};
 };
 
 class DynamicsScreen final : public Screen {
@@ -71,6 +68,43 @@ public:
 
 private:
     int imuIndex_ = 0;
+    std::string peakKey_;
+    bool peakLong_ = false;
+    double peakLongMax_ = 0.0;
+    double peakLongMin_ = 0.0;
+    std::uint64_t peakLongMaxMs_ = 0;
+    std::uint64_t peakLongMinMs_ = 0;
+    bool peakLat_ = false;
+    double peakLatMax_ = 0.0;
+    double peakLatMin_ = 0.0;
+    std::uint64_t peakLatMaxMs_ = 0;
+    std::uint64_t peakLatMinMs_ = 0;
+    bool peakCombHave_ = false;
+    double peakComb_ = 0.0;
+    std::uint64_t peakCombMs_ = 0;
+    bool peakWhFlHave_ = false;
+    bool peakWhFrHave_ = false;
+    double peakWhFl_ = 0.0;
+    double peakWhFr_ = 0.0;
+    std::uint64_t peakWhFlMs_ = 0;
+    std::uint64_t peakWhFrMs_ = 0;
+};
+
+class MechanicalScreen final : public Screen {
+public:
+    const char* id() const override { return "mechanical"; }
+    const char* label() const override { return "Mechanical"; }
+    void draw(UiContext& ui) override;
+};
+
+class PduScreen final : public Screen {
+public:
+    const char* id() const override { return "pdu"; }
+    const char* label() const override { return "PDU"; }
+    void draw(UiContext& ui) override;
+
+private:
+    int selected_ = 0;
 };
 
 class LiveViewScreen final : public Screen {
@@ -83,8 +117,7 @@ private:
     std::uint64_t replayMs_ = 0;
     bool showScene_ = true;
     bool showVideo_ = true;
-    float sceneFractionSide_ = 0.5f;
-    float sceneFractionStack_ = 0.5f;
+    float sceneFraction_ = 0.5f;
 };
 
 class Scene3dScreen final : public Screen {

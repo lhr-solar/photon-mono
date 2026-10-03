@@ -10,12 +10,13 @@
 namespace photon::ui {
 namespace {
 
-void considerAxis(GgPeak* peak, double metric, double x, double y, bool greater) {
+void considerAxis(GgPeak* peak, double metric, double x, double y, std::uint64_t timestampMs, bool greater) {
     if (!peak->have || (greater ? metric > peak->value : metric < peak->value)) {
         peak->have = true;
         peak->x = x;
         peak->y = y;
         peak->value = metric;
+        peak->timestampMs = timestampMs;
     }
 }
 
@@ -23,7 +24,7 @@ void considerMerge(GgPeak* dst, const GgPeak& src, bool greater) {
     if (!src.have) {
         return;
     }
-    considerAxis(dst, src.value, src.x, src.y, greater);
+    considerAxis(dst, src.value, src.x, src.y, src.timestampMs, greater);
 }
 
 void drawStick(const char* id, double x1, double y1, ImVec4 col) {
@@ -59,6 +60,11 @@ void annotate(double x, double y, ImVec4 col, ImVec2 pix, const char* fmt, doubl
 }  // namespace
 
 void findGgPeaks(const std::vector<double>& x, const std::vector<double>& y, GgPeaks* out) {
+    findGgPeaks(x, y, {}, out);
+}
+
+void findGgPeaks(const std::vector<double>& x, const std::vector<double>& y,
+                 const std::vector<double>& timestamps, GgPeaks* out) {
     if (out == nullptr) {
         return;
     }
@@ -71,11 +77,13 @@ void findGgPeaks(const std::vector<double>& x, const std::vector<double>& y, GgP
             std::fabs(y[i]) > kGgMaxAbsG) {
             continue;
         }
-        considerAxis(&out->longPos, x[i], x[i], y[i], true);
-        considerAxis(&out->longNeg, x[i], x[i], y[i], false);
-        considerAxis(&out->latPos, y[i], x[i], y[i], true);
-        considerAxis(&out->latNeg, y[i], x[i], y[i], false);
-        considerAxis(&out->combined, std::hypot(x[i], y[i]), x[i], y[i], true);
+        const std::uint64_t at = i < timestamps.size() && std::isfinite(timestamps[i]) && timestamps[i] > 0.0
+                                     ? static_cast<std::uint64_t>(timestamps[i]) : 0;
+        considerAxis(&out->longPos, x[i], x[i], y[i], at, true);
+        considerAxis(&out->longNeg, x[i], x[i], y[i], at, false);
+        considerAxis(&out->latPos, y[i], x[i], y[i], at, true);
+        considerAxis(&out->latNeg, y[i], x[i], y[i], at, false);
+        considerAxis(&out->combined, std::hypot(x[i], y[i]), x[i], y[i], at, true);
     }
 }
 

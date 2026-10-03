@@ -15,11 +15,18 @@ namespace photon::ui {
 class Client;
 class ClientArena;
 
-// Semantic role -> DBC "Message.Signal" for Pit / Dynamics.
-// Compiled table in photon/ui/src/signal_map.cpp, not JSON.
-// Names are case-sensitive. A miss is logged. Synthetic ids fill a tile only
-// until the signal catalog arrives; after that a miss stays empty.
-// Cell voltage and temperature are kMuxDefs (BPS_Tap_idx), not one scalar per cell.
+// Semantic role -> DBC "Message.Signal" mapping for Pit / Dynamics.
+//
+// Choice: compiled table in signal_map.cpp (not JSON-at-runtime). WASM has no
+// filesystem unless we add --embed-file / generated headers; a constexpr table
+// is warning-clean, has no parse failure mode, and matches catalog names
+// exactly. Edit kScalarDefs / kMuxDefs in frontend/src/signal_map.cpp when the
+// DBC role names change. Names are case-sensitive "Message.Signal".
+//
+// Resolve against the backend signal_catalog (FNV-1a ids). Missing names are
+// logged to the control log and the screen falls back to synthetic ids 1-4
+// (rpm/speed/soc/temp) with a SYNTHETIC watermark. Cell voltages/temps are
+// muxed in the DBC (BPS_Tap_idx + tap data), not cell_voltage[i] scalars.
 
 enum class MapScreen : unsigned {
     None = 0,
@@ -42,15 +49,9 @@ inline constexpr bool mapOn(MapScreen have, MapScreen want) {
 inline constexpr double kMpsToMph = 2.2369362920544;
 inline constexpr double kWheelDiameterInches = 21.56;
 inline constexpr double kWheelDiameterMeters = kWheelDiameterInches * 0.0254;
-inline constexpr double kMinGroundSpeedMps = 0.5;
 
 inline double wheelSpeedMps(double rpm) {
     return rpm * (3.14159265358979323846 * kWheelDiameterMeters) / 60.0;
-}
-
-inline double slipPercent(double wheelMps, double groundMps) {
-    const double denom = std::max(std::abs(groundMps), kMinGroundSpeedMps);
-    return 100.0 * (wheelMps - groundMps) / denom;
 }
 
 struct ScalarDef {

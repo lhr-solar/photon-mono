@@ -1,5 +1,6 @@
 #include "photon_ui/client.hpp"
 #include "photon_ui/gg_plot.hpp"
+#include "photon_ui/clock_format.hpp"
 #include "photon_ui/screen.hpp"
 #include "photon_ui/signal_map.hpp"
 #include "photon_ui/theme.hpp"
@@ -12,6 +13,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <limits>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -72,9 +75,11 @@ void extractWindow(const SignalRing& ring, double t0, std::vector<double>& t, st
 }
 
 void pairWindows(const std::vector<double>& at, const std::vector<double>& av, const std::vector<double>& bt,
-                 const std::vector<double>& bv, double maxDtMs, std::vector<double>& xa, std::vector<double>& yb) {
+                 const std::vector<double>& bv, double maxDtMs, std::vector<double>& xa, std::vector<double>& yb,
+                 std::vector<double>& times) {
     xa.clear();
     yb.clear();
+    times.clear();
     const std::size_t na = at.size();
     const std::size_t nb = bt.size();
     xa.reserve(nb);
@@ -100,38 +105,8 @@ void pairWindows(const std::vector<double>& at, const std::vector<double>& av, c
         if (dt <= maxDtMs) {
             xa.push_back(xv);
             yb.push_back(bv[ib]);
+            times.push_back(tb);
         }
-    }
-}
-
-void fillSlipWindow(const std::vector<double>& rpmT, const std::vector<double>& rpmV,
-                    const std::vector<double>& spdT, const std::vector<double>& spdV, std::vector<double>& t,
-                    std::vector<double>& slip) {
-    t.clear();
-    slip.clear();
-    t.reserve(rpmT.size());
-    slip.reserve(rpmT.size());
-    std::size_t is = 0;
-    for (std::size_t i = 0; i < rpmT.size(); ++i) {
-        const double tb = rpmT[i];
-        while (is + 1 < spdT.size() && spdT[is + 1] <= tb) {
-            ++is;
-        }
-        if (is >= spdT.size()) {
-            break;
-        }
-        double dt = std::abs(spdT[is] - tb);
-        double ground = spdV[is];
-        if (is + 1 < spdT.size() && std::abs(spdT[is + 1] - tb) < dt) {
-            dt = std::abs(spdT[is + 1] - tb);
-            ground = spdV[is + 1];
-        }
-        if (dt > 250.0 || std::abs(ground) < kMinGroundSpeedMps || !std::isfinite(rpmV[i]) ||
-            !std::isfinite(ground)) {
-            continue;
-        }
-        t.push_back(tb);
-        slip.push_back(slipPercent(wheelSpeedMps(rpmV[i]), ground));
     }
 }
 
@@ -186,6 +161,46 @@ void downsampleXy(std::vector<double>& x, std::vector<double>& y, std::size_t ma
     y.resize(w);
 }
 
+void noteHigh(bool& have, double& slot, std::uint64_t& at, double v, double t) {
+    if (!std::isfinite(v)) {
+        return;
+    }
+    if (!have || v > slot) {
+        have = true;
+        slot = v;
+        at = static_cast<std::uint64_t>(t);
+    }
+}
+
+void noteRange(bool& have, double& hi, double& lo, std::uint64_t& hiAt, std::uint64_t& loAt,
+               double v, double t) {
+    if (!std::isfinite(v)) {
+        return;
+    }
+    if (!have) {
+        have = true;
+        hi = lo = v;
+        hiAt = loAt = static_cast<std::uint64_t>(t);
+        return;
+    }
+    if (v > hi) { hi = v; hiAt = static_cast<std::uint64_t>(t); }
+    if (v < lo) { lo = v; loAt = static_cast<std::uint64_t>(t); }
+}
+
+double ringLatest(const SignalRing* ring) {
+    if (ring == nullptr || !ring->hasLatest || !std::isfinite(ring->latest)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return ring->latest;
+}
+
+void rpmToMph(const std::vector<double>& rpm, std::vector<double>& mph) {
+    mph.resize(rpm.size());
+    for (std::size_t i = 0; i < rpm.size(); ++i) {
+        mph[i] = wheelSpeedMps(rpm[i]) * kMpsToMph;
+    }
+}
+
 void plotLine(const char* name, const std::vector<double>& t, const std::vector<double>& v, std::size_t color) {
     if (t.empty()) {
         return;
@@ -226,25 +241,38 @@ void DynamicsScreen::draw(UiContext& ui) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float gap = theme::kGridGap;
     const float tileH = theme::kVitalTileHeight;
-    const float tileW = (avail.x - gap * 3.0f) / 4.0f;
+    const float tileW = (avail.x - gap * 2.0f) / 3.0f;
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
 
     imuIndex_ = clampGgImuIndex(imuIndex_);
     const GgImu& imu = kGgImus[imuIndex_];
-    const char* tileRoles[] = {"vehicle_speed_mph", "steering_angle", imu.axRole, imu.ayRole,
-                               "slip_fl",           "slip_fr",        "yaw_rate", "throttle"};
-    for (int i = 0; i < 8; ++i) {
-        if (i != 0 && i != 4) {
+    const char* tileRoles[] = {"vehicle_speed_mph", "steering_angle", imu.axRole,
+                               imu.ayRole,          "yaw_rate",       "throttle"};
+    for (int i = 0; i < 6; ++i) {
+        if (i % 3 != 0) {
             ImGui::SameLine(0.0f, gap);
         }
         const Vital v = ui.arena.signalMap().vital(tileRoles[i], ui.arena);
         drawVitalTile(tileRoles[i], v, ImVec2(tileW, tileH));
     }
 
-    const float remainH = std::max(160.0f, avail.y - tileH * 2.0f - gap * 3.0f);
+    const ctrl::CatalogSignal* antenna = findAntennaSignal(ui.arena);
+    if (antenna != nullptr && antenna->id != 0) {
+        ui.client.ensureSubscribed(std::vector<std::uint32_t>{antenna->id});
+    }
+    theme::pushSmallFont();
+    if (antenna != nullptr && ui.arena.has(antenna->id)) {
+        ImGui::Text("Antenna  %s  %.4g %s", antenna->name.c_str(), ui.arena.readout(antenna->id),
+                    antenna->unit.c_str());
+    } else {
+        ImGui::TextColored(theme::mutedFg(), "%s", antennaCanNote());
+    }
+    theme::popSmallFont();
+
+    const float remainH = std::max(180.0f, avail.y - tileH * 2.0f - gap * 4.0f - 48.0f);
     const float ggSide = std::min(remainH, avail.x * 0.42f);
     const float rightW = std::max(180.0f, avail.x - ggSide - gap);
-    const float halfH = (remainH - gap) * 0.5f;
+    const float plotH = (remainH - gap) / 2.0f;
 
     const SignalMap& map = ui.arena.signalMap();
     const SignalRing* ax = mappedRing(map, ui.arena, imu.axRole);
@@ -269,12 +297,9 @@ void DynamicsScreen::draw(UiContext& ui) {
     static std::vector<double> spdV;
     static std::vector<double> ggX;
     static std::vector<double> ggY;
+    static std::vector<double> ggT;
     static std::vector<double> ggCloudX;
     static std::vector<double> ggCloudY;
-    static std::vector<double> slipTFl;
-    static std::vector<double> slipVFl;
-    static std::vector<double> slipTFr;
-    static std::vector<double> slipVFr;
 
     if (ax != nullptr) {
         extractWindow(*ax, t0, axT, axV);
@@ -307,9 +332,9 @@ void DynamicsScreen::draw(UiContext& ui) {
         spdV.clear();
     }
 
-    pairWindows(axT, axV, ayT, ayV, 20.0, ggX, ggY);
+    pairWindows(axT, axV, ayT, ayV, 20.0, ggX, ggY, ggT);
     GgPeaks windowPeaks{};
-    findGgPeaks(ggX, ggY, &windowPeaks);
+    findGgPeaks(ggX, ggY, ggT, &windowPeaks);
     static std::string heldKey;
     static GgPeaks heldPeaks;
     const std::string key =
@@ -317,25 +342,134 @@ void DynamicsScreen::draw(UiContext& ui) {
     if (key != heldKey) {
         heldKey = key;
         heldPeaks = {};
+        peakLong_ = false;
+        peakLat_ = false;
+        peakCombHave_ = false;
+        peakWhFlHave_ = false;
+        peakWhFrHave_ = false;
     }
     mergeGgPeaks(&heldPeaks, windowPeaks);
+    for (std::size_t i = 0; i < axV.size(); ++i) {
+        noteRange(peakLong_, peakLongMax_, peakLongMin_, peakLongMaxMs_, peakLongMinMs_, axV[i], axT[i]);
+    }
+    for (std::size_t i = 0; i < ayV.size(); ++i) {
+        noteRange(peakLat_, peakLatMax_, peakLatMin_, peakLatMaxMs_, peakLatMinMs_, ayV[i], ayT[i]);
+    }
+    if (heldPeaks.combined.have) {
+        noteHigh(peakCombHave_, peakComb_, peakCombMs_, heldPeaks.combined.value,
+                 static_cast<double>(heldPeaks.combined.timestampMs));
+    }
+    static std::vector<double> flMph;
+    static std::vector<double> frMph;
+    rpmToMph(flV, flMph);
+    rpmToMph(frV, frMph);
+    for (std::size_t i = 0; i < flMph.size(); ++i) {
+        noteHigh(peakWhFlHave_, peakWhFl_, peakWhFlMs_, flMph[i], flT[i]);
+    }
+    for (std::size_t i = 0; i < frMph.size(); ++i) {
+        noteHigh(peakWhFrHave_, peakWhFr_, peakWhFrMs_, frMph[i], frT[i]);
+    }
+    const double nowFl = wheelSpeedMps(ringLatest(fl)) * kMpsToMph;
+    const double nowFr = wheelSpeedMps(ringLatest(fr)) * kMpsToMph;
+    static std::vector<double> speedGgX[3];
+    static std::vector<double> speedGgY[3];
+    for (int band = 0; band < 3; ++band) {
+        speedGgX[band].clear();
+        speedGgY[band].clear();
+    }
+    if (!spdT.empty() && ggT.size() == ggX.size()) {
+        std::size_t speedIndex = 0;
+        const std::size_t stride = std::max<std::size_t>(1, (ggX.size() + kGgMaxPts - 1) / kGgMaxPts);
+        for (std::size_t i = 0; i < ggX.size(); i += stride) {
+            while (speedIndex + 1 < spdT.size() && spdT[speedIndex + 1] <= ggT[i]) ++speedIndex;
+            if (std::abs(spdT[speedIndex] - ggT[i]) > 250.0 || !std::isfinite(spdV[speedIndex])) continue;
+            const double mph = spdV[speedIndex] * kMpsToMph;
+            const int band = mph < 15.0 ? 0 : mph < 35.0 ? 1 : 2;
+            speedGgX[band].push_back(ggX[i]);
+            speedGgY[band].push_back(ggY[i]);
+        }
+    }
     downsampleXy(ggX, ggY, kGgMaxPts);
     binGgCloud(ggX, ggY, 0.05, ggCloudX, ggCloudY);
-    fillSlipWindow(flT, flV, spdT, spdV, slipTFl, slipVFl);
-    fillSlipWindow(frT, frV, spdT, spdV, slipTFr, slipVFr);
+
+    auto chip = [](const char* text) {
+        ImGui::SameLine(0.0f, 8.0f);
+        ImGui::TextUnformatted(text);
+    };
+    theme::pushSmallFont();
+    char chipBuf[64];
+    ImGui::TextUnformatted("Peaks");
+    std::snprintf(chipBuf, sizeof(chipBuf), "FL %.1f mph", std::isfinite(nowFl) ? nowFl : 0.0);
+    chip(std::isfinite(nowFl) ? chipBuf : "FL --");
+    std::snprintf(chipBuf, sizeof(chipBuf), "FR %.1f mph", std::isfinite(nowFr) ? nowFr : 0.0);
+    chip(std::isfinite(nowFr) ? chipBuf : "FR --");
+    std::snprintf(chipBuf, sizeof(chipBuf), "pk FL %.1f", peakWhFlHave_ ? peakWhFl_ : 0.0);
+    chip(peakWhFlHave_ ? chipBuf : "pk FL --");
+    std::snprintf(chipBuf, sizeof(chipBuf), "pk FR %.1f", peakWhFrHave_ ? peakWhFr_ : 0.0);
+    chip(peakWhFrHave_ ? chipBuf : "pk FR --");
+    std::snprintf(chipBuf, sizeof(chipBuf), "long %+.2f/%+.2f", peakLong_ ? peakLongMax_ : 0.0,
+                  peakLong_ ? peakLongMin_ : 0.0);
+    chip(peakLong_ ? chipBuf : "long --");
+    std::snprintf(chipBuf, sizeof(chipBuf), "lat %+.2f/%+.2f", peakLat_ ? peakLatMax_ : 0.0,
+                  peakLat_ ? peakLatMin_ : 0.0);
+    chip(peakLat_ ? chipBuf : "lat --");
+    std::snprintf(chipBuf, sizeof(chipBuf), "|g| %.2f", peakCombHave_ ? peakComb_ : 0.0);
+    chip(peakCombHave_ ? chipBuf : "|g| --");
+    ImGui::SameLine(0.0f, 8.0f);
+    if (ImGui::SmallButton("Reset peaks")) {
+        peakLong_ = false;
+        peakLat_ = false;
+        peakCombHave_ = false;
+        peakWhFlHave_ = false;
+        peakWhFrHave_ = false;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Session peaks. Wheel speed uses the 21.56 in rolling diameter on WheelRPM_FL and WheelRPM_FR.");
+    }
+    ImGui::SameLine(0.0f, 8.0f);
+    if (ImGui::SmallButton("Peak times")) {
+        ImGui::OpenPopup("##dynamics-peak-times");
+    }
+    if (ImGui::BeginPopup("##dynamics-peak-times")) {
+        auto row = [](const char* label, bool have, double value, const char* unit, std::uint64_t at) {
+            if (!have) return;
+            char when[48];
+            formatLocalClock(at, when, sizeof(when), ClockParts::TimeMs);
+            ImGui::Text("%-12s %+.2f %-4s  %s", label, value, unit, when);
+        };
+        row("Long +", peakLong_, peakLongMax_, "g", peakLongMaxMs_);
+        row("Long -", peakLong_, peakLongMin_, "g", peakLongMinMs_);
+        row("Lat +", peakLat_, peakLatMax_, "g", peakLatMaxMs_);
+        row("Lat -", peakLat_, peakLatMin_, "g", peakLatMinMs_);
+        row("Combined", peakCombHave_, peakComb_, "g", peakCombMs_);
+        row("Wheel FL", peakWhFlHave_, peakWhFl_, "mph", peakWhFlMs_);
+        row("Wheel FR", peakWhFrHave_, peakWhFr_, "mph", peakWhFrMs_);
+        ImGui::EndPopup();
+    }
+    theme::popSmallFont();
 
     theme::pushPlotFont();
     const ImVec2 ggMin = ImGui::GetCursorScreenPos();
     if (ImPlot::BeginPlot("##gg", ImVec2(ggSide, ggSide), ImPlotFlags_Equal | ImPlotFlags_NoLegend)) {
         ImPlot::SetupAxes("Long G", "Lat G");
         const double span = ggViewSpan(windowPeaks);
-        ImPlot::SetupAxesLimits(-span, span, -span, span, ImPlotCond_Always);
+        ImPlot::SetupAxesLimits(-span, span, -span, span, ImPlotCond_Once);
         plotCircle("0.5 g", 0.5, theme::withAlpha(theme::mutedFg(), 0.35f));
         plotCircle("1.0 g", 1.0, theme::withAlpha(theme::mutedFg(), 0.55f));
         if (!ggCloudX.empty()) {
-            ImPlot::SetNextLineStyle(IMPLOT_AUTO_COL, 0.0f);
-            ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 3.5f, plotColor(0), 0.0f, plotColor(0));
-            ImPlot::PlotScatter("G-G", ggCloudX.data(), ggCloudY.data(), static_cast<int>(ggCloudX.size()));
+            if (!speedGgX[0].empty() || !speedGgX[1].empty() || !speedGgX[2].empty()) {
+                const char* labels[] = {"<15 mph", "15-35 mph", ">=35 mph"};
+                for (int band = 0; band < 3; ++band) {
+                    if (speedGgX[band].empty()) continue;
+                    const ImVec4 color = plotColor(static_cast<std::size_t>(band));
+                    ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 3.0f, color, 0.0f, color);
+                    ImPlot::PlotScatter(labels[band], speedGgX[band].data(), speedGgY[band].data(),
+                                        static_cast<int>(speedGgX[band].size()));
+                }
+            } else {
+                ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 3.5f, plotColor(0), 0.0f, plotColor(0));
+                ImPlot::PlotScatter("G-G", ggCloudX.data(), ggCloudY.data(), static_cast<int>(ggCloudX.size()));
+            }
             drawGgPeaks(heldPeaks);
             drawGgNow(ggX.back(), ggY.back());
         } else {
@@ -348,9 +482,15 @@ void DynamicsScreen::draw(UiContext& ui) {
         heldKey.clear();
         heldPeaks = {};
     }
+    if (!speedGgX[0].empty() || !speedGgX[1].empty() || !speedGgX[2].empty()) {
+        ImGui::SetCursorScreenPos(ImVec2(ggMin.x + 8.0f, ggMin.y + ggSide - 18.0f));
+        theme::pushSmallFont();
+        ImGui::TextUnformatted("Speed: <15 | 15-35 | 35+ mph");
+        theme::popSmallFont();
+    }
     ImGui::SetCursorScreenPos(ImVec2(ggMin.x + ggSide + gap, ggMin.y));
     ImGui::BeginGroup();
-    if (ImPlot::BeginPlot("##g-time", ImVec2(rightW, halfH))) {
+    if (ImPlot::BeginPlot("##g-time", ImVec2(rightW, plotH))) {
         ImPlot::SetupAxes("t (ms UTC)", "g");
         ImPlot::SetupAxisLimits(ImAxis_X1, t1 - kWinMs, t1, ImPlotCond_Always);
         ImPlot::SetupAxisLimits(ImAxis_Y1, -2.0, 2.0, ImPlotCond_Once);
@@ -362,14 +502,13 @@ void DynamicsScreen::draw(UiContext& ui) {
         ImPlot::EndPlot();
     }
 
-    if (ImPlot::BeginPlot("##slip", ImVec2(rightW, halfH))) {
-        ImPlot::SetupAxes("t (ms UTC)", "slip %");
+    if (ImPlot::BeginPlot("##wheel", ImVec2(rightW, plotH))) {
+        ImPlot::SetupAxes("t (ms UTC)", "mph");
         ImPlot::SetupAxisLimits(ImAxis_X1, t1 - kWinMs, t1, ImPlotCond_Always);
-        ImPlot::SetupAxisLimits(ImAxis_Y1, -25.0, 25.0, ImPlotCond_Once);
-        plotLine("Slip FL", slipTFl, slipVFl, 0);
-        plotLine("Slip FR", slipTFr, slipVFr, 1);
-        if (slipTFl.empty() && slipTFr.empty()) {
-            ImPlot::PlotText("no slip yet", t1 - kWinMs * 0.5, 0.0);
+        plotLine("FL", flT, flMph, 0);
+        plotLine("FR", frT, frMph, 1);
+        if (flMph.empty() && frMph.empty()) {
+            ImPlot::PlotText("no wheel speed yet", t1 - kWinMs * 0.5, 0.0);
         }
         ImPlot::EndPlot();
     }

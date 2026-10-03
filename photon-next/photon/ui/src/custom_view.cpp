@@ -69,6 +69,19 @@ ViewCell lineCell(const char* id, const char* title, ViewRect rect, ViewSignal s
     return cell;
 }
 
+const ctrl::CatalogSignal* catalogSignal(const ClientArena& arena, const ViewSignal& src) {
+    const ctrl::CatalogSignal* byName = nullptr;
+    for (const ctrl::CatalogSignal& cat : arena.signalCatalog) {
+        if (src.id != 0 && cat.id == src.id) {
+            return &cat;
+        }
+        if (byName == nullptr && cat.message == src.messageName && cat.name == src.signalName) {
+            byName = &cat;
+        }
+    }
+    return byName;
+}
+
 bool shellButton(const char* label, bool selected, const char* id = nullptr) {
     if (selected) {
         ImGui::PushStyleColor(ImGuiCol_Button,
@@ -219,6 +232,9 @@ const char* kindKey(ViewCellKind kind) {
     if (kind == ViewCellKind::Scatter) {
         return "scatter";
     }
+    if (kind == ViewCellKind::Histogram) {
+        return "histogram";
+    }
     return "line";
 }
 
@@ -228,6 +244,9 @@ ViewCellKind kindFromKey(std::string_view key) {
     }
     if (key == "scatter") {
         return ViewCellKind::Scatter;
+    }
+    if (key == "histogram") {
+        return ViewCellKind::Histogram;
     }
     return ViewCellKind::Line;
 }
@@ -256,13 +275,35 @@ void holdScrubWindow(CustomView& view, double lo, double hi) {
         std::swap(lo, hi);
     }
     for (ViewCell& cell : view.cells) {
-        if (cell.kind != ViewCellKind::Line) {
+        if (!sharesTimeAxis(cell.kind)) {
             continue;
         }
         cell.freeze = true;
         cell.scrubHold = true;
         cell.viewMinMs = lo;
         cell.viewMaxMs = hi;
+    }
+}
+
+// A plot drag freezes the window. If the timeline cursor then leaves that
+// window, slide the same span so the playhead stays on the trace.
+void alignScrubWindowToCursor(CustomView& view, double cursorMs) {
+    if (!(cursorMs > 0.0)) {
+        return;
+    }
+    for (ViewCell& cell : view.cells) {
+        if (!sharesTimeAxis(cell.kind) || !cell.scrubHold) {
+            continue;
+        }
+        if (!(cell.viewMaxMs > cell.viewMinMs)) {
+            continue;
+        }
+        if (cursorMs >= cell.viewMinMs && cursorMs <= cell.viewMaxMs) {
+            continue;
+        }
+        const double span = cell.viewMaxMs - cell.viewMinMs;
+        cell.viewMaxMs = cursorMs;
+        cell.viewMinMs = std::max(0.0, cursorMs - span);
     }
 }
 
@@ -279,6 +320,9 @@ void releaseScrubHolds(CustomView& view) {
 }  // namespace
 
 void CustomViews::releasePlayheadScrub() {
+    plotScrubbing_ = false;
+    plotPan_ = false;
+    plotPanCell_ = -1;
     if (doc_.views.empty()) {
         return;
     }
@@ -287,9 +331,11 @@ void CustomViews::releasePlayheadScrub() {
 
 void CustomViews::followSessionWindow() {
     plotScrubbing_ = false;
+    plotPan_ = false;
+    plotPanCell_ = -1;
     for (CustomView& view : doc_.views) {
         for (ViewCell& cell : view.cells) {
-            if (cell.kind != ViewCellKind::Line) {
+            if (!sharesTimeAxis(cell.kind)) {
                 continue;
             }
             cell.freeze = false;
@@ -406,6 +452,30 @@ std::string cellLabel(const ViewSignal& src) {
     return "signal";
 }
 
+// Legend text. A pinned short label such as "Speed" stays. Message.Signal
+// collapses to the signal name so the box does not cover the trace.
+std::string plotSeriesName(const ViewSignal& src) {
+    if (!src.label.empty() && src.label.find('.') == std::string::npos) {
+        return src.label;
+    }
+    if (!src.signalName.empty()) {
+        return src.signalName;
+    }
+    const std::string full = cellLabel(src);
+    const auto dot = full.rfind('.');
+    if (dot != std::string::npos && dot + 1 < full.size()) {
+        return full.substr(dot + 1);
+    }
+    return full;
+}
+
+void endPlotCompactLegend() {
+    theme::popPlotFont();
+    theme::pushSmallFont();
+    ImPlot::EndPlot();
+    theme::popSmallFont();
+}
+
 bool sameSignal(const ViewSignal& a, const ctrl::CatalogSignal& b) {
     if (!a.messageName.empty() && !a.signalName.empty()) {
         return a.messageName == b.message && a.signalName == b.name;
@@ -459,13 +529,7 @@ ViewCell parseWidget(const json::Value& widget, int* nextId) {
     const json::Value& plot = widget["plot"];
     cell.kind = kindFromKey(plot["type"].asString("line"));
     cell.title = plot["title"].asString(cell.id);
-    cell.timeWindowSec = static_cast<float>(plot["timeWindowSeconds"].asNumber(15.0));
-    if (cell.timeWindowSec < 2.0f) {
-        cell.timeWindowSec = 2.0f;
-    }
-    if (cell.timeWindowSec > 7200.0f) {
-        cell.timeWindowSec = 7200.0f;
-    }
+    cell.timeWindowSec = clampPlotWindowSec(static_cast<float>(plot["timeWindowSeconds"].asNumber(15.0)));
     if (plot["options"].isObject()) {
         const json::Value& options = plot["options"];
         if (options.contains("legend")) {
@@ -476,6 +540,14 @@ ViewCell parseWidget(const json::Value& widget, int* nextId) {
         }
         if (options.contains("yLocked") && options["yLocked"].isBool()) {
             cell.yLocked = options["yLocked"].asBool(false);
+        }
+        if (options.contains("yUser") && options["yUser"].isBool()) {
+            cell.yUser = options["yUser"].asBool(false);
+            cell.yUserLo = options["yUserLo"].asNumber(0.0);
+            cell.yUserHi = options["yUserHi"].asNumber(0.0);
+            if (!(cell.yUserHi > cell.yUserLo)) {
+                cell.yUser = false;
+            }
         }
     }
     const json::Value& sources = plot["sources"];
@@ -598,6 +670,11 @@ json::Value cellToJson(const ViewCell& cell) {
     }
     if (cell.yLocked) {
         options.emplace("yLocked", json::Value(true));
+    }
+    if (cell.yUser && cell.yUserHi > cell.yUserLo) {
+        options.emplace("yUser", json::Value(true));
+        options.emplace("yUserLo", json::Value(cell.yUserLo));
+        options.emplace("yUserHi", json::Value(cell.yUserHi));
     }
     json::Object plot;
     plot.emplace("type", json::Value(std::string(kindKey(cell.kind))));
@@ -975,7 +1052,48 @@ void CustomViews::undoLastLayout() {
     status_ = "Undid last layout change";
 }
 
-void CustomViews::migrateView(CustomView& view) {
+bool viewHasCell(const CustomView& view, const char* id) {
+    if (id == nullptr) {
+        return false;
+    }
+    for (const ViewCell& cell : view.cells) {
+        if (cell.id == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The stock pit board matches the old Grafana photon-plots dashboard.
+// A saved four-panel board gains Pack T and Throttle. A renamed or emptied
+// board is left alone.
+bool appendMissingPitPanels(CustomView& view) {
+    if (view.id != "view-pit-vitals" || !viewHasCell(view, "plot-pack-v")) {
+        return false;
+    }
+    bool changed = false;
+    float window = 300.0f;
+    for (const ViewCell& cell : view.cells) {
+        if (cell.kind == ViewCellKind::Line) {
+            window = cell.timeWindowSec;
+            break;
+        }
+    }
+    auto add = [&](const char* id, const char* title, const char* message, const char* signal,
+                   const char* label) {
+        if (viewHasCell(view, id)) {
+            return;
+        }
+        view.cells.push_back(lineCell(id, title, nextSlot(view, 6, 2),
+                                      namedSource(message, signal, label), window));
+        changed = true;
+    };
+    add("plot-pack-t", "Pack T", "BPS_Status", "Main_Battery_Avg_Temperature", "Pack T");
+    add("plot-throttle", "Throttle", "Pedal_Status", "AccelPedal_Main_Pos", "Throttle");
+    return changed;
+}
+
+bool CustomViews::migrateView(CustomView& view) {
     for (ViewCell& cell : view.cells) {
         migrateGgAxes(cell);
     }
@@ -991,6 +1109,7 @@ void CustomViews::migrateView(CustomView& view) {
     }
     view.columns = kGridCols;
     view.rowHeight = kGridRowH;
+    return appendMissingPitPanels(view);
 }
 
 ViewCell* CustomViews::targetCell() {
@@ -1105,15 +1224,21 @@ CustomView CustomViews::makePitVitalsView() const {
     view.rowHeight = kGridRowH;
     view.gap = theme::kGridGap;
     view.cells.push_back(lineCell("plot-pack-v", "Pack V", ViewRect{0, 0, 6, 2},
-                                  namedSource("BPS_Status", "Main_Battery_Voltage", "Pack V"), 30.0f));
+                                  namedSource("BPS_Status", "Main_Battery_Voltage", "Pack V"), 300.0f));
     view.cells.push_back(lineCell("plot-pack-i", "Pack I", ViewRect{6, 0, 6, 2},
-                                  namedSource("MC_BusMeasurement", "MC_BusCurrent", "Pack I"), 30.0f));
+                                  namedSource("MC_BusMeasurement", "MC_BusCurrent", "Pack I"), 300.0f));
     view.cells.push_back(lineCell("plot-speed", "Speed", ViewRect{0, 2, 6, 2},
                                   namedSource("MC_VelocityMeasurement", "MC_VehicleVelocity", "Speed"),
-                                  30.0f));
+                                  300.0f));
     view.cells.push_back(lineCell("plot-motor-t", "Motor T", ViewRect{6, 2, 6, 2},
                                   namedSource("MC_Motor_TempMeasurement", "MC_MotorTemp", "Motor T"),
-                                  30.0f));
+                                  300.0f));
+    view.cells.push_back(lineCell("plot-pack-t", "Pack T", ViewRect{0, 4, 6, 2},
+                                  namedSource("BPS_Status", "Main_Battery_Avg_Temperature", "Pack T"),
+                                  300.0f));
+    view.cells.push_back(lineCell("plot-throttle", "Throttle", ViewRect{6, 4, 6, 2},
+                                  namedSource("Pedal_Status", "AccelPedal_Main_Pos", "Throttle"),
+                                  300.0f));
     return view;
 }
 
@@ -1133,14 +1258,18 @@ void CustomViews::addPitVitalsView() {
     doc_.views.push_back(makePitVitalsView());
     doc_.active = static_cast<int>(doc_.views.size()) - 1;
     selectedCell_ = 0;
-    nextCell_ = std::max(nextCell_, 6);
+    nextCell_ = std::max(nextCell_, 8);
     markDirty();
 }
 
 void CustomViews::ensureDefault() {
     if (!doc_.views.empty()) {
+        bool changed = false;
         for (CustomView& view : doc_.views) {
-            migrateView(view);
+            changed = migrateView(view) || changed;
+        }
+        if (changed) {
+            markDirty();
         }
         return;
     }
@@ -1148,7 +1277,7 @@ void CustomViews::ensureDefault() {
     doc_.active = 0;
     selectedCell_ = 0;
     nextView_ = 2;
-    nextCell_ = 6;
+    nextCell_ = 8;
 }
 
 void CustomViews::ensureLoaded() {
@@ -1170,6 +1299,13 @@ void CustomViews::ensureLoaded() {
                 save();
                 status_ = "Pit vitals starter";
             } else {
+                bool changed = false;
+                for (CustomView& view : doc_.views) {
+                    changed = migrateView(view) || changed;
+                }
+                if (changed) {
+                    save();
+                }
                 status_ = "Loaded views from localStorage";
             }
             std::free(raw);
@@ -1308,7 +1444,10 @@ void CustomViews::addCell(ViewCellKind kind) {
     ViewCell cell;
     cell.id = "plot-" + std::to_string(nextCell_++);
     cell.kind = kind;
-    cell.title = kind == ViewCellKind::Value ? "Value" : (kind == ViewCellKind::Scatter ? "G-G" : "Plot");
+    cell.title = kind == ViewCellKind::Value       ? "Value"
+                 : kind == ViewCellKind::Scatter   ? "G-G"
+                 : kind == ViewCellKind::Histogram ? "Histogram"
+                                                   : "Plot";
     cell.rect = nextSlot(view, kDefaultCellW, kDefaultCellH);
     view.cells.push_back(std::move(cell));
     selectedCell_ = static_cast<int>(view.cells.size()) - 1;
@@ -1331,6 +1470,43 @@ void CustomViews::addGgCell() {
     cell.sources.push_back(std::move(lat));
 }
 
+const ctrl::CatalogSignal* findAntennaSignal(const ClientArena& arena) {
+    auto has = [](const std::string& hay, const char* needle) {
+        if (needle == nullptr || needle[0] == '\0') {
+            return false;
+        }
+        const std::size_t n = std::strlen(needle);
+        if (n > hay.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i + n <= hay.size(); ++i) {
+            bool ok = true;
+            for (std::size_t j = 0; j < n; ++j) {
+                const auto a = static_cast<unsigned char>(hay[i + j]);
+                const auto b = static_cast<unsigned char>(needle[j]);
+                if (std::tolower(a) != std::tolower(b)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const ctrl::CatalogSignal* onTelemetry = nullptr;
+    for (const ctrl::CatalogSignal& cat : arena.signalCatalog) {
+        if (has(cat.name, "antenna") || has(cat.name, "rssi") || has(cat.name, "snr")) {
+            return &cat;
+        }
+        if (onTelemetry == nullptr && has(cat.message, "Telemetry_Status") && !cat.name.empty()) {
+            onTelemetry = &cat;
+        }
+    }
+    return onTelemetry;
+}
+
 void CustomViews::resolve(const ClientArena& arena) {
     if (!arena.haveSignalCatalog) {
         return;
@@ -1339,7 +1515,7 @@ void CustomViews::resolve(const ClientArena& arena) {
         for (ViewCell& cell : view.cells) {
             for (ViewSignal& src : cell.sources) {
                 if (src.signalName == "__antenna__") {
-                    if (const ctrl::CatalogSignal* ant = arena.antennaSignal()) {
+                    if (const ctrl::CatalogSignal* ant = findAntennaSignal(arena)) {
                         src.id = ant->id;
                         src.messageName = ant->message;
                         src.signalName = ant->name;
@@ -1533,6 +1709,199 @@ void CustomViews::tickPlotExport(UiContext& ui) {
     }
 }
 
+bool representativeLineAxis(const CustomView& view, double cursorMs, double& lo, double& hi,
+                            bool& absolute) {
+    for (const ViewCell& cell : view.cells) {
+        if (!sharesTimeAxis(cell.kind)) {
+            continue;
+        }
+        absolute = (cell.freeze || cell.scrubHold) && cell.viewMaxMs > cell.viewMinMs;
+        if (absolute) {
+            lo = cell.viewMinMs;
+            hi = cell.viewMaxMs;
+        } else {
+            hi = cursorMs > 0.0 ? cursorMs : static_cast<double>(cell.timeWindowSec) * 1000.0;
+            lo = hi - static_cast<double>(cell.timeWindowSec) * 1000.0;
+        }
+        return true;
+    }
+    return false;
+}
+
+float sharedLineWindowSec(const CustomView& view) {
+    float sec = 0.0f;
+    bool have = false;
+    for (const ViewCell& cell : view.cells) {
+        if (!sharesTimeAxis(cell.kind)) {
+            continue;
+        }
+        if (!have) {
+            sec = cell.timeWindowSec;
+            have = true;
+            continue;
+        }
+        if (std::fabs(cell.timeWindowSec - sec) > 0.51f) {
+            return -1.0f;
+        }
+    }
+    return have ? sec : 0.0f;
+}
+
+bool anyLineTimeHold(const CustomView& view) {
+    for (const ViewCell& cell : view.cells) {
+        if (sharesTimeAxis(cell.kind) && (cell.freeze || cell.scrubHold) &&
+            cell.viewMaxMs > cell.viewMinMs) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void releaseSharedTimeHold(CustomView& view) {
+    for (ViewCell& cell : view.cells) {
+        if (!sharesTimeAxis(cell.kind)) {
+            continue;
+        }
+        cell.freeze = false;
+        cell.scrubHold = false;
+        cell.rangeActive = false;
+        cell.rangeDragging = false;
+        cell.viewMinMs = 0.0;
+        cell.viewMaxMs = 0.0;
+    }
+}
+
+void setSharedWindowSec(CustomView& view, float sec) {
+    sec = clampPlotWindowSec(sec);
+    releaseSharedTimeHold(view);
+    for (ViewCell& cell : view.cells) {
+        if (sharesTimeAxis(cell.kind)) {
+            cell.timeWindowSec = sec;
+        }
+    }
+}
+
+void applySharedAbsoluteWindow(CustomView& view, double lo, double hi, bool keepScrub) {
+    if (!sanitizePlotWindow(lo, hi)) {
+        return;
+    }
+    const float sec = clampPlotWindowSec(static_cast<float>((hi - lo) / 1000.0));
+    bool anyScrub = false;
+    if (keepScrub) {
+        for (const ViewCell& cell : view.cells) {
+            if (sharesTimeAxis(cell.kind) && cell.scrubHold) {
+                anyScrub = true;
+                break;
+            }
+        }
+    }
+    for (ViewCell& cell : view.cells) {
+        if (!sharesTimeAxis(cell.kind)) {
+            continue;
+        }
+        cell.timeWindowSec = sec;
+        cell.freeze = true;
+        cell.scrubHold = anyScrub;
+        cell.rangeActive = false;
+        cell.rangeDragging = false;
+        cell.viewMinMs = lo;
+        cell.viewMaxMs = hi;
+    }
+}
+
+void scaleSharedWindow(CustomView& view, double anchorMs, double axisLo, double axisHi, double factor,
+                       bool absolute) {
+    double lo = axisLo;
+    double hi = axisHi;
+    zoomTimeWindowAround(anchorMs, lo, hi, factor);
+    if (!sanitizePlotWindow(lo, hi)) {
+        return;
+    }
+    if (absolute) {
+        applySharedAbsoluteWindow(view, lo, hi, false);
+        return;
+    }
+    const float spanSec = clampPlotWindowSec(static_cast<float>((hi - lo) / 1000.0));
+    for (ViewCell& cell : view.cells) {
+        if (sharesTimeAxis(cell.kind)) {
+            cell.timeWindowSec = spanSec;
+        }
+    }
+}
+
+void releaseSharedValueZoom(CustomView& view) {
+    for (ViewCell& cell : view.cells) {
+        if (cell.kind == ViewCellKind::Line) {
+            cell.yUser = false;
+        }
+    }
+}
+
+bool anyLineValueZoom(const CustomView& view) {
+    for (const ViewCell& cell : view.cells) {
+        if (cell.kind == ViewCellKind::Line && cell.yUser && cell.yUserHi > cell.yUserLo) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// hovered < 0 zooms every line around its own center. Otherwise that plot
+// stays on the value under the pointer and the rest zoom around their centers.
+void scaleSharedValue(CustomView& view, int hovered, double anchor, bool useAnchor, double factor) {
+    for (int i = 0; i < static_cast<int>(view.cells.size()); ++i) {
+        ViewCell& cell = view.cells[static_cast<std::size_t>(i)];
+        if (cell.kind != ViewCellKind::Line) {
+            continue;
+        }
+        double lo = cell.yUser && cell.yUserHi > cell.yUserLo ? cell.yUserLo : cell.yFitLo;
+        double hi = cell.yUser && cell.yUserHi > cell.yUserLo ? cell.yUserHi : cell.yFitHi;
+        if (!(hi > lo)) {
+            continue;
+        }
+        const double focus = (useAnchor && i == hovered && std::isfinite(anchor)) ? anchor : 0.5 * (lo + hi);
+        zoomValueWindowAround(focus, lo, hi, factor);
+        if (!(hi > lo)) {
+            continue;
+        }
+        cell.yUser = true;
+        cell.yUserLo = lo;
+        cell.yUserHi = hi;
+    }
+}
+
+struct HeaderStat {
+    ImVec4 color{};
+    char text[48]{};
+    char tip[96]{};
+    bool ok = false;
+};
+
+void drawHeaderStats(ImDrawList* draw, ImVec2 headerMin, float headerRight, float titleRight,
+                     const std::vector<HeaderStat>& stats) {
+    if (draw == nullptr || stats.empty()) {
+        return;
+    }
+    float x = titleRight + 12.0f;
+    theme::pushSmallFont();
+    for (const HeaderStat& hs : stats) {
+        if (!hs.ok || hs.text[0] == '\0') {
+            continue;
+        }
+        const ImVec2 sz = ImGui::CalcTextSize(hs.text);
+        if (x + sz.x > headerRight) {
+            break;
+        }
+        const ImVec2 pos(x, headerMin.y + (kCellHeaderH - sz.y) * 0.5f);
+        draw->AddText(pos, ImGui::GetColorU32(hs.color), hs.text);
+        if (ImGui::IsMouseHoveringRect(pos, ImVec2(pos.x + sz.x, pos.y + sz.y))) {
+            ImGui::SetTooltip("%s", hs.tip);
+        }
+        x += sz.x + 8.0f;
+    }
+    theme::popSmallFont();
+}
+
 void CustomViews::drawToolbar(UiContext& ui) {
     CustomView& view = active();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(theme::kGridGap, 0.0f));
@@ -1574,6 +1943,22 @@ void CustomViews::drawToolbar(UiContext& ui) {
         openPicker();
     }
     ImGui::SameLine();
+    if (shellButton("Histogram", false, "add-hist")) {
+        addCell(ViewCellKind::Histogram);
+        openPicker();
+    }
+    ImGui::SameLine();
+    if (shellButton("Antenna", false, "add-antenna")) {
+        addCell(ViewCellKind::Line);
+        ViewCell& added = active().cells.back();
+        added.title = "Antenna";
+        ViewSignal antenna;
+        antenna.signalName = "__antenna__";
+        antenna.label = "Antenna";
+        added.sources.push_back(std::move(antenna));
+        status_ = antennaCanNote();
+    }
+    ImGui::SameLine();
     if (shellButton("Add value", false, "add-value")) {
         addCell(ViewCellKind::Value);
         openPicker();
@@ -1597,65 +1982,93 @@ void CustomViews::drawToolbar(UiContext& ui) {
             undoLastLayout();
         }
     }
-    float sharedWindow = 15.0f;
-    bool haveLine = false;
-    for (const ViewCell& cell : view.cells) {
-        if (cell.kind == ViewCellKind::Line) {
-            sharedWindow = haveLine ? std::min(sharedWindow, cell.timeWindowSec) : cell.timeWindowSec;
-            haveLine = true;
-        }
-    }
+    const float sharedWindow = sharedLineWindowSec(view);
+    const bool haveLine = sharedWindow != 0.0f;
     if (haveLine) {
         ImGui::SameLine();
         if (shellButton("-", false, "win-down")) {
             const double cursorT = static_cast<double>(ui.arena.effectiveCursorMs());
-            for (ViewCell& cell : view.cells) {
-                if (cell.kind != ViewCellKind::Line) {
-                    continue;
-                }
-                if (cell.freeze && cell.viewMaxMs > cell.viewMinMs) {
-                    double lo = cell.viewMinMs;
-                    double hi = cell.viewMaxMs;
-                    zoomTimeWindowAround(plotZoomAnchorMs(cursorT, lo, hi), lo, hi, 0.5);
-                    if (!sanitizePlotWindow(lo, hi)) {
-                        continue;
-                    }
-                    cell.timeWindowSec = static_cast<float>(std::max(2.0, (hi - lo) / 1000.0));
-                    cell.viewMinMs = lo;
-                    cell.viewMaxMs = hi;
-                } else {
-                    cell.timeWindowSec = std::max(2.0f, cell.timeWindowSec * 0.5f);
-                }
+            double lo = 0.0;
+            double hi = 0.0;
+            bool absolute = false;
+            if (representativeLineAxis(view, cursorT, lo, hi, absolute)) {
+                const double anchor = clampToPlotAxis(plotZoomAnchorMs(cursorT, lo, hi), lo, hi);
+                scaleSharedWindow(view, anchor, lo, hi, 0.5, true);
+                markDirty();
             }
-            markDirty();
         }
         ImGui::SameLine();
-        char range[32];
-        std::snprintf(range, sizeof(range), "RANGE %.0f s", sharedWindow);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(theme::mutedFg(), "%s", range);
+        char previewBuf[32] = "Range";
+        const char* preview = previewBuf;
+        if (anyLineTimeHold(view)) {
+            preview = "Zoomed";
+        } else if (sharedWindow < 0.0f) {
+            preview = "Mixed";
+        } else {
+            const int preset = matchPlotTimePreset(sharedWindow);
+            if (preset >= 0) {
+                preview = kPlotTimePresets[preset].label;
+            } else {
+                formatPlotWindowLabel(sharedWindow, previewBuf, static_cast<int>(sizeof(previewBuf)));
+            }
+        }
+        ImGui::SetNextItemWidth(84.0f);
+        if (ImGui::BeginCombo("##range-preset", preview)) {
+            const int n = static_cast<int>(sizeof(kPlotTimePresets) / sizeof(kPlotTimePresets[0]));
+            for (int i = 0; i < n; ++i) {
+                const bool selected = preview == kPlotTimePresets[i].label;
+                if (ImGui::Selectable(kPlotTimePresets[i].label, selected)) {
+                    setSharedWindowSec(view, kPlotTimePresets[i].sec);
+                    markDirty();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Time range shared by every line plot and histogram.\n"
+                              "Click a plot to move this window there. Drag slides it.\n"
+                              "Wheel zooms time. Alt-wheel zooms every value axis.\n"
+                              "Double-click a plot to follow live again.");
+        }
         ImGui::SameLine();
         if (shellButton("+", false, "win-up")) {
             const double cursorT = static_cast<double>(ui.arena.effectiveCursorMs());
-            for (ViewCell& cell : view.cells) {
-                if (cell.kind != ViewCellKind::Line) {
-                    continue;
-                }
-                if (cell.freeze && cell.viewMaxMs > cell.viewMinMs) {
-                    double lo = cell.viewMinMs;
-                    double hi = cell.viewMaxMs;
-                    zoomTimeWindowAround(plotZoomAnchorMs(cursorT, lo, hi), lo, hi, 2.0);
-                    if (!sanitizePlotWindow(lo, hi)) {
-                        continue;
-                    }
-                    cell.timeWindowSec = static_cast<float>(std::max(2.0, (hi - lo) / 1000.0));
-                    cell.viewMinMs = lo;
-                    cell.viewMaxMs = hi;
-                } else {
-                    cell.timeWindowSec = std::min(7200.0f, cell.timeWindowSec * 2.0f);
-                }
+            double lo = 0.0;
+            double hi = 0.0;
+            bool absolute = false;
+            if (representativeLineAxis(view, cursorT, lo, hi, absolute)) {
+                const double anchor = clampToPlotAxis(plotZoomAnchorMs(cursorT, lo, hi), lo, hi);
+                scaleSharedWindow(view, anchor, lo, hi, 2.0, true);
+                markDirty();
             }
+        }
+        ImGui::SameLine();
+        if (shellButton("Y-", false, "y-zoom-in")) {
+            scaleSharedValue(view, -1, 0.0, false, 0.5);
             markDirty();
+        }
+        ImGui::SameLine();
+        if (shellButton("Y+", false, "y-zoom-out")) {
+            scaleSharedValue(view, -1, 0.0, false, 2.0);
+            markDirty();
+        }
+        if (anyLineValueZoom(view)) {
+            ImGui::SameLine();
+            if (shellButton("Y auto", false, "y-auto")) {
+                releaseSharedValueZoom(view);
+                markDirty();
+            }
+        }
+        if (anyLineTimeHold(view)) {
+            ImGui::SameLine();
+            if (shellButton("Follow", false, "follow-live")) {
+                releaseSharedTimeHold(view);
+                ui.arena.setPreviewCursor(0, false);
+                markDirty();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Follow the live edge again.");
+            }
         }
     }
     ImGui::PopStyleVar();
@@ -1681,6 +2094,11 @@ void CustomViews::drawToolbar(UiContext& ui) {
         }
         if (ImGui::MenuItem("Undo last layout", "Ctrl+Z", false, undo_.have)) {
             undoLastLayout();
+        }
+        if (ImGui::MenuItem("Follow live range", nullptr, false, anyLineTimeHold(view))) {
+            releaseSharedTimeHold(view);
+            ui.arena.setPreviewCursor(0, false);
+            markDirty();
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Export plot PNG")) {
@@ -1789,7 +2207,8 @@ void CustomViews::drawPicker(UiContext& ui) {
                 markDirty();
             }
         }
-        if (ImGui::SliderFloat("Window", &cell->timeWindowSec, 2.0f, 7200.0f, "%.0f s")) {
+        if (ImGui::SliderFloat("Window", &cell->timeWindowSec, kPlotWindowMinSec, kPlotWindowMaxSec, "%.0f s")) {
+            setSharedWindowSec(active(), cell->timeWindowSec);
             markDirty();
         }
         if (ImGui::Checkbox("Legend", &cell->legend)) {
@@ -1810,7 +2229,7 @@ void CustomViews::drawPicker(UiContext& ui) {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip(
                     "Fit Y to the visible window. Uncheck to drag the axis.\n"
-                    "Double-click the plot to restore Auto Y.");
+                    "Double-click the plot to restore Auto Y and follow live.");
             }
         }
         if (cell->kind == ViewCellKind::Line) {
@@ -1831,6 +2250,7 @@ void CustomViews::drawPicker(UiContext& ui) {
         theme::popSmallFont();
         theme::pushSmallFont();
         ImGui::TextColored(theme::mutedFg(), "Shift-drag on a line plot to pick A→B.");
+        ImGui::TextColored(theme::mutedFg(), "Ctrl-drag zooms every line plot.");
         if (cell->rangeActive) {
             ImGui::Text("Range  %.0f → %.0f ms", cell->rangeA, cell->rangeB);
             if (ImGui::SmallButton("Clear range")) {
@@ -2147,9 +2567,81 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
             if (ImPlot::IsPlotHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 cell.yLocked = false;
             }
-            ImPlot::EndPlot();
+            endPlotCompactLegend();
+        } else {
+            theme::popPlotFont();
         }
-        theme::popPlotFont();
+    } else if (cell.kind == ViewCellKind::Histogram) {
+        double latest = 0.0;
+        for (const ViewSignal& src : cell.sources) {
+            const SignalRing* ring = src.id != 0 ? ui.arena.ring(src.id) : nullptr;
+            if (ring != nullptr && ring->hasLatest) {
+                latest = std::max(latest, ring->latestTs);
+            }
+        }
+        const auto& tl = ui.arena.timeline();
+        const auto mode = static_cast<proto::TimelineMode>(tl.mode);
+        const bool live = !ui.arena.catalogPinned() &&
+                          (mode == proto::TimelineMode::Live || mode == proto::TimelineMode::Buffering ||
+                           mode == proto::TimelineMode::Unknown);
+        const std::uint64_t cursorMs = ui.arena.displayCursorMs();
+        double xmax = latest;
+        if (!live && cursorMs != 0) {
+            xmax = static_cast<double>(cursorMs);
+        } else if (cursorMs != 0 && latest <= 0.0) {
+            xmax = static_cast<double>(cursorMs);
+        }
+        double xmin = xmax - static_cast<double>(cell.timeWindowSec) * 1000.0;
+        if (cell.freeze && cell.viewMaxMs > cell.viewMinMs) {
+            xmin = cell.viewMinMs;
+            xmax = cell.viewMaxMs;
+        }
+        std::vector<double> values;
+        const auto maxPts = static_cast<std::uint32_t>(std::max(32.0f, size.x));
+        for (const ViewSignal& src : cell.sources) {
+            if (src.hidden || src.id == 0) {
+                continue;
+            }
+            PlotArrays hist = ui.arena.tiles().gatherPlot(
+                src.id, static_cast<std::uint64_t>(std::max(0.0, xmin)),
+                static_cast<std::uint64_t>(std::max(xmin, xmax)), maxPts);
+            if (const SignalRing* ring = ui.arena.ring(src.id); ring != nullptr && ring->count > 0) {
+                ui.arena.tiles().stitchRing(hist, ring->t, ring->v, ring->count, ring->cap, ring->write,
+                                           static_cast<std::uint64_t>(std::max(0.0, xmin)),
+                                           static_cast<std::uint64_t>(std::max(xmin, xmax)), src.id);
+            }
+            values.insert(values.end(), hist.y.begin(), hist.y.end());
+        }
+        std::vector<double> centers;
+        std::vector<double> counts;
+        fillHistogram(values, 32, centers, counts);
+        theme::pushPlotFont();
+        if (ImPlot::BeginPlot("##hist", ImGui::GetContentRegionAvail(),
+                              ImPlotFlags_NoLegend | ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect)) {
+            ImPlot::SetupAxes("value", "count", plotValueAxisFlags(true, false), plotValueAxisFlags(true));
+            if (!centers.empty()) {
+                ImPlot::PlotBars("count", centers.data(), counts.data(), static_cast<int>(centers.size()),
+                                 (centers.size() > 1 ? (centers[1] - centers[0]) * 0.9 : 1.0));
+            } else {
+                ImPlot::PlotText("Add signal", 0.0, 0.0);
+            }
+            if (ImPlot::IsPlotHovered() && plotWheelIsZoom()) {
+                double lo = xmin;
+                double hi = xmax;
+                if (!(hi > lo)) {
+                    hi = xmax;
+                    lo = xmax - static_cast<double>(cell.timeWindowSec) * 1000.0;
+                }
+                const double factor = ImGui::GetIO().MouseWheel > 0.0f ? 0.5 : 2.0;
+                const double anchor = clampToPlotAxis(plotTimeAtMouse(lo, hi), lo, hi);
+                scaleSharedWindow(active(), anchor, lo, hi, factor, true);
+                touchDirty();
+                ImGui::GetIO().MouseWheel = 0.0f;
+            }
+            endPlotCompactLegend();
+        } else {
+            theme::popPlotFont();
+        }
     } else {
         double latest = 0.0;
         bool any = false;
@@ -2179,13 +2671,6 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
         }
         double viewMin = xmin;
         double viewMax = xmax;
-        if (cell.rangeActive || cell.rangeDragging) {
-            const double a = std::min(cell.rangeA, cell.rangeB);
-            const double b = std::max(cell.rangeA, cell.rangeB);
-            const double span = std::max(1.0, b - a);
-            viewMin = a - span * 0.02;
-            viewMax = b + span * 0.02;
-        }
         double ymin = 0.0;
         double ymax = 1.0;
         double ymin2 = 0.0;
@@ -2250,46 +2735,61 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
             }
             if (!src.hidden) {
                 const bool right = cell.dualY && src.yAxis == 2;
-                extendYFromPlot(row.hist, right ? ymin2 : ymin, right ? ymax2 : ymax, right ? haveY2 : haveY);
-                if (row.ring != nullptr) {
-                    const RangeStats st = statsInRange(*row.ring, viewMin, viewMax);
-                    if (st.ok) {
-                        double& lo = right ? ymin2 : ymin;
-                        double& hi = right ? ymax2 : ymax;
-                        bool& have = right ? haveY2 : haveY;
-                        if (!have) {
-                            lo = st.min;
-                            hi = st.max;
-                            have = true;
-                        } else {
-                            lo = std::min(lo, st.min);
-                            hi = std::max(hi, st.max);
-                        }
-                    }
-                }
+                extendYFromLine(row.hist.y, right ? ymin2 : ymin, right ? ymax2 : ymax, right ? haveY2 : haveY);
             }
             series.push_back(std::move(row));
         }
         if (haveY) {
             padPlotAxis(ymin, ymax);
+            cell.yFitLo = ymin;
+            cell.yFitHi = ymax;
         }
         if (haveY2) {
             padPlotAxis(ymin2, ymax2);
         }
 
-        const bool autoY = !cell.yLocked;
+        const bool autoY = !cell.yLocked && !cell.yUser;
         const ImPlotFlags plotFlags = (cell.legend ? ImPlotFlags_None : ImPlotFlags_NoLegend) |
                                       ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMenus;
+        std::vector<HeaderStat> headerStats;
         theme::pushPlotFont();
         ImVec2 plotSize = ImGui::GetContentRegionAvail();
         plotSize.x = std::max(32.0f, plotSize.x);
         plotSize.y = std::max(32.0f, plotSize.y);
         if (ImPlot::BeginPlot("##plot", plotSize, plotFlags)) {
             const bool dualY = cellUsesDualY(cell);
-            ImPlot::SetupAxes("t", "value", plotTimeAxisFlags(), plotValueAxisFlags(autoY));
+            std::string axisUnit1;
+            std::string axisUnit2;
+            bool mix1 = false;
+            bool mix2 = false;
+            for (const ViewSignal& src : cell.sources) {
+                if (src.hidden) {
+                    continue;
+                }
+                std::string unit;
+                if (const ctrl::CatalogSignal* cat = catalogSignal(ui.arena, src)) {
+                    unit = cat->unit;
+                }
+                const bool right = dualY && src.yAxis == 2;
+                std::string& slot = right ? axisUnit2 : axisUnit1;
+                bool& mix = right ? mix2 : mix1;
+                if (!mix && slot.empty()) {
+                    slot = std::move(unit);
+                } else if (slot != unit) {
+                    mix = true;
+                    slot.clear();
+                }
+            }
+            const bool label1 = !mix1 && !axisUnit1.empty();
+            const bool label2 = !mix2 && !axisUnit2.empty();
+            ImPlot::SetupAxes("t", label1 ? axisUnit1.c_str() : "", plotTimeAxisFlags(),
+                              plotValueAxisFlags(autoY, !label1));
+            if (cell.legend) {
+                ImPlot::SetupLegend(ImPlotLocation_NorthWest, ImPlotLegendFlags_None);
+            }
             if (dualY) {
-                ImPlot::SetupAxis(ImAxis_Y2, "Y2",
-                                  plotValueAxisFlags(autoY) | ImPlotAxisFlags_AuxDefault);
+                ImPlot::SetupAxis(ImAxis_Y2, label2 ? axisUnit2.c_str() : "",
+                                  plotValueAxisFlags(autoY, !label2) | ImPlotAxisFlags_AuxDefault);
             }
             ImPlot::SetupAxisFormat(ImAxis_X1, formatPlotTime);
             auto setX = [](double a, double b) {
@@ -2304,7 +2804,9 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
             } else {
                 setX(xmin, xmax);
             }
-            if (haveY && autoY) {
+            if (cell.yUser && cell.yUserHi > cell.yUserLo) {
+                ImPlot::SetupAxisLimits(ImAxis_Y1, cell.yUserLo, cell.yUserHi, ImPlotCond_Always);
+            } else if (haveY && autoY) {
                 ImPlot::SetupAxisLimits(ImAxis_Y1, ymin, ymax, ImPlotCond_Always);
             }
             if (dualY && haveY2 && autoY) {
@@ -2313,15 +2815,9 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
             bool legendHot = false;
             for (const LineSeriesDraw& row : series) {
                 ViewSignal& src = cell.sources[row.index];
-                const std::string name = cellLabel(src);
+                const std::string name = plotSeriesName(src);
                 const ImVec4 col = seriesColor(src, row.index);
                 const float weight = seriesWidth(src);
-                if (!src.hidden) {
-                    ImPlot::SetNextLineStyle(col, weight);
-                    if (dualY) {
-                        ImPlot::SetAxes(ImAxis_X1, src.yAxis == 2 ? ImAxis_Y2 : ImAxis_Y1);
-                    }
-                }
                 if (src.hidden) {
                     continue;
                 }
@@ -2332,19 +2828,72 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                 if (n <= 0 || !plotArraysAllFinite(row.hist, n)) {
                     continue;
                 }
-                if (row.hist.envelope && row.hist.yMin.size() == static_cast<std::size_t>(n) &&
-                    row.hist.yMax.size() == static_cast<std::size_t>(n)) {
-                    keepPlotSeriesShown();
-                    ImPlot::PlotLine(("##" + name + " min").c_str(), row.hist.t.data(), row.hist.yMin.data(),
-                                     n);
-                    ImPlot::SetNextLineStyle(col, weight);
-                    keepPlotSeriesShown();
-                    ImPlot::PlotLine(("##" + name + " max").c_str(), row.hist.t.data(), row.hist.yMax.data(),
-                                     n);
+                const bool envelope = row.hist.envelope &&
+                                      row.hist.yMin.size() == static_cast<std::size_t>(n) &&
+                                      row.hist.yMax.size() == static_cast<std::size_t>(n);
+                if (dualY) {
+                    ImPlot::SetAxes(ImAxis_X1, src.yAxis == 2 ? ImAxis_Y2 : ImAxis_Y1);
                 }
                 ImPlot::SetNextLineStyle(col, weight);
                 keepPlotSeriesShown();
                 ImPlot::PlotLine(name.c_str(), row.hist.t.data(), row.hist.y.data(), n);
+                {
+                    double mn = 0.0;
+                    double mx = 0.0;
+                    double sum = 0.0;
+                    double last = 0.0;
+                    int count = 0;
+                    bool haveEnv = false;
+                    for (int k = 0; k < n; ++k) {
+                        const double yv = row.hist.y[static_cast<std::size_t>(k)];
+                        if (!std::isfinite(yv)) {
+                            continue;
+                        }
+                        if (envelope) {
+                            const double y0 = row.hist.yMin[static_cast<std::size_t>(k)];
+                            const double y1 = row.hist.yMax[static_cast<std::size_t>(k)];
+                            if (std::isfinite(y0) && std::isfinite(y1)) {
+                                if (!haveEnv) {
+                                    mn = y0;
+                                    mx = y1;
+                                    haveEnv = true;
+                                } else {
+                                    mn = std::min(mn, y0);
+                                    mx = std::max(mx, y1);
+                                }
+                            }
+                        } else if (count == 0) {
+                            mn = yv;
+                            mx = yv;
+                        } else {
+                            mn = std::min(mn, yv);
+                            mx = std::max(mx, yv);
+                        }
+                        sum += yv;
+                        last = yv;
+                        ++count;
+                    }
+                    if (count > 0) {
+                        std::string unit;
+                        if (const ctrl::CatalogSignal* cat = catalogSignal(ui.arena, src)) {
+                            unit = cat->unit;
+                        }
+                        HeaderStat hs;
+                        hs.ok = true;
+                        hs.color = col;
+                        if (unit.empty()) {
+                            std::snprintf(hs.text, sizeof(hs.text), "%.4g", last);
+                            std::snprintf(hs.tip, sizeof(hs.tip), "min %.4g   max %.4g   mean %.4g", mn, mx,
+                                          sum / static_cast<double>(count));
+                        } else {
+                            std::snprintf(hs.text, sizeof(hs.text), "%.4g %s", last, unit.c_str());
+                            std::snprintf(hs.tip, sizeof(hs.tip), "min %.4g %s   max %.4g %s   mean %.4g %s",
+                                          mn, unit.c_str(), mx, unit.c_str(), sum / static_cast<double>(count),
+                                          unit.c_str());
+                        }
+                        headerStats.push_back(hs);
+                    }
+                }
                 if (drawPlotLegendColorPopup(name.c_str(), src.color, row.index, &src.hidden)) {
                     markDirty();
                 }
@@ -2352,6 +2901,16 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
             }
             if (cell.sources.empty()) {
                 ImPlot::PlotText("Add signal", 0.5, 0.5);
+            }
+            bool antennaGap = false;
+            for (const ViewSignal& src : cell.sources) {
+                if (src.signalName == "__antenna__" && src.id == 0) {
+                    antennaGap = true;
+                }
+            }
+            if (antennaGap) {
+                const double mid = 0.5 * (xmin + xmax);
+                ImPlot::PlotText("Not on CAN", std::isfinite(mid) ? mid : 0.0, 0.0);
             }
 
             const bool hovered = ImPlot::IsPlotHovered();
@@ -2370,11 +2929,26 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                 }
                 containPlotTime(t, lo, hi, minBound, maxBound);
                 holdScrubWindow(active(), lo, hi);
-                ui.arena.setPreviewCursor(static_cast<std::uint64_t>(t), true);
+                const auto ms = static_cast<std::uint64_t>(std::max(0.0, t));
+                ui.arena.setPreviewCursor(ms, true);
+                if (!live) {
+                    const double now = ImGui::GetTime();
+                    if (lastPlotSeekS_ < 0.0 || now - lastPlotSeekS_ >= 0.08) {
+                        lastPlotSeekS_ = now;
+                        ui.client.sendTimeline(ctrl::TimelineMode::Pause, ms);
+                    }
+                }
             };
             const double axisLo = cell.freeze && cell.viewMaxMs > cell.viewMinMs ? cell.viewMinMs : xmin;
             const double axisHi = cell.freeze && cell.viewMaxMs > cell.viewMinMs ? cell.viewMaxMs : xmax;
             const double mouseT = plotTimeAtMouse(axisLo, axisHi);
+            const ImVec2 plotSz = ImPlot::GetPlotSize();
+            const ImVec2 mousePx = ImGui::GetIO().MousePos;
+            if ((hovered || xAxisHovered) && !legendHot && !ImGui::GetIO().KeyShift) {
+                sharedHover_ = true;
+                sharedHoverMs_ = clampToPlotAxis(mouseT, axisLo, axisHi);
+                sharedHoverGen_ = drawGen_;
+            }
             if (canScrub) {
                 const double wheelScrub = plotWheelScrubDeltaMs(axisHi - axisLo);
                 if (wheelScrub != 0.0) {
@@ -2388,6 +2962,12 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                     }
                     ImGui::GetIO().MouseWheel = 0.0f;
                     ImGui::GetIO().MouseWheelH = 0.0f;
+                } else if (plotWheelIsValueZoom()) {
+                    const double factor = ImGui::GetIO().MouseWheel > 0.0f ? 0.5 : 2.0;
+                    scaleSharedValue(active(), index, ImPlot::GetPlotMousePos().y, true, factor);
+                    touchDirty();
+                    ImGui::GetIO().MouseWheel = 0.0f;
+                    ImGui::GetIO().MouseWheelH = 0.0f;
                 } else if (plotWheelIsZoom()) {
                     double lo = axisLo;
                     double hi = axisHi;
@@ -2396,31 +2976,34 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                         lo = xmin;
                     }
                     const double factor = ImGui::GetIO().MouseWheel > 0.0f ? 0.5 : 2.0;
-                    const double cursorT = static_cast<double>(ui.arena.effectiveCursorMs());
-                    zoomTimeWindowAround(plotZoomAnchorMs(cursorT, lo, hi), lo, hi, factor);
-                    if (sanitizePlotWindow(lo, hi)) {
-                        const float nextSec = static_cast<float>(std::max(2.0, (hi - lo) / 1000.0));
-                        bool changed = std::fabs(nextSec - cell.timeWindowSec) > 0.05f;
-                        cell.timeWindowSec = nextSec;
-                        if (cell.freeze && cell.viewMaxMs > cell.viewMinMs) {
-                            if (std::fabs(cell.viewMinMs - lo) > 0.5 || std::fabs(cell.viewMaxMs - hi) > 0.5) {
-                                changed = true;
-                            }
-                            if (cell.scrubHold) {
-                                holdScrubWindow(active(), lo, hi);
-                            } else {
-                                cell.viewMinMs = lo;
-                                cell.viewMaxMs = hi;
-                            }
-                        }
-                        if (changed) {
-                            touchDirty();
-                        }
-                    }
+                    const double anchor = clampToPlotAxis(mouseT, lo, hi);
+                    scaleSharedWindow(active(), anchor, lo, hi, factor, true);
+                    touchDirty();
                     ImGui::GetIO().MouseWheel = 0.0f;
                     ImGui::GetIO().MouseWheelH = 0.0f;
                 }
             }
+            const double minBound = tl.minTimeMs != 0 ? static_cast<double>(tl.minTimeMs) : 0.0;
+            const double maxBound = tl.maxTimeMs > tl.minTimeMs ? static_cast<double>(tl.maxTimeMs) : 0.0;
+            auto placeWindow = [&](double lo, double hi, double cursorT) {
+                if (!sanitizePlotWindow(lo, hi)) {
+                    return;
+                }
+                applySharedAbsoluteWindow(active(), lo, hi, false);
+                cursorT = clampPlotTimeMs(cursorT);
+                if (maxBound > minBound) {
+                    cursorT = std::min(maxBound, std::max(minBound, cursorT));
+                }
+                const auto ms = static_cast<std::uint64_t>(std::max(0.0, cursorT));
+                ui.arena.setPreviewCursor(ms, true);
+                if (!live) {
+                    const double now = ImGui::GetTime();
+                    if (lastPlotSeekS_ < 0.0 || now - lastPlotSeekS_ >= 0.08) {
+                        lastPlotSeekS_ = now;
+                        ui.client.sendTimeline(ctrl::TimelineMode::Pause, ms);
+                    }
+                }
+            };
             const ImGuiIO& io = ImGui::GetIO();
             bool leftDown = io.MouseDown[ImGuiMouseButton_Left];
 #ifdef __EMSCRIPTEN__
@@ -2436,12 +3019,57 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
             const bool leftClicked = io.MouseClicked[ImGuiMouseButton_Left];
             const bool doubleClick = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
             if (!leftDown || io.MouseReleased[ImGuiMouseButton_Left] || doubleClick) {
+                if (plotPan_ && plotPanCell_ == index) {
+                    if (!doubleClick && !plotPanMoved_) {
+                        double lo = 0.0;
+                        double hi = 0.0;
+                        centerPlotWindow(plotPanGrabT_, plotPanHi_ - plotPanLo_, lo, hi, minBound, maxBound);
+                        placeWindow(lo, hi, plotPanGrabT_);
+                        touchDirty();
+                    } else if (!doubleClick) {
+                        touchDirty();
+                        if (!live) {
+                            lastPlotSeekS_ = ImGui::GetTime();
+                            ui.client.sendTimeline(ctrl::TimelineMode::Pause,
+                                                   static_cast<std::uint64_t>(std::max(0.0, plotPanGrabT_)));
+                        }
+                    }
+                    plotPan_ = false;
+                    plotPanCell_ = -1;
+                }
                 if (plotScrubbing_ && !doubleClick && ui.arena.hasPreviewCursor() && !live) {
                     ui.client.sendTimeline(ctrl::TimelineMode::Pause, ui.arena.displayCursorMs());
                 }
                 plotScrubbing_ = false;
-            } else if (canScrub && leftClicked) {
-                plotScrubbing_ = true;
+            } else if (canScrub && leftClicked && !io.KeyShift) {
+                plotPan_ = true;
+                plotPanCell_ = index;
+                plotPanMoved_ = false;
+                plotPanLo_ = axisLo;
+                plotPanHi_ = axisHi;
+                if (!(plotPanHi_ > plotPanLo_)) {
+                    plotPanHi_ = xmax;
+                    plotPanLo_ = xmin;
+                }
+                plotPanGrabT_ = clampToPlotAxis(mouseT, plotPanLo_, plotPanHi_);
+                plotPanGrabX_ = mousePx.x;
+                plotPanPlotW_ = std::max(1.0f, plotSz.x);
+                plotScrubbing_ = false;
+            }
+            if (plotPan_ && plotPanCell_ == index && leftDown && !doubleClick) {
+                const float dx = mousePx.x - plotPanGrabX_;
+                if (std::fabs(dx) > 5.0f) {
+                    plotPanMoved_ = true;
+                }
+                if (plotPanMoved_) {
+                    const double span = plotPanHi_ - plotPanLo_;
+                    const double deltaT =
+                        (static_cast<double>(dx) / static_cast<double>(plotPanPlotW_)) * span;
+                    double lo = plotPanLo_;
+                    double hi = plotPanHi_;
+                    shiftPlotWindow(lo, hi, -deltaT, minBound, maxBound);
+                    placeWindow(lo, hi, plotPanGrabT_);
+                }
             }
             if (plotScrubbing_ && leftDown) {
                 double t = mouseT;
@@ -2450,20 +3078,23 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                 }
                 scrubTo(t);
             }
+            const bool panningHere = plotPan_ && plotPanCell_ == index;
+            const double sharedCursor = ui.arena.hasPreviewCursor()
+                                             ? static_cast<double>(ui.arena.previewCursorMs())
+                                             : static_cast<double>(ui.arena.effectiveCursorMs());
             double playhead = plotScrubbing_ && leftDown
-                                  ? (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f)
-                                         ? mouseT
-                                         : clampToPlotAxis(mouseT, axisLo, axisHi))
-                                  : plotPlayheadMs(static_cast<double>(ui.arena.effectiveCursorMs()),
-                                                   axisLo, axisHi);
+                                  ? clampToPlotAxis(mouseT, axisLo, axisHi)
+                                  : (panningHere ? plotPanGrabT_
+                                                 : plotPlayheadMs(sharedCursor, axisLo, axisHi));
             if (!std::isfinite(playhead) || playhead <= 0.0) {
                 playhead = std::isfinite(xmax) && xmax > 0.0 ? xmax : axisHi;
             }
-            ImPlot::DragLineX(99, &playhead, theme::chrome(), 1.75f,
-                              ImPlotDragToolFlags_NoFit | ImPlotDragToolFlags_NoInputs);
+            const bool hoverInspect = sharedHover_ && !plotScrubbing_ && !panningHere;
+            const bool showReadout = plotScrubbing_ || hoverInspect || panningHere;
+            const double inspectT = (plotScrubbing_ || panningHere) ? playhead
+                                                                    : (hoverInspect ? sharedHoverMs_ : playhead);
             std::vector<PlotCursorHit> hits;
             hits.reserve(series.size());
-            const double cursorT = std::isfinite(playhead) ? playhead : mouseT;
             for (const LineSeriesDraw& row : series) {
                 const ViewSignal& src = cell.sources[row.index];
                 if (src.hidden) {
@@ -2472,18 +3103,30 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                 PlotCursorHit hit;
                 hit.color = seriesColor(src, row.index);
                 hit.yAxis = (dualY && src.yAxis == 2) ? ImAxis_Y2 : ImAxis_Y1;
-                if (samplePlotArraysAt(row.hist, cursorT, hit.y)) {
+                if (samplePlotArraysAt(row.hist, inspectT, hit.y)) {
                     hit.ok = true;
-                } else if (src.id != 0 && ui.arena.interpolate(src.id, cursorT, hit.y)) {
+                } else if (src.id != 0 && ui.arena.interpolate(src.id, inspectT, hit.y)) {
                     hit.ok = true;
                 }
                 if (hit.ok) {
-                    setPlotCursorLabel(hit, cellLabel(src).c_str(), hit.y);
+                    setPlotCursorLabel(hit, plotSeriesName(src).c_str(), hit.y);
                 }
                 hits.push_back(hit);
             }
-            if (!hits.empty()) {
-                drawPlotCursorReadout(cursorT, hits.data(), static_cast<int>(hits.size()), false);
+            if (showReadout && !hits.empty()) {
+                float legendW = 0.0f;
+                float legendH = 0.0f;
+                std::vector<std::string> legendNames;
+                if (cell.legend) {
+                    for (const ViewSignal& src : cell.sources) {
+                        if (!src.hidden) {
+                            legendNames.push_back(plotSeriesName(src));
+                        }
+                    }
+                }
+                reserveNorthwestLegend(cell.legend, legendNames, legendW, legendH);
+                drawPlotCursorReadout(inspectT, hits.data(), static_cast<int>(hits.size()),
+                                      ImGui::GetIO().MousePos.y, 10.0f, legendW, legendH);
             }
             if (hovered && ImGui::GetIO().KeyShift && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 cell.rangeDragging = true;
@@ -2505,14 +3148,15 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                     }
                 }
             }
-            if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().KeyCtrl) {
                 cell.rangeActive = false;
                 cell.rangeDragging = false;
                 cell.yLocked = false;
-                if (cell.scrubHold) {
-                    releaseScrubHolds(active());
-                    ui.arena.setPreviewCursor(0, false);
-                }
+                releaseSharedValueZoom(active());
+                releaseSharedTimeHold(active());
+                ui.arena.setPreviewCursor(0, false);
+                plotPan_ = false;
+                plotPanCell_ = -1;
             }
 
             if (cell.rangeActive && !cell.rangeDragging) {
@@ -2570,9 +3214,12 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                 }
             }
 
-            ImPlot::EndPlot();
+            endPlotCompactLegend();
+        } else {
+            theme::popPlotFont();
         }
-        theme::popPlotFont();
+        drawHeaderStats(draw, headerMin, headerMin.x + size.x - 8.0f, headerMin.x + 8.0f + tsz.x,
+                        headerStats);
         (void)any;
     }
 
@@ -2670,6 +3317,10 @@ void CustomViews::draw(UiContext& ui) {
     pollImport();
     resolve(ui.arena);
     subscribe(ui);
+    ++drawGen_;
+    if (sharedHoverGen_ != drawGen_ - 1) {
+        sharedHover_ = false;
+    }
     if (doc_.views.empty()) {
         ensureDefault();
     }
@@ -2685,6 +3336,9 @@ void CustomViews::draw(UiContext& ui) {
     }
 
     drawToolbar(ui);
+    if (!plotScrubbing_ && !doc_.views.empty()) {
+        alignScrubWindowToCursor(active(), static_cast<double>(ui.arena.effectiveCursorMs()));
+    }
     drawGrid(ui, ImGui::GetContentRegionAvail());
     if (!export_.active || export_.waitDay || export_.settleFrames > 0) {
         drawPicker(ui);

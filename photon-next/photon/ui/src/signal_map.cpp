@@ -12,12 +12,14 @@
 namespace photon::ui {
 namespace {
 
-// DBC names from assets/dbc/carcan_telemcan.dbc.
-// Columns: role, label, Message.Signal, unit, syntheticId, screens,
-// tile, plot, hasWarnLow, hasWarnHigh, warnLow, warnHigh.
-// Empty signal: derived in vital() (pack SOC from pack voltage, mph, slip, array power).
-// pack_current is MC_BusMeasurement.MC_BusCurrent. There is no Main_Battery_Current.
-// No rear wheel speed in this DBC. Suspension is SUS_Data1 on each corner.
+// DBC names from assets/dbc/carcan_telemcan.dbc (Message.Signal).
+// pack_soc: no pack SOC in the DBC; derived from Main_Battery_Voltage (legacy
+// 32S Li-ion estimate) or synthetic id 3.
+// pack_current: no Main_Battery_Current in the DBC; closest live current is
+// MC_BusMeasurement.MC_BusCurrent (legacy dashboard "Bus Current").
+// cell_* : muxed BPS_*_Aggregate_Arr + BPS_Tap_idx (32 taps), not scalars.
+// array_power: no precomputed power; sum of MPPT A/B/C Vin*Iin.
+// wheel_rpm_rear / dedicated linpot names: not in this DBC (SUS_Data1 per corner).
 
 constexpr ScalarDef kScalarDefs[] = {
     {"pack_soc", "Pack SOC", "", "%", kSignalSoc, MapScreen::Pit, true, false, true, false, 30.0, 0.0},
@@ -155,8 +157,7 @@ constexpr ScalarDef kScalarDefs[] = {
     {"yaw_rate", "Yaw", "IMU_Gyro_Back.Gyro_Z", "dps", 0, MapScreen::Dynamics, true, true, true, true, -90.0,
      90.0},
     {"vehicle_speed_mph", "Speed", "", "mph", 0, MapScreen::Both, true, false, false, true, 0.0, 70.0},
-    {"slip_fl", "Slip FL", "", "%", 0, MapScreen::Dynamics, true, false, true, true, -20.0, 20.0},
-    {"slip_fr", "Slip FR", "", "%", 0, MapScreen::Dynamics, true, false, true, true, -20.0, 20.0},
+
     {"lws_fault", "LWS", "LWS_Standard.LWS_Fault", "", 0, MapScreen::Dynamics | MapScreen::Dashboard, false, false,
      false, true, 0.0, 0.0},
     {"mc_bus_voltage", "Bus V", "MC_BusMeasurement.MC_BusVoltage", "V", 0, MapScreen::Dashboard, false, false,
@@ -203,10 +204,10 @@ constexpr ScalarDef kScalarDefs[] = {
      false, false, false, 0.0, 0.0},
     {"mc_fault_overspeed", "MC Overspeed", "MC_Status.MC_FAULT_MotorOverSpeed", "", 0, MapScreen::Dashboard, false,
      false, false, false, 0.0, 0.0},
-    {"brake_p1", "Brake P1", "Brake_Pressure_1.Brake_Pressure", "psi", 0, MapScreen::Dashboard, false, false,
-     false, false, 0.0, 0.0},
-    {"brake_p2", "Brake P2", "Brake_Pressure_2.Brake_Pressure", "psi", 0, MapScreen::Dashboard, false, false,
-     false, false, 0.0, 0.0},
+    {"brake_p1", "Front", "Brake_Pressure_1.Brake_Pressure", "psi", 0, MapScreen::Dashboard | MapScreen::Pit,
+     false, false, false, false, 0.0, 0.0},
+    {"brake_p2", "Rear", "Brake_Pressure_2.Brake_Pressure", "psi", 0, MapScreen::Dashboard | MapScreen::Pit,
+     false, false, false, false, 0.0, 0.0},
     {"brake_p1_fault", "Brake P1 F", "Pedal_Status.Brake_Pressure_1_Fault", "", 0, MapScreen::Dashboard, false,
      false, false, false, 0.0, 0.0},
     {"brake_p2_fault", "Brake P2 F", "Pedal_Status.Brake_Pressure_2_Fault", "", 0, MapScreen::Dashboard, false,
@@ -332,7 +333,6 @@ std::size_t ringIndex(const SignalRing& ring, std::size_t logicalOldest) {
     return (ring.plotOffset() + logicalOldest) % ring.cap;
 }
 
-// Rings are circular. Copy oldest-first before pairing the tap index with its value.
 void fillFromMux(const SignalRing* idx, const SignalRing* val, std::vector<float>& out,
                  std::vector<double>* tapTs, int count, bool reset) {
     if (idx == nullptr || val == nullptr || idx->count == 0 || val->count == 0) {
@@ -609,23 +609,6 @@ Vital SignalMap::vital(std::string_view role, const ClientArena& arena) const {
         }
         return v;
     }
-    if (role == "slip_fl" || role == "slip_fr") {
-        const Vital rpm = vital(role == "slip_fl" ? "wheel_rpm_fl" : "wheel_rpm_fr", arena);
-        const Vital spd = vital("vehicle_speed", arena);
-        v.unit = "%";
-        v.hasBar = true;
-        v.barMin = -25.0;
-        v.barMax = 25.0;
-        v.derived = true;
-        if (rpm.mapped && rpm.have && spd.mapped && spd.have && std::isfinite(rpm.value) &&
-            std::isfinite(spd.value) && std::abs(spd.value) >= kMinGroundSpeedMps) {
-            v.mapped = true;
-            v.have = true;
-            v.value = slipPercent(wheelSpeedMps(rpm.value), spd.value);
-            v.alarm = std::abs(v.value) > 20.0;
-        }
-        return v;
-    }
     if (role == "array_power") {
         double watts = 0.0;
         int pairs = 0;
@@ -668,7 +651,6 @@ Vital SignalMap::vital(std::string_view role, const ClientArena& arena) const {
         }
         return v;
     }
-    // Catalog is in and this name missed: leave the tile empty. Do not invent a value.
     if (arena.haveSignalCatalog || arena.catalogPinned()) {
         return v;
     }

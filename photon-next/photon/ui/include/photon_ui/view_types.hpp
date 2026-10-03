@@ -6,7 +6,11 @@
 
 namespace photon::ui {
 
-enum class ViewCellKind { Line, Value, Scatter };
+enum class ViewCellKind { Line, Value, Scatter, Histogram };
+
+inline bool sharesTimeAxis(ViewCellKind kind) {
+    return kind == ViewCellKind::Line || kind == ViewCellKind::Histogram;
+}
 
 struct ViewSignal {
     std::uint32_t id = 0;
@@ -43,6 +47,12 @@ struct ViewCell {
     double viewMaxMs = 0.0;
     // false = Auto Y (default). Fits the visible window; axis handles are locked.
     bool yLocked = false;
+    // Alt-wheel zoom. Kept apart from yLocked, which is the picker's manual lock.
+    bool yUser = false;
+    double yUserLo = 0.0;
+    double yUserHi = 0.0;
+    double yFitLo = 0.0;
+    double yFitHi = 0.0;
     bool rangeActive = false;
     bool rangeDragging = false;
     double rangeA = 0.0;

@@ -13,6 +13,24 @@
 namespace photon::ui {
 namespace {
 
+// A float signal's rollup mean used to be the average of the IEEE bits
+// (about 1e9 for a normal speed). The bit min/max still decode to the
+// physical range, so a mean outside that range is replaced with its middle.
+float rollupMean(float mean, float mn, float mx) {
+    if (!std::isfinite(mean) || !std::isfinite(mn) || !std::isfinite(mx)) {
+        return mean;
+    }
+    if (mn > mx) {
+        std::swap(mn, mx);
+    }
+    const float span = mx - mn;
+    const float slack = std::max(1.0e-3f, std::fabs(span) * 1.0e-4f);
+    if (mean < mn - slack || mean > mx + slack) {
+        return 0.5f * (mn + mx);
+    }
+    return mean;
+}
+
 std::size_t tileBytes(const Tile& t) {
     return t.t.capacity() * sizeof(double) +
            (t.minV.capacity() + t.maxV.capacity() + t.meanV.capacity() + t.rawV.capacity()) * sizeof(float) +
@@ -954,7 +972,9 @@ void TileCache::ingestChunk(const proto::HistoryChunk& chunk) {
                 tile.maxV.push_back(chunk.maxV[vi]);
             }
             if (vi < chunk.meanV.size()) {
-                tile.meanV.push_back(chunk.meanV[vi]);
+                const float mn = vi < chunk.minV.size() ? chunk.minV[vi] : chunk.meanV[vi];
+                const float mx = vi < chunk.maxV.size() ? chunk.maxV[vi] : chunk.meanV[vi];
+                tile.meanV.push_back(rollupMean(chunk.meanV[vi], mn, mx));
             }
             ++vi;
         }

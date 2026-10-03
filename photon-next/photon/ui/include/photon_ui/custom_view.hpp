@@ -65,6 +65,21 @@ private:
     LayoutUndo undo_{};
     LayoutUndo dragUndoPrev_{};
     bool dragUndoPushed_ = false;
+    // Previous frame's plot hover, so every panel can draw one shared crosshair.
+    bool sharedHover_ = false;
+    double sharedHoverMs_ = 0.0;
+    int sharedHoverGen_ = 0;
+    int drawGen_ = 0;
+    // Click recenters the current span. A drag slides that same span.
+    bool plotPan_ = false;
+    int plotPanCell_ = -1;
+    bool plotPanMoved_ = false;
+    double plotPanLo_ = 0.0;
+    double plotPanHi_ = 0.0;
+    double plotPanGrabT_ = 0.0;
+    float plotPanGrabX_ = 0.0f;
+    float plotPanPlotW_ = 1.0f;
+    double lastPlotSeekS_ = -1.0;
 
     CustomView& active();
     const CustomView& active() const;
@@ -86,7 +101,8 @@ private:
     void addGgCell();
     void addPitVitalsView();
     CustomView makePitVitalsView() const;
-    void migrateView(CustomView& view);
+    // Returns true when the stock pit board gained a panel.
+    bool migrateView(CustomView& view);
     ViewCell* targetCell();
     void assignSignal(const ctrl::CatalogSignal& sig);
     void resolve(const ClientArena& arena);
@@ -105,6 +121,15 @@ private:
 };
 
 void flushPlotImageExport();
+
+// Telemetry_Status is an empty DBC message and is absent from the recorded logs.
+inline const char* antennaCanNote() {
+    return "Not on CAN. Telemetry_Status (1792) has no fields in carcan_telemcan.dbc and does not appear in the logs.";
+}
+
+// First catalog signal that looks like a radio antenna reading (name contains
+// antenna, rssi, or snr), otherwise the first signal on Telemetry_Status.
+const ctrl::CatalogSignal* findAntennaSignal(const ClientArena& arena);
 
 std::string serializeCustomViews(const CustomViewDocument& doc);
 bool parseCustomViews(std::string_view text, CustomViewDocument* out, std::string* error);

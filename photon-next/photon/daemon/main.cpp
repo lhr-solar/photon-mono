@@ -59,6 +59,7 @@ int main(int argc, char** argv) {
         std::fprintf(stdout, "[photon-backend] video udp host %s\n", opt.videoUdpHost.c_str());
     }
     std::fprintf(stdout, "[photon-backend] client auth %s\n", opt.password.empty() ? "off" : "on");
+    hub.setAnalysisCompute(opt.analysisCompute);
     std::string historyHost;
     std::uint16_t historyPort = 0;
     if (opt.historyRemote.empty()) {
@@ -76,6 +77,11 @@ int main(int argc, char** argv) {
                      static_cast<unsigned>(historyPort));
     } else {
         std::fprintf(stdout, "[photon-backend] history-remote off\n");
+    }
+    if (opt.analysisCompute.empty()) {
+        std::fprintf(stdout, "[photon-backend] analysis-compute off\n");
+    } else {
+        std::fprintf(stdout, "[photon-backend] analysis-compute %s\n", opt.analysisCompute.c_str());
     }
     if (!hub.start()) {
         return 1;

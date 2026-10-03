@@ -455,14 +455,15 @@ void drawBpsCard(const Vital& bps, ImVec2 size) {
 
 void drawPedalRow(const char* name, const Vital& v, ImVec4 fill) {
     const float w = ImGui::GetContentRegionAvail().x;
-    const float h = 22.0f;
+    const float h = 18.0f;
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::Dummy(ImVec2(w, h));
     ImDrawList* draw = ImGui::GetWindowDrawList();
 
-    char pct[12];
+    char pct[24];
     if (v.have) {
-        std::snprintf(pct, sizeof(pct), "%0.0f%%", v.value);
+        const char* unit = (v.unit != nullptr && v.unit[0] != '\0') ? v.unit : "psi";
+        std::snprintf(pct, sizeof(pct), "%0.0f %s", v.value, unit);
     } else {
         std::snprintf(pct, sizeof(pct), "--");
     }
@@ -471,14 +472,15 @@ void drawPedalRow(const char* name, const Vital& v, ImVec4 fill) {
     const float textY = p.y + (h - nameSz.y) * 0.5f;
     draw->AddText(ImVec2(p.x, textY), theme::u32(theme::mutedFg()), name);
 
-    const float nameCol = 72.0f;
+    const float nameCol = std::max(72.0f, nameSz.x + 12.0f);
     const float barH = 6.0f;
     const float barX = p.x + nameCol;
     const float barW = std::max(8.0f, w - nameCol - pctSz.x - 8.0f);
     const float barY = p.y + (h - barH) * 0.5f;
     draw->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barW, barY + barH), theme::u32(theme::muted()), 3.0f);
+    const double full = (v.barMax > v.barMin) ? v.barMax : 3000.0;
     if (v.have) {
-        const float frac = static_cast<float>(std::clamp(v.value / 100.0, 0.0, 1.0));
+        const float frac = static_cast<float>(std::clamp(v.value / full, 0.0, 1.0));
         const float fw = frac * barW;
         if (fw > 1.0f) {
             draw->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + fw, barY + barH), theme::u32(fill), 3.0f);
@@ -488,12 +490,13 @@ void drawPedalRow(const char* name, const Vital& v, ImVec4 fill) {
                   theme::u32(v.have ? theme::foreground() : theme::mutedFg()), pct);
 }
 
-void drawPedalCard(const Vital& thr, const Vital& brk, ImVec2 size) {
+void drawPedalCard(const Vital& throttle, const Vital& front, const Vital& rear, ImVec2 size) {
     theme::beginCard("prot-pedals", size, theme::card(), theme::kTilePadding);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 1.0f));
     ImGui::TextColored(theme::mutedFg(), "Pedals");
-    drawPedalRow("Throttle", thr, theme::primary());
-    drawPedalRow("Brake", brk, theme::warning());
+    drawPedalRow("Throttle", throttle, theme::accent());
+    drawPedalRow("Front", front, theme::primary());
+    drawPedalRow("Rear", rear, theme::warning());
     ImGui::PopStyleVar();
     theme::endCard();
 }
@@ -550,8 +553,9 @@ void PitScreen::draw(UiContext& ui) {
     const Vital mpptCIin = map.vital("mppt_c_iin", ui.arena);
     const Vital auxV = map.vital("supp_voltage", ui.arena);
     const Vital auxI = map.vital("supp_current", ui.arena);
-    const Vital thr = map.vital("throttle", ui.arena);
-    const Vital brk = map.vital("brake", ui.arena);
+    const Vital throttle = map.vital("throttle", ui.arena);
+    const Vital front = map.vital("brake_p1", ui.arena);
+    const Vital rear = map.vital("brake_p2", ui.arena);
 
     const Vital ignArr = map.vital("ign_array", ui.arena);
     const Vital ignMtr = map.vital("ign_motor", ui.arena);
@@ -576,7 +580,7 @@ void PitScreen::draw(UiContext& ui) {
     ImGui::SameLine(0.0f, gap);
     drawAuxCard(auxV, auxI, ImVec2(auxW, protH));
     ImGui::SameLine(0.0f, gap);
-    drawPedalCard(thr, brk, ImVec2(pedalW, protH));
+    drawPedalCard(throttle, front, rear, ImVec2(pedalW, protH));
 
     const float remain = ImGui::GetContentRegionAvail().y;
     const float embedH =

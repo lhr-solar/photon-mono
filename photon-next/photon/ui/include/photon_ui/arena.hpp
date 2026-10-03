@@ -74,6 +74,7 @@ struct VideoState {
     std::uint16_t port = 0;
     std::string mode = "live";
     std::uint64_t lastTsMs = 0;
+    std::uint64_t lastFrameArrivalMs = 0;
     std::uint64_t frames = 0;
     std::uint64_t dropped = 0;
     bool haveStatus = false;
@@ -84,8 +85,13 @@ struct VideoState {
     bool clockOffsetDirty = false;
     bool clockOffsetUser = false;
     double fps = 0.0;
-    std::uint64_t fpsWindowStartMs = 0;
-    std::uint64_t fpsWindowCount = 0;
+    // Recent picture intervals, in ms. The rate is their median, so a GOP
+    // that arrives in one burst still reads as the camera interval.
+    static constexpr int kFpsDeltas = 15;
+    std::uint32_t fpsDeltaMs[kFpsDeltas]{};
+    int fpsDeltaN = 0;
+    int fpsDeltaI = 0;
+    bool fpsHaveLast = false;
     std::uint64_t fpsLastPictureMs = 0;
 };
 
@@ -136,8 +142,6 @@ public:
     void resetTrackSimCatalog();
     void beginTrackSimSolve(double timeBudgetS);
     void applySignalCatalog(const ctrl::Message& msg);
-    // Radio reading chosen when the catalog arrived. Null when the DBC has none.
-    const ctrl::CatalogSignal* antennaSignal() const;
     void resetSignalMap();
     void refreshMappedCells();
     void maybePrimeHistory(HistoryIO& io);
@@ -245,7 +249,6 @@ private:
     bool mapsResetPulse_ = false;
     TileCache tiles_{};
     std::string primedHistoryKey_;
-    std::uint32_t antennaId_ = 0;
     bool catalogPinned_ = false;
     std::string pinnedCatalogId_;
     double pinnedPlayWallMs_ = 0.0;

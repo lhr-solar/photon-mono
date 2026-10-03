@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <ctime>
 #include <string>
+#include <string_view>
 
 namespace photon::ui {
 
@@ -46,6 +47,10 @@ inline bool localTmFromUnixMs(std::uint64_t ms, std::tm& out) {
 #endif
     out = tm;
     return true;
+}
+
+inline bool isReplayLogDate(std::string_view ymd) {
+    return !ymd.empty();
 }
 
 inline std::string localYmdFromUnixMs(std::uint64_t ms) {

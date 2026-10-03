@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cfloat>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -35,20 +36,25 @@ inline std::string formatHexColor(const ImVec4& c) {
     return formatHexColor(c.x, c.y, c.z, c.w);
 }
 
-inline ImVec4 seriesColor(const ViewSignal& src, std::size_t index) {
-    ImVec4 parsed{};
-    if (parseHexColor(src.color, &parsed)) {
-        return parsed;
-    }
-    return theme::plotSeries(index);
-}
-
 // Distinct swatches so series stay separable on void-black (theme series are near-white).
 inline constexpr ImVec4 kPlotColorSwatches[] = {
     {1.00f, 1.00f, 1.00f, 1.0f}, {0.95f, 0.22f, 0.25f, 1.0f}, {1.00f, 0.62f, 0.18f, 1.0f},
     {0.98f, 0.84f, 0.22f, 1.0f}, {0.36f, 0.86f, 0.48f, 1.0f}, {0.22f, 0.82f, 0.86f, 1.0f},
     {0.32f, 0.56f, 0.98f, 1.0f}, {0.78f, 0.42f, 0.98f, 1.0f}, {0.98f, 0.42f, 0.70f, 1.0f},
 };
+
+inline ImVec4 defaultSeriesColor(std::size_t index) {
+    const int n = static_cast<int>(sizeof(kPlotColorSwatches) / sizeof(kPlotColorSwatches[0]));
+    return kPlotColorSwatches[index % static_cast<std::size_t>(n)];
+}
+
+inline ImVec4 seriesColor(const ViewSignal& src, std::size_t index) {
+    ImVec4 parsed{};
+    if (parseHexColor(src.color, &parsed)) {
+        return parsed;
+    }
+    return defaultSeriesColor(index);
+}
 
 // ImPlot left-click on a legend entry toggles hide. We own hide via src.hidden
 // and use the click to open a color picker instead.
@@ -65,9 +71,6 @@ inline bool drawPlotLegendColorPopup(const char* label, std::string& colorHex, s
     if (label == nullptr || label[0] == '\0') {
         return false;
     }
-    if (ImPlot::IsLegendEntryHovered(label)) {
-        ImGui::SetTooltip("Click to change color");
-    }
     ImGuiMouseButton btn = ImGuiMouseButton_Left;
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
         btn = ImGuiMouseButton_Right;
@@ -76,7 +79,7 @@ inline bool drawPlotLegendColorPopup(const char* label, std::string& colorHex, s
         return false;
     }
     bool changed = false;
-    ImVec4 col = theme::plotSeries(themeIndex);
+    ImVec4 col = defaultSeriesColor(themeIndex);
     parseHexColor(colorHex, &col);
     float rgba[4] = {col.x, col.y, col.z, col.w};
     ImGui::TextUnformatted(label);
@@ -100,12 +103,12 @@ inline bool drawPlotLegendColorPopup(const char* label, std::string& colorHex, s
         }
         ImGui::PopID();
     }
-    if (ImGui::SmallButton("Theme")) {
+    if (ImGui::SmallButton("Default")) {
         colorHex.clear();
         changed = true;
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Use the theme series color");
+        ImGui::SetTooltip("Use the default series color");
     }
     if (hidden != nullptr) {
         ImGui::SameLine();
@@ -155,10 +158,16 @@ inline double plotWheelScrubDeltaMs(double spanMs) {
 
 inline bool plotWheelIsZoom() {
     const ImGuiIO& io = ImGui::GetIO();
-    if (io.KeyShift) {
+    if (io.KeyShift || io.KeyAlt) {
         return false;
     }
     return std::fabs(io.MouseWheel) > 0.0f && std::fabs(io.MouseWheelH) < 0.01f;
+}
+
+// Alt+wheel zooms the value axis. Shift stays the time scrub.
+inline bool plotWheelIsValueZoom() {
+    const ImGuiIO& io = ImGui::GetIO();
+    return io.KeyAlt && !io.KeyShift && std::fabs(io.MouseWheel) > 0.0f && std::fabs(io.MouseWheelH) < 0.01f;
 }
 
 // Wheel / RANGE zoom anchors on the playhead, not the mouse.
@@ -221,28 +230,58 @@ inline void setPlotCursorLabel(PlotCursorHit& hit, const char* name, double y) {
     }
 }
 
-// Marker + value chip at tMs on each series. drawLine is for hover-only cursors;
-// the playhead DragLineX already draws the giant vertical line.
-inline void drawPlotCursorReadout(double tMs, const PlotCursorHit* hits, int nHits, bool drawLine = true) {
+// Marker + value for the series whose line is under the mouse. mouseY is a
+// screen pixel; a non-finite value lists every hit.
+// Top-left legend footprint, including ImPlot's outer pad.
+inline void reserveNorthwestLegend(bool enabled, const std::vector<std::string>& names, float& w, float& h) {
+    w = 0.0f;
+    h = 0.0f;
+    if (!enabled || names.empty()) {
+        return;
+    }
+    theme::pushSmallFont();
+    float maxLabel = 0.0f;
+    int n = 0;
+    for (const std::string& name : names) {
+        if (name.empty()) {
+            continue;
+        }
+        maxLabel = std::max(maxLabel, ImGui::CalcTextSize(name.c_str()).x);
+        ++n;
+    }
+    const float line = ImGui::GetTextLineHeight();
+    theme::popSmallFont();
+    if (n <= 0) {
+        return;
+    }
+    constexpr float kInner = 5.0f;
+    constexpr float kPad = 10.0f;
+    const float innerW = kInner * 2.0f + line + maxLabel;
+    const float innerH = kInner * 2.0f + static_cast<float>(n) * line;
+    w = kPad + innerW + 8.0f;
+    h = kPad + innerH + 8.0f;
+}
+
+inline bool plotBoxesOverlap(float ax, float ay, float aw, float ah, float bx, float by, float bw, float bh) {
+    return aw > 0.0f && ah > 0.0f && bw > 0.0f && bh > 0.0f && ax < bx + bw && ax + aw > bx && ay < by + bh &&
+           ay + ah > by;
+}
+
+// legendW/legendH reserve the top-left legend box, in pixels from the plot origin.
+inline void drawPlotCursorReadout(double tMs, const PlotCursorHit* hits, int nHits,
+                                  float mouseY = std::numeric_limits<float>::quiet_NaN(), float pickPx = 10.0f,
+                                  float legendW = 0.0f, float legendH = 0.0f) {
     if (!std::isfinite(tMs) || hits == nullptr || nHits <= 0) {
         return;
     }
     ImPlot::PushPlotClipRect();
     ImDrawList* dl = ImPlot::GetPlotDrawList();
     const ImPlotRect lim = ImPlot::GetPlotLimits();
-    if (drawLine) {
-        const ImVec2 top = ImPlot::PlotToPixels(tMs, lim.Y.Max);
-        const ImVec2 bot = ImPlot::PlotToPixels(tMs, lim.Y.Min);
-        if (std::isfinite(top.x) && std::isfinite(bot.x)) {
-            dl->AddLine(top, bot, IM_COL32(240, 240, 240, 150), 1.0f);
-        }
-    }
 
     const ImVec2 plotMin = ImPlot::GetPlotPos();
     const ImVec2 plotSz = ImPlot::GetPlotSize();
     const float plotRight = plotMin.x + plotSz.x;
     const float fontPx = 13.0f;
-    int stacked = 0;
     for (int i = 0; i < nHits; ++i) {
         const PlotCursorHit& hit = hits[i];
         if (!hit.ok || !std::isfinite(hit.y)) {
@@ -257,24 +296,89 @@ inline void drawPlotCursorReadout(double tMs, const PlotCursorHit* hits, int nHi
         if (!std::isfinite(pt.x) || !std::isfinite(pt.y)) {
             continue;
         }
-        const ImU32 col = ImGui::GetColorU32(hit.color);
-        dl->AddCircleFilled(pt, 4.0f, col);
-        dl->AddCircle(pt, 4.0f, IM_COL32(0, 0, 0, 180), 0, 1.25f);
-        const char* line = hit.label[0] != '\0' ? hit.label : "";
-        const ImVec2 textSz = ImGui::GetFont()->CalcTextSizeA(fontPx, FLT_MAX, 0.0f, line);
-        const ImVec2 pad(5.0f, 2.0f);
-        float x = pt.x + 8.0f;
-        if (x + textSz.x + pad.x * 2.0f > plotRight) {
-            x = pt.x - 8.0f - textSz.x - pad.x * 2.0f;
+        if (std::isfinite(mouseY) && std::fabs(pt.y - mouseY) > pickPx) {
+            continue;
         }
-        float y = pt.y - textSz.y * 0.5f + static_cast<float>(stacked) * (textSz.y + 5.0f);
-        y = std::max(plotMin.y + 2.0f, std::min(y, plotMin.y + plotSz.y - textSz.y - pad.y * 2.0f - 2.0f));
+        const ImU32 col = ImGui::GetColorU32(hit.color);
+        dl->AddCircleFilled(pt, 3.5f, col);
+        dl->AddCircle(pt, 3.5f, IM_COL32(0, 0, 0, 180), 0, 1.0f);
+    }
+
+    float maxText = 0.0f;
+    int rows = 0;
+    for (int i = 0; i < nHits; ++i) {
+        if (!hits[i].ok || hits[i].label[0] == '\0') {
+            continue;
+        }
+        if (hits[i].yAxis == ImAxis_Y2) {
+            ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2);
+        } else {
+            ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
+        }
+        const ImVec2 pt = ImPlot::PlotToPixels(tMs, hits[i].y);
+        if (!std::isfinite(pt.y) || (std::isfinite(mouseY) && std::fabs(pt.y - mouseY) > pickPx)) {
+            continue;
+        }
+        const ImVec2 textSz = ImGui::GetFont()->CalcTextSizeA(fontPx, FLT_MAX, 0.0f, hits[i].label);
+        maxText = std::max(maxText, textSz.x);
+        ++rows;
+    }
+    if (rows > 0 && maxText > 0.0f) {
+        const float rowH = fontPx + 3.0f;
+        const float boxW = std::min(plotSz.x - 12.0f, maxText + 22.0f);
+        const float boxH = std::min(plotSz.y - 8.0f, static_cast<float>(rows) * rowH + 8.0f);
+        const ImVec2 cursorPx = ImPlot::PlotToPixels(tMs, lim.Y.Max);
+        const float xLeft = plotMin.x + 6.0f;
+        const float xRight = plotRight - boxW - 6.0f;
+        const bool cursorOnLeft = std::isfinite(cursorPx.x) && cursorPx.x < plotMin.x + plotSz.x * 0.5f;
+        float x = cursorOnLeft ? xRight : xLeft;
+        float y = plotMin.y + 6.0f;
+        const float legX = plotMin.x;
+        const float legY = plotMin.y;
+        if (plotBoxesOverlap(x, y, boxW, boxH, legX, legY, legendW, legendH)) {
+            const float other = (x == xLeft) ? xRight : xLeft;
+            if (!plotBoxesOverlap(other, y, boxW, boxH, legX, legY, legendW, legendH)) {
+                x = other;
+            } else {
+                y = plotMin.y + legendH + 4.0f;
+                x = xLeft;
+            }
+        }
+        if (std::isfinite(cursorPx.x) && cursorPx.x > x - 4.0f && cursorPx.x < x + boxW + 4.0f) {
+            const float slid = cursorPx.x - boxW - 10.0f;
+            const float minX = plotMin.x + std::max(6.0f, legendW + 6.0f);
+            if (slid >= minX && slid + boxW <= plotRight - 4.0f) {
+                x = slid;
+            }
+        }
+        if (y + boxH > plotMin.y + plotSz.y - 4.0f) {
+            y = std::max(plotMin.y + 6.0f, plotMin.y + plotSz.y - boxH - 4.0f);
+        }
         const ImVec2 boxMin(x, y);
-        const ImVec2 boxMax(x + textSz.x + pad.x * 2.0f, y + textSz.y + pad.y * 2.0f);
-        dl->AddRectFilled(boxMin, boxMax, IM_COL32(12, 12, 12, 220), 3.0f);
-        dl->AddRect(boxMin, boxMax, col, 3.0f);
-        dl->AddText(nullptr, fontPx, ImVec2(boxMin.x + pad.x, boxMin.y + pad.y), IM_COL32(245, 245, 245, 255), line);
-        ++stacked;
+        const ImVec2 boxMax(x + boxW, y + boxH);
+        dl->AddRectFilled(boxMin, boxMax, IM_COL32(12, 12, 12, 210), 3.0f);
+        dl->AddRect(boxMin, boxMax, IM_COL32(255, 255, 255, 40), 3.0f);
+        float textY = boxMin.y + 4.0f;
+        for (int i = 0; i < nHits && textY + fontPx <= boxMax.y - 2.0f; ++i) {
+            if (!hits[i].ok || hits[i].label[0] == '\0') {
+                continue;
+            }
+            if (hits[i].yAxis == ImAxis_Y2) {
+                ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2);
+            } else {
+                ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
+            }
+            const ImVec2 pt = ImPlot::PlotToPixels(tMs, hits[i].y);
+            if (!std::isfinite(pt.y) || (std::isfinite(mouseY) && std::fabs(pt.y - mouseY) > pickPx)) {
+                continue;
+            }
+            const ImU32 col = ImGui::GetColorU32(hits[i].color);
+            const ImVec2 sw(boxMin.x + 6.0f, textY + fontPx * 0.5f);
+            dl->AddCircleFilled(sw, 3.5f, col);
+            dl->AddText(nullptr, fontPx, ImVec2(boxMin.x + 14.0f, textY), IM_COL32(245, 245, 245, 255),
+                        hits[i].label);
+            textY += rowH;
+        }
     }
     ImPlot::PopPlotClipRect();
 }

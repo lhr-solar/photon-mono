@@ -29,6 +29,41 @@ std::size_t encodedBytes(const std::vector<std::vector<std::uint8_t>>& chunks) {
     return n;
 }
 
+bool floatSignal(const tsdb::SignalInfo* info) {
+    return info != nullptr && (info->valueType == dbc::ValueType::Float || info->valueType == dbc::ValueType::Double);
+}
+
+// Rollups store the raw CAN bits. For an IEEE signal those bits are not the
+// physical value, and their average is not the average speed. first and last
+// are real samples. The bit extremes are included because positive floats
+// sort in the same order as their bits.
+void floatRollup(const tsdb::SignalInfo& info, const tsdb::RollupBucket& b, float& mn, float& mx, float& mean) {
+    bool have = false;
+    auto take = [&](float v) {
+        if (!std::isfinite(v)) {
+            return;
+        }
+        if (!have) {
+            mn = mx = v;
+            have = true;
+            return;
+        }
+        mn = std::min(mn, v);
+        mx = std::max(mx, v);
+    };
+    const float first = static_cast<float>(tsdb::physical(info, b.first));
+    const float last = static_cast<float>(tsdb::physical(info, b.last));
+    take(first);
+    take(last);
+    take(static_cast<float>(tsdb::physical(info, b.min)));
+    take(static_cast<float>(tsdb::physical(info, b.max)));
+    if (!have) {
+        mn = mx = mean = 0.0f;
+        return;
+    }
+    mean = std::isfinite(last) ? last : first;
+}
+
 double rollupMeanRaw(const tsdb::RollupBucket& b, bool isSigned) {
     if (b.count == 0) {
         return 0.0;
@@ -129,17 +164,24 @@ bool appendEncodedChunks(HistoryEncodeState& st, std::vector<std::vector<std::ui
                     if (!b.present || b.count == 0) {
                         continue;
                     }
-                    float mn = phys(b.min);
-                    float mx = phys(b.max);
-                    if (info != nullptr && info->factor < 0.0) {
-                        std::swap(mn, mx);
+                    float mn = 0.0f;
+                    float mx = 0.0f;
+                    float mean = 0.0f;
+                    if (floatSignal(info)) {
+                        floatRollup(*info, b, mn, mx, mean);
+                    } else {
+                        mn = phys(b.min);
+                        mx = phys(b.max);
+                        if (info != nullptr && info->factor < 0.0) {
+                            std::swap(mn, mx);
+                        }
+                        const double meanRaw = rollupMeanRaw(b, info == nullptr || info->isSigned);
+                        mean = info != nullptr ? static_cast<float>(meanRaw * info->factor + info->offset)
+                                               : static_cast<float>(meanRaw);
                     }
                     chunk.minV.push_back(mn);
                     chunk.maxV.push_back(mx);
-                    const double meanRaw = rollupMeanRaw(b, info == nullptr || info->isSigned);
-                    chunk.meanV.push_back(info != nullptr
-                                              ? static_cast<float>(meanRaw * info->factor + info->offset)
-                                              : static_cast<float>(meanRaw));
+                    chunk.meanV.push_back(mean);
                 }
                 chunk.valueCount = static_cast<std::uint32_t>(chunk.minV.size());
             }

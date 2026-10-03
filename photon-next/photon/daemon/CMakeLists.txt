@@ -1,4 +1,5 @@
 add_library(photon_daemon STATIC
+    src/analysis_compute.cpp
     src/cli.cpp
     src/csv_export.cpp
     src/history_remote.cpp

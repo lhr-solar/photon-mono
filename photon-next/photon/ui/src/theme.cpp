@@ -257,6 +257,9 @@ void applyImPlot(const ColorScheme& scheme) {
     plotStyle.UseLocalTime = true;
     plotStyle.LineWeight = kPlotLineWeight;
     plotStyle.Colormap = ImPlotColormap_Deep;
+    plotStyle.LegendPadding = ImVec2(4.0f, 4.0f);
+    plotStyle.LegendInnerPadding = ImVec2(3.0f, 2.0f);
+    plotStyle.LegendSpacing = ImVec2(4.0f, 0.0f);
 
     const ImVec4 color0 = scheme.color0;
     const ImVec4 color1 = scheme.color1;

@@ -17,6 +17,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <string_view>
@@ -154,11 +155,21 @@ void Client::tick(double nowMs) {
         lastHeartbeatMs_ = nowMs;
     }
     if (state_ == State::HelloOk) {
-        // UDP live fan-out already delivers NALs on the WS. Locate-0 polling
-        // then fights that path. Fall back to GOP locate if pictures stall.
-        const bool udpLive = arena_.video.fps > 1.0;
+        // FPS is a completed-window average and can remain nonzero after a
+        // stall. Use actual frame arrival to decide whether a seed is needed.
+        const auto received = arena_.video.lastFrameArrivalMs;
+        const auto wallNow = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        const bool liveFramesRecent = received != 0 && wallNow >= received && wallNow - received < 2000;
+        if (liveFramesRecent && !locateSent_ && arena_.video.subscribed && !arena_.catalogPinned()) {
+            std::uint64_t pendingAt = 0;
+            if (videoDecoder().pendingLocate(pendingAt) && pendingAt == 0) {
+                videoDecoder().cancelPendingLocate();
+            }
+        }
         if (arena_.video.subscribed && !arena_.catalogPinned() && !locateSent_ &&
-            nowMs - lastLiveLocateMs_ >= 400.0 && !udpLive) {
+            nowMs - lastLiveLocateMs_ >= 400.0 && !liveFramesRecent) {
             videoDecoder().requestLocate(0);
         }
         flushVideoLocate();
@@ -373,10 +384,6 @@ void Client::handleText(std::string_view text) {
             break;
         case ctrl::Type::SignalCatalog: {
             arena_.applySignalCatalog(*msg);
-            if (const ctrl::CatalogSignal* ant = arena_.antennaSignal()) {
-                const std::uint32_t id = ant->id;
-                ensureSubscribed(std::span<const std::uint32_t>(&id, 1));
-            }
             arena_.pushLog("rx signal_catalog n=" + std::to_string(msg->catalog.size()));
             break;
         }
@@ -752,10 +759,7 @@ bool Client::send(const ctrl::Message& msg) {
 
 void Client::selectSource(ctrl::SourceKind kind, std::string host, std::uint16_t port, std::string path,
                           int channel, int baud, bool listenOnly) {
-    if (kind == ctrl::SourceKind::LogReplay && pageIsSharedConsole()) {
-        playLog(std::move(path), 0);
-        return;
-    }
+    // Log replay is a per-client pointer. It does not take the live ingest source.
     userPickedSource_ = true;
     if (kind == ctrl::SourceKind::DaqTcp) {
         lastDaqHost_ = host.empty() ? lastDaqHost_ : host;
@@ -869,6 +873,7 @@ void Client::commitInterest() {
 void Client::sendTimeline(ctrl::TimelineMode mode, std::uint64_t cursorMs) {
     const auto seekVideo = [&](std::uint64_t atCursorMs) {
         lastLiveLocateMs_ = 0.0;
+        lastReplayLocateAtMs_ = 0;
         locateSent_ = false;
         locateBackoffMs_ = 0.0;
         if (atCursorMs == 0) {
@@ -997,10 +1002,6 @@ void Client::playLog(std::string path, std::uint64_t cursorMs) {
             playCatalogSession(*row);
             return;
         }
-        if (pageIsSharedConsole()) {
-            arena_.pushLog("no catalog run for this stint");
-            return;
-        }
         openExtractLog(std::move(path), cursorMs);
         return;
     }
@@ -1009,21 +1010,11 @@ void Client::playLog(std::string path, std::uint64_t cursorMs) {
             playCatalogSession(*row);
             return;
         }
-        if (pageIsSharedConsole()) {
-            arena_.pushLog(ymd.empty() ? "shared console: catalog pin only (no VSD1 extract)"
-                                       : "no catalog run for " + ymd);
-            return;
-        }
         openExtractLog(std::move(path), cursorMs);
         return;
     }
     if (const auto* row = bestCatalogForYmd(ymd); row != nullptr) {
         playCatalogSession(*row);
-        return;
-    }
-    if (pageIsSharedConsole()) {
-        arena_.pushLog(ymd.empty() ? "shared console: catalog pin only (no VSD1 extract)"
-                                   : "no catalog run for " + ymd);
         return;
     }
     openExtractLog(std::move(path), cursorMs);
@@ -1039,6 +1030,7 @@ void Client::playCatalogSession(const ctrl::Message::CatalogSession& row, std::u
     arena_.video.subscribed = false;
     send(ctrl::videoStop());
     lastLiveLocateMs_ = 0.0;
+    lastReplayLocateAtMs_ = 0;
     locateSent_ = false;
     locateBackoffMs_ = 0.0;
     arena_.pinCatalogSession(row);
@@ -1067,23 +1059,22 @@ void Client::playDate(std::string ymd) {
     if (ymd.empty()) {
         return;
     }
+    for (const auto& day : arena_.driveDays) {
+        if (day.date == ymd && !day.path.empty()) {
+            const std::uint64_t at = day.sessions.empty() ? 0 : day.sessions.front().startMs;
+            openExtractLog(day.path, at);
+            return;
+        }
+    }
     if (const auto* row = bestCatalogForYmd(ymd); row != nullptr) {
         playCatalogSession(*row);
         return;
     }
-    if (pageIsSharedConsole()) {
-        arena_.pushLog("no catalog run for " + ymd);
-        return;
-    }
-    for (const auto& day : arena_.driveDays) {
-        if (day.date == ymd && !day.path.empty()) {
-            openExtractLog(day.path, 0);
-            return;
-        }
-    }
+    arena_.pushLog("no log for " + ymd);
 }
 
 void Client::goLive() {
+    lastReplayLocateAtMs_ = 0;
     arena_.clearCatalogPin();
     arena_.setPreviewCursor(0, false);
     arena_.clearVideoFollow();
@@ -1201,14 +1192,24 @@ void Client::flushVideoLocate() {
     if (lastLiveLocateMs_ > 0.0 && now - lastLiveLocateMs_ < cooldownMs) {
         return;
     }
+    const std::uint64_t newestMs = videoDecoder().bufferedNewestMs();
+    if (atMs != 0 && atMs == lastReplayLocateAtMs_ && newestMs == lastReplayLocateNewestMs_ &&
+        lastLiveLocateMs_ > 0.0 && now - lastLiveLocateMs_ < 2500.0) {
+        return;
+    }
     std::uint16_t prefetch = 0;
     if (atMs != 0) {
         const auto& pb = videoDecoder().playback();
-        prefetch = pb.replayWindowOn() ? vidx::kReplayLocateGops : vidx::kHistoryLocateGops;
+        prefetch = pb.replayWindowOn() ? vidx::replayPrefetchGops(pb.replayMinCursorMs(), pb.replayMaxCursorMs())
+                                       : static_cast<std::uint16_t>(8);
     }
     if (send(ctrl::videoLocate(atMs, 0, prefetch))) {
         locateSent_ = true;
         lastLiveLocateMs_ = now;
+        if (atMs != 0) {
+            lastReplayLocateAtMs_ = atMs;
+            lastReplayLocateNewestMs_ = newestMs;
+        }
         if (atMs != 0 || now - lastLocateLogMs_ >= 5000.0) {
             lastLocateLogMs_ = now;
             arena_.pushLog("video_locate " + std::to_string(atMs));

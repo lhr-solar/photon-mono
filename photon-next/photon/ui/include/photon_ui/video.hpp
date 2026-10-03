@@ -77,6 +77,7 @@ public:
     vidx::PlaybackMode mode() const { return mode_; }
     std::uint64_t releasedMs() const { return releasedMs_; }
     std::size_t bufferedBytes() const { return ring_.bytes(); }
+    std::uint64_t bufferedNewestMs() const { return ring_.newestMs(); }
 
 private:
     unsigned tex_ = 0;

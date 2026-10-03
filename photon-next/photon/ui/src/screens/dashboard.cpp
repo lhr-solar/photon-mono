@@ -8,6 +8,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cctype>
 #include <cstdint>
@@ -28,6 +29,59 @@ namespace {
 constexpr float kPi = 3.14159265f;
 
 bool on(const Vital& v) { return v.have && v.value > 0.5; }
+
+// MC_Status keeps the last bit until a newer frame arrives. A sample older
+// than this is a held value, so the knockout banner must not stay up on it.
+constexpr double kMotorFaultFreshMs = 3000.0;
+constexpr double kMotorFaultSkewMs = 60000.0;
+
+double wallNowMs() {
+    using clock = std::chrono::system_clock;
+    return static_cast<double>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count());
+}
+
+double asUnixMs(double ts) {
+    if (ts > 1.0e14) {
+        return ts / 1000.0;
+    }
+    if (ts > 1.0e11) {
+        return ts;
+    }
+    if (ts > 1.0e9) {
+        return ts * 1000.0;
+    }
+    return 0.0;
+}
+
+bool motorFaultFresh(double clockMs, double sampleMs) {
+    const double clock = asUnixMs(clockMs);
+    const double sample = asUnixMs(sampleMs);
+    if (clock == 0.0 || sample == 0.0) {
+        return false;
+    }
+    const double age = clock - sample;
+    return age <= kMotorFaultFreshMs && age >= -kMotorFaultSkewMs;
+}
+
+bool motorFaultActive(const ClientArena& arena, const Vital& v) {
+    if (!on(v) || v.id == 0) {
+        return false;
+    }
+    const SignalRing* ring = arena.ring(v.id);
+    if (ring == nullptr || !ring->hasLatest) {
+        return !arena.timelineIsLive();
+    }
+    if (arena.timelineIsLive()) {
+        return ring->latest > 0.5 && motorFaultFresh(wallNowMs(), ring->latestTs);
+    }
+    const double cursor = static_cast<double>(arena.effectiveCursorMs());
+    const double end = ring->count > 0 ? ring->lastTs() : ring->latestTs;
+    if (cursor > 0.0 && end > 0.0 && cursor > end + kMotorFaultFreshMs) {
+        return false;
+    }
+    return true;
+}
 
 float num(const Vital& v, float fallback = 0.0f) {
     return v.have && std::isfinite(v.value) ? static_cast<float>(v.value) : fallback;
@@ -579,7 +633,7 @@ DashView fillView(UiContext& ui, std::uint8_t heartbeat) {
 
     int motorCount = 0;
     for (int i = 0; i < 9; ++i) {
-        if (!on(d.mcFaults[i])) {
+        if (!motorFaultActive(ui.arena, d.mcFaults[i])) {
             continue;
         }
         if (motorCount == 0) {
@@ -758,7 +812,8 @@ void drawCamera(const char* id, const char* label, ImVec2 size, ImVec4 bg, bool 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     if (video && videoDecoder().hasFrame() && videoDecoder().width() > 0 && videoDecoder().height() > 0) {
         (void)mirror;
-        videoDecoder().poll();
+        // The screen already polled once this frame. A second poll consumes
+        // another decoded picture, so live video runs ahead and then freezes.
         blitDecodedVideo(avail);
     } else if (video) {
         drawVideoBuffering(avail);

@@ -86,11 +86,12 @@ set(PHOTON_UI_SOURCES
     src/screens/can.cpp
     src/screens/dashboard.cpp
     src/screens/dynamics.cpp
+    src/screens/mechanical.cpp
     src/screens/live.cpp
     src/screens/network.cpp
+    src/screens/pdu.cpp
     src/screens/pit.cpp
     src/screens/plots.cpp
-    src/grafana_host.cpp
     src/screens/scene3d.cpp
     src/screens/stubs.cpp
     src/screens/tracksim.cpp
@@ -226,7 +227,6 @@ else()
         src/gl_loader.cpp
         src/native_maps.cpp
         src/native_video.cpp
-        src/overlay_host.cpp
     )
     target_include_directories(photon-ui PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -248,6 +248,7 @@ else()
         photon-core
         photon-imgui
         photon-tinygltf
+        photon_net
         ${PHOTON_SDL2_TARGET}
     )
     if(WIN32)

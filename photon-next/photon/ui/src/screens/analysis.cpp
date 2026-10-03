@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <string>
 #include <string_view>
@@ -653,6 +654,9 @@ void drawLineCell(AnalysisRuntime& runtime, AnalysisScreen::State& st, ViewCell&
                           ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMenus |
                               (cell.legend ? ImPlotFlags_None : ImPlotFlags_NoLegend))) {
         ImPlot::SetupAxes("t", "value", plotTimeAxisFlags(), plotValueAxisFlags(autoY));
+        if (cell.legend) {
+            ImPlot::SetupLegend(ImPlotLocation_NorthWest, ImPlotLegendFlags_None);
+        }
         if (dualY) {
             ImPlot::SetupAxis(ImAxis_Y2, "Y2", plotValueAxisFlags(autoY) | ImPlotAxisFlags_AuxDefault);
         }
@@ -841,8 +845,6 @@ void drawLineCell(AnalysisRuntime& runtime, AnalysisScreen::State& st, ViewCell&
         if (!std::isfinite(playhead) || playhead <= 0.0) {
             playhead = std::isfinite(xmax) && xmax > 0.0 ? xmax : axisHi;
         }
-        ImPlot::DragLineX(99, &playhead, theme::chrome(), 1.75f,
-                          ImPlotDragToolFlags_NoFit | ImPlotDragToolFlags_NoInputs);
         std::vector<PlotCursorHit> hits;
         hits.reserve(series.size() + formulas.size());
         const double cursorT = std::isfinite(playhead) ? playhead : mouseT;
@@ -872,7 +874,19 @@ void drawLineCell(AnalysisRuntime& runtime, AnalysisScreen::State& st, ViewCell&
             hits.push_back(hit);
         }
         if (!hits.empty()) {
-            drawPlotCursorReadout(cursorT, hits.data(), static_cast<int>(hits.size()), false);
+            std::vector<std::string> legendNames;
+            if (cell.legend) {
+                for (const ViewSignal& src : cell.sources) {
+                    if (!src.hidden) {
+                        legendNames.push_back(cellLabel(src));
+                    }
+                }
+            }
+            float legendW = 0.0f;
+            float legendH = 0.0f;
+            reserveNorthwestLegend(cell.legend, legendNames, legendW, legendH);
+            drawPlotCursorReadout(cursorT, hits.data(), static_cast<int>(hits.size()),
+                                  std::numeric_limits<float>::quiet_NaN(), 10.0f, legendW, legendH);
         }
         if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             cell.yLocked = false;

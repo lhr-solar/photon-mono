@@ -21,6 +21,8 @@ struct Options {
     std::string tsdbDir;
     bool writeLiveTail = true;
     std::string password;
+    // Empty = off (default). Loopback host:port of grok-analyst, e.g. 127.0.0.1:18765.
+    std::string analysisCompute;
     // Empty = auto (daq_host:8080 when daq_host is not loopback). "off" disables.
     std::string historyRemote;
 };

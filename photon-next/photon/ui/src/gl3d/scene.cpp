@@ -154,6 +154,7 @@ constexpr double kPresetAustinLon = -97.7431;
 
 struct Maps3dUi {
     bool on = true;
+    int viewMode = 0;  // 0: perspective, 1: north-up map
     bool restart = false;
     bool website = false;
     bool websiteQueryDone = false;
@@ -718,7 +719,7 @@ void drawOverlayPanel() {
     ImGui::SetCursorPos(ImVec2(theme::kHudInset, theme::kHudInset));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::withAlpha(theme::card(), 0.88f));
     ImGui::BeginChild("##gl3d_overlay", ImVec2(288.0f, 400.0f), ImGuiChildFlags_Borders);
-    ImGui::TextColored(theme::primary(), "3D");
+    ImGui::TextColored(theme::primary(), "%s", gMaps.viewMode == 1 ? "Map" : "3D");
     if (ImGui::Button("Reset camera", ImVec2(140.0f, 0.0f))) {
         runtime().resetView();
         gMaps.follow = true;
@@ -740,7 +741,7 @@ void drawOverlayPanel() {
         ImGui::TextColored(theme::danger(), "%s", runtime().trackError());
     }
     ImGui::Separator();
-    if (ImGui::Checkbox("OSM 3D", &gMaps.on)) {
+    if (ImGui::Checkbox("Map", &gMaps.on)) {
         if (!gMaps.on) {
             photon_maps3d_show(0);
         }
@@ -751,6 +752,7 @@ void drawOverlayPanel() {
         "OpenStreetMap tiles and DEM are cached in this browser. "
         "No API key. Tab switches keep the world warm.");
     theme::popSmallFont();
+    ImGui::Combo("Map view", &gMaps.viewMode, "3D perspective\0 2D north-up\0");
     ImGui::Combo("No-GPS fallback", &gMaps.preset, "COTA\0Austin downtown\0");
     if (gMaps.haveFix) {
         ImGui::TextColored(theme::success(), "GPS  %.5f  %.5f", gMaps.lastLat, gMaps.lastLon);
@@ -759,12 +761,14 @@ void drawOverlayPanel() {
     }
     ImGui::Checkbox("Follow car", &gMaps.follow);
     theme::pushSmallFont();
-    ImGui::TextWrapped("Left-drag pans around the car. Zoom, orbit, and pitch are locked.");
+    ImGui::TextWrapped("Left-drag pans around the car. Zoom and orientation follow the view mode.");
     theme::popSmallFont();
     ImGui::SliderFloat("Model scale", &gMaps.scale, 0.2f, 20.0f, "%.2f");
     ImGui::SliderFloat("Heading offset", &gMaps.headingOff, -180.0f, 180.0f, "%.0f deg");
     ImGui::SliderFloat("Camera range", &gMaps.range, 20.0f, 400.0f, "%.0f m");
-    ImGui::SliderFloat("Camera tilt", &gMaps.tilt, 20.0f, 85.0f, "%.0f deg");
+    if (gMaps.viewMode == 0) {
+        ImGui::SliderFloat("Camera tilt", &gMaps.tilt, 20.0f, 85.0f, "%.0f deg");
+    }
     char mapsStatus[160]{};
     photon_maps3d_status(mapsStatus, static_cast<int>(sizeof(mapsStatus)));
     ImGui::TextColored(theme::mutedFg(), "%s", mapsStatus[0] != '\0' ? mapsStatus : "off");
@@ -1066,9 +1070,10 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay, bool hostMap
         if (mapsOverlayBlockedByPopup()) {
             photon_maps3d_show(0);
         } else {
-            photon_maps3d_pose(useLat, useLon, gMaps.heading + static_cast<double>(gMaps.headingOff),
+            photon_maps3d_pose(useLat, useLon,
+                               gMaps.viewMode == 1 ? 0.0 : gMaps.heading + static_cast<double>(gMaps.headingOff),
                                static_cast<double>(gMaps.scale), static_cast<double>(gMaps.range),
-                               static_cast<double>(gMaps.tilt), gMaps.follow ? 1 : 0);
+                               gMaps.viewMode == 1 ? 0.0 : static_cast<double>(gMaps.tilt), gMaps.follow ? 1 : 0);
             photon_maps3d_show(1);
             sShown = true;
         }
@@ -1127,12 +1132,12 @@ void setMaps3dInteractive(bool on) { photon_maps3d_interactive(on ? 1 : 0); }
 void drawMaps3dKeyRow() {
     char mapsStatus[160]{};
     photon_maps3d_status(mapsStatus, static_cast<int>(sizeof(mapsStatus)));
-    ImGui::TextColored(theme::mutedFg(), "%s", mapsStatus[0] != '\0' ? mapsStatus : "OSM 3D");
+    ImGui::TextColored(theme::mutedFg(), "%s", mapsStatus[0] != '\0' ? mapsStatus : "Map");
 }
 
 void drawScene3DTile(ClientArena& arena, ImVec2 size) {
     theme::beginCard("dock3d", size, theme::card());
-    ImGui::TextColored(theme::primary(), "3D");
+    ImGui::TextColored(theme::primary(), "%s", gMaps.viewMode == 1 ? "Map" : "3D");
     ImGui::SameLine();
     if (gMaps.haveFix) {
         ImGui::TextColored(theme::success(), "GPS  %0.5f  %0.5f", gMaps.lastLat, gMaps.lastLon);

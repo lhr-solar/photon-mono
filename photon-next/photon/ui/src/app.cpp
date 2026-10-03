@@ -4,7 +4,6 @@
 #include "photon_ui/clock_format.hpp"
 #include "photon_ui/custom_view.hpp"
 #include "photon_ui/gl_api.hpp"
-#include "photon_ui/grafana_host.hpp"
 #include "photon_ui/page_url.hpp"
 #include "photon_ui/platform.hpp"
 #include "photon_ui/scene3d.hpp"
@@ -27,6 +26,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <span>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -227,7 +227,6 @@ bool App::init() {
     SDL_VERSION(&wminfo.version);
     if (SDL_GetWindowWMInfo(window_, &wminfo) && wminfo.subsystem == SDL_SYSWM_WINDOWS) {
         nativeHostAttach(wminfo.info.win.window);
-        grafanaAttach(wminfo.info.win.window);
     }
 #endif
 
@@ -235,6 +234,8 @@ bool App::init() {
     screens_.push_back(std::make_unique<DashboardScreen>());
     screens_.push_back(std::make_unique<PlotsScreen>());
     screens_.push_back(std::make_unique<DynamicsScreen>());
+    screens_.push_back(std::make_unique<MechanicalScreen>());
+    screens_.push_back(std::make_unique<PduScreen>());
     screens_.push_back(std::make_unique<LiveViewScreen>());
     screens_.push_back(std::make_unique<Scene3dScreen>());
     screens_.push_back(std::make_unique<TrackSimScreen>());
@@ -267,7 +268,6 @@ void App::shutdown() {
     // destructors call glDelete* after this function has already killed the
     // context — that is an access violation on desktop.
     photonGlMarkContextLost();
-    grafanaShutdown();
     nativeHostShutdown();
 #endif
     ImGui_ImplOpenGL3_Shutdown();
@@ -336,9 +336,7 @@ void App::frame() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
-    grafanaBeginFrame();
     drawShell();
-    grafanaEndFrame();
     client_.commitInterest();
     ImGui::Render();
 
@@ -407,9 +405,6 @@ void App::drawShell() {
     if (logDrawer_.exportDialogOpen() || mapsOverlayHoldOff()) {
         hideMaps3d();
     }
-    if (popupOpen || logDrawer_.exportDialogOpen()) {
-        grafanaShow(0);
-    }
 }
 
 void App::drawTitlebar(ImVec2 size) {
@@ -476,10 +471,12 @@ void App::drawTitlebar(ImVec2 size) {
     const ImVec2 stateSz = ImGui::CalcTextSize(client_.stateLabel());
     const ImVec2 sourceSz = ImGui::CalcTextSize(source.c_str());
     const ImVec2 modeSz = showMode ? ImGui::CalcTextSize(mode) : ImVec2(0.0f, 0.0f);
-    const ctrl::CatalogSignal* antenna = arena_.antennaSignal();
+    const ctrl::CatalogSignal* antenna = findAntennaSignal(arena_);
     char antBuf[72];
     if (antenna != nullptr) {
-        const double antV = arena_.readout(antenna->id, 0.0);
+        const std::uint32_t antId = antenna->id;
+        client_.ensureSubscribed(std::span<const std::uint32_t>(&antId, 1));
+        const double antV = arena_.readout(antId, 0.0);
         if (antenna->unit.empty()) {
             std::snprintf(antBuf, sizeof(antBuf), "Ant  %.0f", antV);
         } else {
@@ -495,7 +492,7 @@ void App::drawTitlebar(ImVec2 size) {
     std::vector<std::string> dayChoices;
     dayChoices.reserve(arena_.driveDays.size() + 8);
     for (const auto& row : arena_.driveDays) {
-        if (!row.date.empty()) {
+        if (isReplayLogDate(row.date)) {
             dayChoices.push_back(row.date);
         }
     }
@@ -505,10 +502,10 @@ void App::drawTitlebar(ImVec2 size) {
         }
         const auto a = localYmdFromUnixMs(row.minMs);
         const auto b = localYmdFromUnixMs(row.maxMs);
-        if (!a.empty()) {
+        if (isReplayLogDate(a)) {
             dayChoices.push_back(a);
         }
-        if (!b.empty() && b != a) {
+        if (isReplayLogDate(b) && b != a) {
             dayChoices.push_back(b);
         }
     }

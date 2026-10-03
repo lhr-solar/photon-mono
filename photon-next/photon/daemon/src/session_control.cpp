@@ -61,7 +61,7 @@ void SessionHub::refreshDriveDays() {
 
 ctrl::Message SessionHub::helloAckMessage() const {
     auto ack = ctrl::helloAck({"daq_tcp", "log_replay", "pcan", "dbc", "track_sim", "video", "history",
-                               "video_locate", "live_tail", "video_clock", "catalog"},
+                               "video_locate", "live_tail", "video_clock", "analysis_compute", "catalog"},
                               sources_.activeSource());
     ack.driveDays = driveDays_;
     if (dbcLoaded_) {
@@ -450,8 +450,8 @@ void SessionHub::handleText(ClientSession& client, std::string_view text, std::u
                 break;
             }
             // Live t=0: entry GOP only (prefetch rows can be RTCP-future).
-            // Historical: the rows the client asked for, in time order. A pinned
-            // window asks for kReplayLocateGops; later locates extend the ring.
+            // Historical: every prefetch row, in time order, so a 1-minute pin
+            // is resident instead of one GOP (~1 s) per locate.
             const bool livePoll = msg->startMs == 0;
             std::vector<vidx::GopRow> loadRows;
             const vidx::GopRow* liveEntry = nullptr;
@@ -477,6 +477,10 @@ void SessionHub::handleText(ClientSession& client, std::string_view text, std::u
                 std::vector<vidx::GopRow> uniq;
                 uniq.reserve(loadRows.size());
                 for (const auto& row : loadRows) {
+                    if (!uniq.empty() && uniq.back().startMs == row.startMs &&
+                        uniq.back().segmentId == row.segmentId && uniq.back().byteOffset == row.byteOffset) {
+                        continue;
+                    }
                     if (!uniq.empty() && uniq.back().startMs == row.startMs) {
                         continue;
                     }
@@ -485,7 +489,7 @@ void SessionHub::handleText(ClientSession& client, std::string_view text, std::u
                 loadRows.swap(uniq);
             }
             vidx::GopRing loaded;
-            loaded.setBudget(livePoll ? vidx::kLiveCacheBudget : vidx::kReplayCacheBudget);
+            loaded.setBudget(vidx::kReplayCacheBudget);
             bool appended = false;
             const vidx::GopRow* best = livePoll ? liveEntry : (loadRows.empty() ? nullptr : &loadRows.front());
             const bool sameGop = livePoll && best != nullptr && !client.videoCache.nals().empty() &&
@@ -629,6 +633,12 @@ void SessionHub::handleText(ClientSession& client, std::string_view text, std::u
             }
             handleHistoryQuery(client, *msg);
             break;
+        case ctrl::Type::AnalysisComputeRequest:
+            handleAnalysisCompute(client, *msg);
+            break;
+        case ctrl::Type::AnalysisComputeCancel:
+            handleAnalysisCancel(client, *msg);
+            break;
         case ctrl::Type::HistoryCancel:
             cancelHistory(client, msg->queryId);
             break;
@@ -652,6 +662,7 @@ void SessionHub::handleText(ClientSession& client, std::string_view text, std::u
         case ctrl::Type::SignalCatalog:
         case ctrl::Type::VideoStatus:
         case ctrl::Type::HistoryResult:
+        case ctrl::Type::AnalysisComputeResult:
         case ctrl::Type::CatalogResult:
             sendControl(client, ctrl::errorAlert("bad_message", "server-bound message type not accepted"));
             break;

@@ -372,6 +372,14 @@ void testScrubDecodesToCursorWhenResident() {
     CHECK(plan.feedUpToMs == 104'100);
 }
 
+void testReplayPrefetchCoversAMinute() {
+    CHECK(photon::vidx::replayPrefetchGops(0, 0) == 8);
+    CHECK(photon::vidx::replayPrefetchGops(1'000, 2'000) == 4);
+    const auto minute = photon::vidx::replayPrefetchGops(1'789'244'940'000ull, 1'789'245'000'000ull);
+    CHECK(minute == 4);
+    CHECK(photon::vidx::replayPrefetchGops(0, 3'600'000ull) == 4);
+}
+
 // §8.3: exact decode happens on release, in the Committed state.
 void testCommitDecodesToTheExactCursor() {
     CursorPlayback pb;
@@ -399,10 +407,10 @@ void testCommitPrefetchesBeforeLastGopEnds() {
     reply.rows.push_back(makeRow(100'000, 101'966, 0, 4096));
     pb.applyLocate(reply);
 
-    CursorPlan early = pb.update(101'000, PlaybackMode::Committed);
+    CursorPlan early = pb.update(100'100, PlaybackMode::Committed);
     CHECK(!early.requestLocate);
 
-    CursorPlan late = pb.update(101'600, PlaybackMode::Committed);
+    CursorPlan late = pb.update(100'500, PlaybackMode::Committed);
     CHECK(late.requestLocate);
     CHECK(late.locateAtMs == 101'967);
     const CursorPlan again = pb.update(101'700, PlaybackMode::Committed);
@@ -431,6 +439,7 @@ void testCommitRequestsPointerOutsideResidentRange() {
     LocateReply second;
     second.found = true;
     second.rows.push_back(makeRow(499'000, 500'966, 8192, 4096));
+    second.rows.push_back(makeRow(501'000, 502'966, 12288, 4096));
     pb.applyLocate(second);
     plan = pb.update(500'000, PlaybackMode::Committed);
     CHECK(!plan.requestLocate);
@@ -690,6 +699,7 @@ void runVideoIndexTests() {
     testEntryRowSelection();
     testScrubIssuesNoRequests();
     testScrubDecodesToCursorWhenResident();
+    testReplayPrefetchCoversAMinute();
     testCommitDecodesToTheExactCursor();
     testCommitPrefetchesBeforeLastGopEnds();
     testCommitRequestsPointerOutsideResidentRange();

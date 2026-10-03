@@ -65,6 +65,20 @@ void runVideoTests() {
                                                                       photon::ui::kLiveCatchUpRate));
         // Time going backwards must not rewind the watermark.
         CHECK(paceLiveRelease(10'000, 10'400, -50.0).releaseMs == 10'000);
+        // A 2 s GOP stamp must not open a hole the pace clock then waits out.
+        using photon::ui::LivePictureClock;
+        using photon::ui::stampLivePicture;
+        LivePictureClock clock;
+        CHECK(stampLivePicture(clock, 5'000, true) == 5'000);
+        CHECK(stampLivePicture(clock, 5'000, true) == 5'033);
+        CHECK(stampLivePicture(clock, 5'000, false) == 5'033);
+        CHECK(stampLivePicture(clock, 7'000, true) == 5'066);
+        CHECK(stampLivePicture(clock, 7'000, true) == 5'099);
+        // Real per-frame timestamps still pass through.
+        LivePictureClock stepped;
+        CHECK(stampLivePicture(stepped, 1'000, true) == 1'000);
+        CHECK(stampLivePicture(stepped, 1'033, true) == 1'033);
+        CHECK(stampLivePicture(stepped, 1'066, true) == 1'066);
         // A minute of smooth rendering must not accumulate playback delay
         // from rounding each paint's fractional milliseconds away.
         for (const int hz : {60, 144}) {

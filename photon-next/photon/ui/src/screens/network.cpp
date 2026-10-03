@@ -43,7 +43,7 @@ std::vector<std::string> runDates(const UiContext& ui) {
     std::vector<std::string> dates;
     dates.reserve(ui.arena.driveDays.size() + ui.client.historyCatalog().size());
     for (const auto& day : ui.arena.driveDays) {
-        if (!day.date.empty()) {
+        if (isReplayLogDate(day.date)) {
             dates.push_back(day.date);
         }
     }
@@ -53,10 +53,10 @@ std::vector<std::string> runDates(const UiContext& ui) {
         }
         const auto a = localYmdFromUnixMs(row.minMs);
         const auto b = localYmdFromUnixMs(row.maxMs);
-        if (!a.empty()) {
+        if (isReplayLogDate(a)) {
             dates.push_back(a);
         }
-        if (!b.empty() && b != a) {
+        if (isReplayLogDate(b) && b != a) {
             dates.push_back(b);
         }
     }
