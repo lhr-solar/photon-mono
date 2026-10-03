@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"server/cache"
 	"sync"
 	"syscall"
 	"time"
@@ -69,6 +70,8 @@ func main() {
 		log.Fatalf("[photon-server] Failed to bind client listener on %s: %v", cfg.ClientAddr(), err)
 	}
 	defer clientListener.Close()
+
+	
 
 	observerListener, err := net.Listen("tcp", cfg.ObserverAddr())
 	if err != nil {
@@ -328,10 +331,12 @@ func listenForIngress(
 }
 
 func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []byte) {
-	const readBuffer = 32 * 1024
+	const readBuffer = 32 * 1024 // This reader owns the connection and its active-connection count.
 	defer conn.Close()
 	defer ingressStats.active.Add(-1)
 
+	// Closing the connection on shutdown unblocks a pending Read. 
+	// When the reader returns first, done stops this helper without closing it early.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -355,7 +360,9 @@ func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []
 		ingressStats.reads.Add(1)
 		ingressStats.lastReceiveMS.Store(time.Now().UnixMilli())
 		payload := make([]byte, n)
+		// Read reuses buf, so give the append loop its own copy of these bytes.
 		copy(payload, buf[:n])
+		// All ingress connections feed the same channel and append loop.
 		ingress <- payload
 		observeQueueDepth(len(ingress))
 	}
