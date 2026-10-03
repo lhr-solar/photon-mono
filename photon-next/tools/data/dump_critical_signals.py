@@ -1,6 +1,9 @@
 import re
+from pathlib import Path
 
-TEXT = open(r"F:\lhr\photon-next\assets\dbc\carcan_telemcan.dbc", encoding="utf-8", errors="ignore").read()
+# Prints SG_ lines for these BO_ messages: name, [min|max], unit.
+DBC = Path(__file__).resolve().parents[3] / "photon-next" / "assets" / "dbc" / "carcan_telemcan.dbc"
+TEXT = DBC.read_text(encoding="utf-8", errors="ignore")
 TARGETS = [
     "BPS_Status", "MC_Status", "MC_BusMeasurement", "Supp_Battery_Status",
     "Coolant_Temperature", "Pump_Status", "ChargerInterface_Status", "VCU_Status",

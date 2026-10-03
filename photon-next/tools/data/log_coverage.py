@@ -66,9 +66,11 @@ CRITICAL = [
     "Telemetry_Status",
 ]
 
-DEFAULT_LOGS = Path(r"C:\Users\alper\Downloads\logs\logs")
-DEFAULT_DBC = Path(r"F:\lhr\photon-next\assets\dbc\carcan_telemcan.dbc")
-DEFAULT_OUT = Path(r"F:\lhr\docs\pdr\log-coverage.md")
+# parents[3] is the photon-mono root. Default scan is the checked-in 30 s clip.
+_REPO = Path(__file__).resolve().parents[3]
+DEFAULT_LOGS = _REPO / "examples" / "brainerd-30s"
+DEFAULT_DBC = _REPO / "photon-next" / "assets" / "dbc" / "carcan_telemcan.dbc"
+DEFAULT_OUT = _REPO / "examples" / "brainerd-30s" / "coverage.md"
 
 _VSD1_HDR = struct.Struct(">I I Q I I")
 _CANP_HDR = struct.Struct(">I H H I Q")
@@ -181,6 +183,7 @@ def scan_file(path: Path, stats: dict[int, IdStat], counters: dict[str, int]) ->
                 break
             magic, payload_bytes, _fid, _ingest, _crc = _VSD1_HDR.unpack(header)
             if magic != VSD1_MAGIC:
+                # Slide one byte. A bad alignment should not skip the rest of the file.
                 fh.seek(-(VSD1_HEADER_SIZE - 1), os.SEEK_CUR)
                 counters["vsd1_resync"] += 1
                 continue

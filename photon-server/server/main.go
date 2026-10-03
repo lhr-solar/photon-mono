@@ -277,6 +277,8 @@ func main() {
 	}
 }
 
+// Segment files stay. Plot rows are the one-second tally in package cache.
+// That package is not called from here. go test ./cache is the proof.
 func appendLoop(store *StreamStore, ingress <-chan []byte) {
 	for payload := range ingress {
 		if store.StoragePressureHigh() {
@@ -360,16 +362,8 @@ func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []
 }
 
 func compactionLoop(ctx context.Context, store *StreamStore, tracker *ClientTracker) {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := store.CompactBefore(tracker.MinNextID(store.LatestID() + 1)); err != nil {
-				// Compaction errors logged if necessary
-			}
-		}
-	}
+	// A finished segment is only removable after its frames are in Influx.
+	// That upload is not running, so the files stay on disk.
+	log.Printf("[photon-server] keeping segment files (latest=%d readers=%d)", store.LatestID(), tracker.Count())
+	<-ctx.Done()
 }

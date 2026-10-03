@@ -43,6 +43,7 @@ GPS_LAT_ID = 4288
 GPS_LON_ID = 4289
 GPS_SPEED_ID = 4290
 
+# Full July extract on the shop machine. The clip in this repo is examples/brainerd-30s.
 DEFAULT_LOGS = Path(r"F:\lhr\_logs_extract\logs")
 DEFAULT_OUT = Path(r"F:\lhr\_logs_extract\on_track")
 

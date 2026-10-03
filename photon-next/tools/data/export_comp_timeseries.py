@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+# Shop-machine parquet. Not in this repo.
 SRC = Path(r"F:\lhr\_logs_extract\on_track\charge_model\dataset.parquet")
 OUT_ROOT = Path(r"F:\lhr\_logs_extract\on_track\_comp_timeseries_export")
 ZIP_PATH = Path(r"F:\lhr\_logs_extract\on_track\comp-power-timeseries.zip")

@@ -12,14 +12,12 @@
 namespace photon::ui {
 namespace {
 
-// DBC names from assets/dbc/carcan_telemcan.dbc (Message.Signal).
-// pack_soc: no pack SOC in the DBC; derived from Main_Battery_Voltage (legacy
-// 32S Li-ion estimate) or synthetic id 3.
-// pack_current: no Main_Battery_Current in the DBC; closest live current is
-// MC_BusMeasurement.MC_BusCurrent (legacy dashboard "Bus Current").
-// cell_* : muxed BPS_*_Aggregate_Arr + BPS_Tap_idx (32 taps), not scalars.
-// array_power: no precomputed power; sum of MPPT A/B/C Vin*Iin.
-// wheel_rpm_rear / dedicated linpot names: not in this DBC (SUS_Data1 per corner).
+// DBC names from assets/dbc/carcan_telemcan.dbc.
+// Columns: role, label, Message.Signal, unit, syntheticId, screens,
+// tile, plot, hasWarnLow, hasWarnHigh, warnLow, warnHigh.
+// Empty signal: derived in vital() (pack SOC from pack voltage, mph, slip, array power).
+// pack_current is MC_BusMeasurement.MC_BusCurrent. There is no Main_Battery_Current.
+// No rear wheel speed in this DBC. Suspension is SUS_Data1 on each corner.
 
 constexpr ScalarDef kScalarDefs[] = {
     {"pack_soc", "Pack SOC", "", "%", kSignalSoc, MapScreen::Pit, true, false, true, false, 30.0, 0.0},
@@ -334,6 +332,7 @@ std::size_t ringIndex(const SignalRing& ring, std::size_t logicalOldest) {
     return (ring.plotOffset() + logicalOldest) % ring.cap;
 }
 
+// Rings are circular. Copy oldest-first before pairing the tap index with its value.
 void fillFromMux(const SignalRing* idx, const SignalRing* val, std::vector<float>& out,
                  std::vector<double>* tapTs, int count, bool reset) {
     if (idx == nullptr || val == nullptr || idx->count == 0 || val->count == 0) {
@@ -669,6 +668,7 @@ Vital SignalMap::vital(std::string_view role, const ClientArena& arena) const {
         }
         return v;
     }
+    // Catalog is in and this name missed: leave the tile empty. Do not invent a value.
     if (arena.haveSignalCatalog || arena.catalogPinned()) {
         return v;
     }
