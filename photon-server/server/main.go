@@ -148,6 +148,9 @@ func main() {
 	liveWriter := startLiveWriter(cfg)
 	defer liveWriter.Stop()
 
+	nominalSink := startNominalSink(cfg)
+	defer nominalSink.Close()
+
 	localUI := startLocalUI(cfg)
 	defer localUI.Stop()
 
@@ -163,7 +166,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		appendLoop(store, ingress, SessionCache)
+		appendLoop(store, ingress, SessionCache, nominalSink)
 	}()
 
 	// Ingress listener & connection tracking
@@ -284,8 +287,9 @@ func main() {
 
 // Segment files stay. Plot rows are the one-second tally in package cache.
 // That package is not called from here. go test ./cache is the proof.
-func appendLoop(store *StreamStore, ingress <-chan []byte, sessionCache *cache.SessionCache) {
+func appendLoop(store *StreamStore, ingress <-chan []byte, sessionCache *cache.SessionCache, nominalSink *liveNominal) {
 	for payload := range ingress {
+		nominalSink.Feed(payload)
 		if store.StoragePressureHigh() {
 			started := time.Now()
 			queueStats.blockStartedNS.Store(started.UnixNano())

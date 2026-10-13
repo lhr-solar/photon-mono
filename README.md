@@ -20,6 +20,8 @@ photon station
 
 `PHOTON_PASSWORD` defaults to `laptop`. `PHOTON_DATA_DIR` defaults to `data\` in this repo. Flags after the use case are passed through to `photon-server` or `photon-backend`.
 
+Nominal streaming reads `.env` in this directory. Set `NOMINAL_API_KEY` and `NOMINAL_DATASET_RID` there. The template is `.env.example`. The stream stays off until both are set. `NOMINAL_BASE_URL` overrides `https://api.gov.nominal.io/api`.
+
 `Photon/` stays its own repo. That tree is the native desktop client and the embedded sharepoint.
 
 InfluxDB 3 Core and Grafana are installed programs on the PC. They bind to `127.0.0.1`. Dashboard JSON for those panels belongs in `dashboards/`.

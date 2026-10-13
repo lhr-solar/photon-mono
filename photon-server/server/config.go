@@ -37,6 +37,11 @@ type Config struct {
 	LiveWriter       string
 	Ui               string
 	Password         string
+	// Nominal live stream. Empty key and dataset leave it off.
+	NominalAPIKey     string
+	NominalKeyFile    string
+	NominalDatasetRID string
+	NominalBaseURL    string
 }
 
 // IngressAddr returns the TCP listen address for the ingress service.
@@ -144,9 +149,21 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ParseConfig builds a Config from CLI arguments and environment variables.
+// ParseConfig builds a Config from CLI arguments, the process environment,
+// and the first .env file found (cwd, next to the executable, or the repo
+// root above build\). A real environment variable wins over the file.
 func ParseConfig(args []string) (*Config, error) {
-	return ParseConfigWithEnv(os.Getenv, args, os.Stderr)
+	file, err := loadFirstDotEnv()
+	if err != nil {
+		return nil, err
+	}
+	getenv := func(key string) string {
+		if v, ok := os.LookupEnv(key); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+		return file[key]
+	}
+	return ParseConfigWithEnv(getenv, args, os.Stderr)
 }
 
 // ParseConfigWithEnv parses configuration with custom environment lookup and output writer.
@@ -214,6 +231,18 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	if secret := getenvFirst(getenv, "PHOTON_PASSWORD"); secret != "" {
 		cfg.Password = secret
 	}
+	if key := getenvFirst(getenv, "NOMINAL_API_KEY"); key != "" {
+		cfg.NominalAPIKey = key
+	}
+	if path := getenvFirst(getenv, "NOMINAL_API_KEY_FILE"); path != "" {
+		cfg.NominalKeyFile = path
+	}
+	if rid := getenvFirst(getenv, "NOMINAL_DATASET_RID"); rid != "" {
+		cfg.NominalDatasetRID = rid
+	}
+	if base := getenvFirst(getenv, "NOMINAL_BASE_URL"); base != "" {
+		cfg.NominalBaseURL = base
+	}
 
 	fs := flag.NewFlagSet("photon-server", flag.ContinueOnError)
 	fs.SetOutput(output)
@@ -231,6 +260,10 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var liveWriterFlag string
 	var uiFlag string
 	var passwordFlag string
+	var nominalKeyFlag string
+	var nominalKeyFileFlag string
+	var nominalDatasetFlag string
+	var nominalBaseURLFlag string
 
 	fs.StringVar(&hostFlag, "host", cfg.Host, "Bind host/IP address (e.g. 0.0.0.0 for all interfaces, 127.0.0.1 for local only)")
 	fs.StringVar(&hostFlag, "bind", cfg.Host, "Alias for -host")
@@ -253,6 +286,10 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.StringVar(&liveWriterFlag, "live-writer", cfg.LiveWriter, "photon-index binary that writes the TSDB, or 'off'")
 	fs.StringVar(&uiFlag, "ui", cfg.Ui, "local UI backend (photon-backend), or off")
 	fs.StringVar(&passwordFlag, "password", cfg.Password, "shared client password (env: PHOTON_PASSWORD)")
+	fs.StringVar(&nominalKeyFlag, "nominal-key", cfg.NominalAPIKey, "Nominal API key (env: NOMINAL_API_KEY, or .env)")
+	fs.StringVar(&nominalKeyFileFlag, "nominal-key-file", cfg.NominalKeyFile, "file containing the Nominal API key (env: NOMINAL_API_KEY_FILE)")
+	fs.StringVar(&nominalDatasetFlag, "nominal-dataset", cfg.NominalDatasetRID, "Nominal dataset RID, or off (env: NOMINAL_DATASET_RID, or .env)")
+	fs.StringVar(&nominalBaseURLFlag, "nominal-base-url", cfg.NominalBaseURL, "Nominal API base URL (env: NOMINAL_BASE_URL, or .env)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(output, "Usage of photon-server:\n")
@@ -271,6 +308,10 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -live-writer string          photon-index path, or off (env: PHOTON_LIVE_WRITER)\n")
 		fmt.Fprintf(output, "  -ui string                   local photon-backend + page, or off (env: PHOTON_UI)\n")
 		fmt.Fprintf(output, "  -password string             client password (env: PHOTON_PASSWORD; random if unset)\n")
+		fmt.Fprintf(output, "  -nominal-key string          Nominal API key (.env or NOMINAL_API_KEY)\n")
+		fmt.Fprintf(output, "  -nominal-key-file string     file containing the Nominal API key (env: NOMINAL_API_KEY_FILE)\n")
+		fmt.Fprintf(output, "  -nominal-dataset string      Nominal dataset RID, or off (.env or NOMINAL_DATASET_RID)\n")
+		fmt.Fprintf(output, "  -nominal-base-url string     Nominal API base URL (.env or NOMINAL_BASE_URL)\n")
 	}
 
 	if err := fs.Parse(args); err != nil {
@@ -290,6 +331,10 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.LiveWriter = liveWriterFlag
 	cfg.Ui = uiFlag
 	cfg.Password = passwordFlag
+	cfg.NominalAPIKey = nominalKeyFlag
+	cfg.NominalKeyFile = nominalKeyFileFlag
+	cfg.NominalDatasetRID = nominalDatasetFlag
+	cfg.NominalBaseURL = nominalBaseURLFlag
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
