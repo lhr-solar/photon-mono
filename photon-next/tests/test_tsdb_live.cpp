@@ -1,6 +1,6 @@
-#include "photon/canp.hpp"
-#include "photon/dbc.hpp"
-#include "photon/tsdb.hpp"
+#include "wire/canp.hpp"
+#include "decode/dbc.hpp"
+#include "store/tsdb.hpp"
 #include "test_harness.hpp"
 
 #include <algorithm>

@@ -9,7 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"server/cache"
+	"server/wire"
 	"sync"
 	"syscall"
 	"time"
@@ -27,24 +27,19 @@ func main() {
 	}
 
 	startedAt := time.Now()
-	log.Printf("[photon-server] Initializing storage at %s...", cfg.SegmentsDir())
+	log.Printf("[photon-server] Initializing recordings at %s...", cfg.DataDir)
 
-	store, err := OpenStreamStore(cfg.DataDir)
-	if err != nil {
-		log.Fatalf("[photon-server] Failed to open stream store: %v", err)
-	}
+	store := OpenLiveStreamStore()
 	defer store.Close()
 
-	SessionCache := cache.New()
-	cache.LoadDBC("")
-
-
-	stats := store.Stats()
-	log.Printf("[photon-server] Store initialized: %d segments recovered (oldest ID: %d, latest ID: %d, disk bytes: %d)",
-		stats.Segments, stats.OldestID, stats.LatestID, stats.DiskBytes)
+	recordings, err := openRecordingService(cfg)
+	if err != nil {
+		log.Fatalf("recording service: %v", err)
+	}
+	defer recordings.Close()
 
 	log.Printf("[photon-server] Initializing video storage at %s...", cfg.VideoSegmentsDir())
-	videoStore, err := OpenVideoStore(cfg.DataDir)
+	videoStore, err := OpenVideoStore(cfg.VideoRoot())
 	if err != nil {
 		log.Fatalf("[photon-server] Failed to open video store: %v", err)
 	}
@@ -55,10 +50,10 @@ func main() {
 		vstats.SegmentCount, vstats.BytesStored, len(videoStore.PointerRows()))
 
 	// RTP/RTCP clock alignment. Until a sender report arrives, video NALs are
-	// stamped with receive time and labelled as such, so a caller can tell an
-	// aligned recording from an unaligned one instead of assuming (§8.5).
+	// stamped with receive time and labelled as such, so a caller can tell an aligned 
+	// recording from an unaligned one instead of assuming 
 	videoClock := NewRTPClock()
-	videoClock.Load(cfg.DataDir)
+	videoClock.Load(cfg.VideoRoot())
 	videoStore.SetClock(videoClock)
 	log.Printf("[photon-server] Video clock: provenance=%s manual_offset=%d ms",
 		clockProvenanceName(videoClock.Provenance()), videoClock.ManualOffset())
@@ -87,12 +82,6 @@ func main() {
 	}
 	defer videoIngress.Close()
 
-	videoIngressTCP, err := net.Listen("tcp", cfg.VideoIngressAddr())
-	if err != nil {
-		log.Fatalf("[photon-server] Failed to bind TCP video ingress on %s: %v", cfg.VideoIngressAddr(), err)
-	}
-	defer videoIngressTCP.Close()
-
 	videoClientListener, err := net.Listen("tcp", cfg.VideoClientAddr())
 	if err != nil {
 		log.Fatalf("[photon-server] Failed to bind video client listener on %s: %v", cfg.VideoClientAddr(), err)
@@ -113,7 +102,6 @@ func main() {
 	log.Printf("[photon-server] Client fan-out listening on %s (TCP)", cfg.ClientAddr())
 	log.Printf("[photon-server] Observer telemetry listening on %s (TCP JSON)", cfg.ObserverAddr())
 	log.Printf("[photon-server] Video ingress listening on %s (UDP RTP/H.264 PT=96)", cfg.VideoIngressAddr())
-	log.Printf("[photon-server] Video ingress listening on %s (TCP length-prefixed RTP, Oracle pipe)", cfg.VideoIngressAddr())
 	if rtcpErr == nil {
 		log.Printf("[photon-server] Video RTCP listening on %s (UDP sender reports)", cfg.VideoRTCPAddr())
 	}
@@ -132,7 +120,6 @@ func main() {
 	} else {
 		log.Printf("[photon-server] Video UDP fan-out off")
 	}
-	log.Printf("[photon-server] TSDB root %s", cfg.TsdbRoot())
 
 	password, generated := EnsurePassword(cfg.Password)
 	cfg.Password = password
@@ -145,11 +132,11 @@ func main() {
 
 	log.Printf("[photon-server] Ready to process streams. Press Ctrl+C or send SIGTERM to shutdown.")
 
-	liveWriter := startLiveWriter(cfg)
-	defer liveWriter.Stop()
-
-	localUI := startLocalUI(cfg)
-	defer localUI.Stop()
+	browser, err := startBrowserService(cfg, recordings, videoStore)
+	if err != nil {
+		log.Fatalf("browser service: %v", err)
+	}
+	defer browser.Close()
 
 	clients := NewClientTracker()
 	ingress := make(chan []byte, 1024)
@@ -163,7 +150,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		appendLoop(store, ingress, SessionCache)
+		appendLoop(store, ingress)
 	}()
 
 	// Ingress listener & connection tracking
@@ -171,7 +158,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		listenForIngress(ctx, ingressListener, ingress, &ingressConnWg)
+		listenForIngress(ctx, ingressListener, ingress, &ingressConnWg, recordings)
 	}()
 
 	// Client fan-out listener & connection tracking
@@ -190,17 +177,11 @@ func main() {
 		listenForObservers(ctx, observerListener, startedAt, store, clients, ingress, videoStore, gate, &observerConnWg)
 	}()
 
-	// Video RTP/H.264 ingress (UDP local/WG + TCP Oracle pipe)
+	// Video RTP/H.264 ingress (UDP direct or Oracle/WireGuard relay)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		listenVideoIngress(ctx, videoIngress, videoStore, videoClock)
-	}()
-	var videoIngressTCPWg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		listenVideoIngressTCP(ctx, videoIngressTCP, videoStore, videoClock, &videoIngressTCPWg)
 	}()
 
 	// RTCP sender reports
@@ -229,13 +210,6 @@ func main() {
 		}()
 	}
 
-	// Periodic compaction loop
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		compactionLoop(ctx, store, clients)
-	}()
-
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -249,7 +223,6 @@ func main() {
 	_ = clientListener.Close()
 	_ = observerListener.Close()
 	_ = videoIngress.Close()
-	_ = videoIngressTCP.Close()
 	if rtcpErr == nil {
 		_ = videoRTCP.Close()
 	}
@@ -270,7 +243,6 @@ func main() {
 		clientConnWg.Wait()
 		observerConnWg.Wait()
 		videoClientWg.Wait()
-		videoIngressTCPWg.Wait()
 		close(done)
 	}()
 
@@ -282,23 +254,13 @@ func main() {
 	}
 }
 
-// Segment files stay. Plot rows are the one-second tally in package cache.
-// That package is not called from here. go test ./cache is the proof.
-func appendLoop(store *StreamStore, ingress <-chan []byte, sessionCache *cache.SessionCache) {
+// Publish already persisted CANP batches to the compatibility TCP live buffer.
+func appendLoop(store *StreamStore, ingress <-chan []byte) {
 	for payload := range ingress {
-		if store.StoragePressureHigh() {
-			started := time.Now()
-			queueStats.blockStartedNS.Store(started.UnixNano())
-			for store.StoragePressureHigh() {
-				time.Sleep(100 * time.Millisecond)
-			}
-			queueStats.blockStartedNS.Store(0)
-			queueStats.blockedNS.Add(time.Since(started).Nanoseconds())
-		}
 		if _, err := store.Append(payload); err != nil {
-			// Append error during store closure or write failure
+			log.Printf("live fanout: %v", err)
 		}
-		
+
 	}
 }
 
@@ -307,6 +269,7 @@ func listenForIngress(
 	listener net.Listener,
 	ingress chan<- []byte,
 	connWg *sync.WaitGroup,
+	recordings *recordingService,
 ) {
 	ingressStats.listening.Store(true)
 	defer ingressStats.listening.Store(false)
@@ -328,13 +291,14 @@ func listenForIngress(
 		connWg.Add(1)
 		go func(c net.Conn) {
 			defer connWg.Done()
-			readIngressConnection(ctx, c, ingress)
+			readIngressConnection(ctx, c, ingress, recordings)
 		}(conn)
 	}
 }
 
-func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []byte) {
-	const readBuffer = 32 * 1024 // This reader owns the connection and its active-connection count.
+func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []byte, recordings *recordingService) {
+	source := conn.RemoteAddr().String()
+	defer recordings.EndSource(source)
 	defer conn.Close()
 	defer ingressStats.active.Add(-1)
 
@@ -350,34 +314,27 @@ func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []
 		}
 	}()
 
-	buf := make([]byte, readBuffer)
 	for {
-		n, err := conn.Read(buf)
+		batch, err := wire.ReadBatch(conn)
 		if err != nil {
 			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
 				ingressStats.readFailures.Add(1)
 			}
 			return
 		}
-		ingressStats.bytes.Add(uint64(n))
+		ingressStats.bytes.Add(uint64(len(batch.Raw)))
 		ingressStats.reads.Add(1)
 		ingressStats.lastReceiveMS.Store(time.Now().UnixMilli())
-		payload := make([]byte, n)
-		// Read reuses buf, so give the append loop its own copy of these bytes.
-		copy(payload, buf[:n])
-		// All ingress connections feed the same channel and append loop.
-		ingress <- payload
-
-		
-		// decode frame and pass back to parent funciton
+		if err := recordings.Ingest(source, batch); err != nil {
+			log.Printf("raw ingest: %v", err)
+			return
+		}
+		select {
+		case ingress <- batch.Raw:
+		case <-ctx.Done():
+			return
+		}
 
 		observeQueueDepth(len(ingress))
 	}
-}
-
-func compactionLoop(ctx context.Context, store *StreamStore, tracker *ClientTracker) {
-	// A finished segment is only removable after its frames are in Influx.
-	// That upload is not running, so the files stay on disk.
-	log.Printf("[photon-server] keeping segment files (latest=%d readers=%d)", store.LatestID(), tracker.Count())
-	<-ctx.Done()
 }

@@ -1,6 +1,6 @@
-#include "photon_ui/clock_format.hpp"
-#include "photon_ui/plot_color.hpp"
-#include "photon_ui/plot_time.hpp"
+#include "ui/clock_format.hpp"
+#include "ui/plot_color.hpp"
+#include "ui/plot_time.hpp"
 #include "test_harness.hpp"
 
 #include <cmath>
@@ -222,6 +222,13 @@ void runPlotAxisTests() {
         const bool ampm = std::strstr(buf, " AM") != nullptr || std::strstr(buf, " PM") != nullptr;
         CHECK(ampm);
         CHECK(std::strstr(buf, ",") != nullptr);
+        char nextTick[48]{};
+        photon::ui::formatPlotClock(1789250000000.0, buf, sizeof(buf), nullptr);
+        photon::ui::formatPlotClock(1789250000033.0, nextTick, sizeof(nextTick), nullptr);
+        CHECK(std::strcmp(buf, nextTick) != 0);
+        CHECK(std::strlen(buf) == 8);
+        CHECK(std::strstr(buf, "AM") == nullptr && std::strstr(buf, "PM") == nullptr);
+        CHECK(std::strstr(nextTick, ".033") != nullptr);
     }
 
     {
@@ -324,4 +331,37 @@ void runPlotAxisTests() {
         CHECK(lo <= 4.0);
         CHECK(hi >= 4.0);
     }
+    {
+        // Zooming out beyond a recording must not collapse the span on pan.
+        double lo = 100000, hi = 130000;
+        for (int i = 0; i < 4; ++i)
+            zoomTimeWindowAround((lo + hi) * 0.5, lo, hi, 2.0);
+        const double span = hi - lo;
+        const double start = lo;
+        photon::ui::panTimeWindow(lo, hi, 5000, 100000, 130000);
+        CHECK(near(hi - lo, span));
+        CHECK(near(lo, start + 5000));
+        photon::ui::panTimeWindow(lo, hi, -5000, 100000, 130000);
+        CHECK(near(lo, start));
+        photon::ui::panTimeWindow(lo, hi, 1e9, 100000, 130000);
+        CHECK(near(hi - lo, span));
+        CHECK(lo < 130000);
+    }
+    {
+        double lo = -10, hi = 30;
+        photon::ui::panValueWindow(lo, hi, 100, 400);
+        CHECK(near(lo, 0));
+        CHECK(near(hi, 40));
+        photon::ui::panValueWindow(lo, hi, -100, 400);
+        CHECK(near(lo, -10));
+        CHECK(near(hi, 30));
+        double rightLo = 1000, rightHi = 3000;
+        photon::ui::panValueWindow(rightLo, rightHi, 100, 400);
+        CHECK(near(rightLo, 1500));
+        CHECK(near(rightHi, 3500));
+        photon::ui::panValueWindow(lo, hi, 100, 0);
+        CHECK(near(lo, -10));
+        CHECK(near(hi, 30));
+    }
+
 }

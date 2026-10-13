@@ -24,19 +24,20 @@ const (
 
 // Config holds runtime configuration for the photon server.
 type Config struct {
-	Host             string
-	IngressPort      int
-	ClientPort       int
-	ObserverPort     int
-	VideoIngressPort int
-	VideoClientPort  int
-	VideoUdpPort     int
-	DataDir          string
-	TsdbDir          string
-	DbcPath          string
-	LiveWriter       string
-	Ui               string
-	Password         string
+	VideoDataDir                               string
+	Host                                       string
+	IngressPort                                int
+	ClientPort                                 int
+	ObserverPort                               int
+	VideoIngressPort                           int
+	VideoClientPort                            int
+	VideoUdpPort                               int
+	DataDir                                    string
+	DefaultDBCHash                             string
+	Ui                                         string
+	Password                                   string
+	HTTPPort                                   int
+	InfluxURL, InfluxDatabase, InfluxTokenFile string
 }
 
 // IngressAddr returns the TCP listen address for the ingress service.
@@ -78,33 +79,15 @@ func (c *Config) VideoRTCPAddr() string {
 	return net.JoinHostPort(c.Host, strconv.Itoa(c.VideoIngressPort+1))
 }
 
-// SegmentsDir returns the path where log segments are stored.
-func (c *Config) SegmentsDir() string {
-	return filepath.Join(c.DataDir, "segments")
-}
-
 // VideoSegmentsDir returns the path where compressed video segments are stored.
 func (c *Config) VideoSegmentsDir() string {
-	return filepath.Join(c.DataDir, "video", "segments")
+	return filepath.Join(c.VideoRoot(), "video", "segments")
 }
-
-// TsdbRoot is the telemetry store. Empty TsdbDir means <data-dir>/tsdb.
-func (c *Config) TsdbRoot() string {
-	if strings.TrimSpace(c.TsdbDir) != "" {
-		return c.TsdbDir
+func (c *Config) VideoRoot() string {
+	if c.VideoDataDir != "" {
+		return c.VideoDataDir
 	}
-	return filepath.Join(c.DataDir, "tsdb")
-}
-
-// VideoVptPath is the video pointer table photon-server already writes.
-func (c *Config) VideoVptPath() string {
-	return filepath.Join(c.DataDir, "video", "video.vpt")
-}
-
-// LiveFanoutAddr is where the TSDB writer connects. Always loopback: the writer
-// runs on this PC next to photon-server, even when the listen host is 0.0.0.0.
-func (c *Config) LiveFanoutAddr() string {
-	return net.JoinHostPort("127.0.0.1", strconv.Itoa(c.ClientPort))
+	return c.DataDir
 }
 
 // Validate checks that the configuration values are valid.
@@ -124,6 +107,12 @@ func (c *Config) Validate() error {
 			name string
 			port int
 		}{"video-udp", c.VideoUdpPort})
+	}
+	if c.HTTPPort != 0 {
+		ports = append(ports, struct {
+			name string
+			port int
+		}{"http", c.HTTPPort})
 	}
 	for _, p := range ports {
 		if p.port < 1 || p.port > 65535 {
@@ -199,15 +188,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 			cfg.VideoUdpPort = p
 		}
 	}
-	if dir := getenvFirst(getenv, "PHOTON_TSDB_DIR", "PHOTON_TSDB"); dir != "" {
-		cfg.TsdbDir = dir
-	}
-	if path := getenvFirst(getenv, "PHOTON_DBC", "PHOTON_DBC_PATH"); path != "" {
-		cfg.DbcPath = path
-	}
-	if path := getenvFirst(getenv, "PHOTON_LIVE_WRITER"); path != "" {
-		cfg.LiveWriter = path
-	}
+	cfg.DefaultDBCHash = getenvFirst(getenv, "PHOTON_DBC_HASH")
 	if path := getenvFirst(getenv, "PHOTON_UI"); path != "" {
 		cfg.Ui = path
 	}
@@ -216,6 +197,27 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	}
 
 	fs := flag.NewFlagSet("photon-server", flag.ContinueOnError)
+	cfg.VideoDataDir = getenvFirst(getenv, "PHOTON_VIDEO_DATA_DIR")
+	fs.StringVar(&cfg.VideoDataDir, "video-data-dir", cfg.VideoDataDir, "Root containing an existing video store (default data-dir)")
+	cfg.HTTPPort = 8080
+	cfg.InfluxURL = getenvFirst(getenv, "PHOTON_INFLUX_URL")
+	if cfg.InfluxURL == "" {
+		cfg.InfluxURL = "http://127.0.0.1:8181"
+	}
+	cfg.InfluxDatabase = getenvFirst(getenv, "PHOTON_INFLUX_DATABASE")
+	if cfg.InfluxDatabase == "" {
+		cfg.InfluxDatabase = "photon"
+	}
+	cfg.InfluxTokenFile = getenvFirst(getenv, "PHOTON_INFLUX_TOKEN_FILE")
+	if v := getenvFirst(getenv, "PHOTON_HTTP_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			cfg.HTTPPort = p
+		}
+	}
+	fs.IntVar(&cfg.HTTPPort, "http-port", cfg.HTTPPort, "Go HTTP UI and WebSocket port")
+	fs.StringVar(&cfg.InfluxURL, "influx-url", cfg.InfluxURL, "InfluxDB 3 Core HTTP URL")
+	fs.StringVar(&cfg.InfluxDatabase, "influx-db", cfg.InfluxDatabase, "Influx database")
+	fs.StringVar(&cfg.InfluxTokenFile, "influx-token-file", cfg.InfluxTokenFile, "File containing the server-only Influx token")
 	fs.SetOutput(output)
 
 	var hostFlag string
@@ -226,9 +228,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var videoClientPortFlag int
 	var videoUdpPortFlag int
 	var dataDirFlag string
-	var tsdbDirFlag string
-	var dbcPathFlag string
-	var liveWriterFlag string
+	var dbcHashFlag string
 	var uiFlag string
 	var passwordFlag string
 
@@ -248,16 +248,19 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.IntVar(&videoUdpPortFlag, "video-udp", cfg.VideoUdpPort, "Alias for -video-udp-port")
 	fs.StringVar(&dataDirFlag, "data-dir", cfg.DataDir, "Directory path for persistent storage segments")
 	fs.StringVar(&dataDirFlag, "storage-path", cfg.DataDir, "Alias for -data-dir")
-	fs.StringVar(&tsdbDirFlag, "tsdb-dir", cfg.TsdbDir, "TSDB root (default: <data-dir>/tsdb)")
-	fs.StringVar(&dbcPathFlag, "dbc", cfg.DbcPath, "DBC file for the live TSDB writer")
-	fs.StringVar(&liveWriterFlag, "live-writer", cfg.LiveWriter, "photon-index binary that writes the TSDB, or 'off'")
-	fs.StringVar(&uiFlag, "ui", cfg.Ui, "local UI backend (photon-backend), or off")
+	fs.StringVar(&dbcHashFlag, "dbc-hash", cfg.DefaultDBCHash, "SHA-256 hash of a registered DBC to use for new recordings")
+	fs.StringVar(&uiFlag, "ui", cfg.Ui, "UI assets directory, or off")
 	fs.StringVar(&passwordFlag, "password", cfg.Password, "shared client password (env: PHOTON_PASSWORD)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(output, "Usage of photon-server:\n")
 		fmt.Fprintf(output, "  photon-server [flags]\n\n")
 		fmt.Fprintf(output, "Flags:\n")
+		fmt.Fprintf(output, "  -http-port int               Go UI and WebSocket port (default 8080)\n")
+		fmt.Fprintf(output, "  -influx-url string           InfluxDB 3 Core URL (default http://127.0.0.1:8181)\n")
+		fmt.Fprintf(output, "  -influx-db string            Influx database (default photon; use photon_dev for validation)\n")
+		fmt.Fprintf(output, "  -influx-token-file string    File containing the server-only token\n")
+		fmt.Fprintf(output, "  -video-data-dir string       Existing video storage root (default data-dir)\n")
 		fmt.Fprintf(output, "  -host, -bind string          Bind host/IP address (default %q, env: PHOTON_HOST)\n", DefaultHost)
 		fmt.Fprintf(output, "  -ingress-port, -ingress int  TCP ingress port (default %d, env: PHOTON_INGRESS_PORT)\n", DefaultIngressPort)
 		fmt.Fprintf(output, "  -client-port, -client int    TCP client fan-out port (default %d, env: PHOTON_CLIENT_PORT)\n", DefaultClientPort)
@@ -266,10 +269,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -video-client-port, -video-client int TCP video live/replay port (default %d, env: PHOTON_VIDEO_CLIENT_PORT)\n", DefaultVideoClientPort)
 		fmt.Fprintf(output, "  -video-udp-port, -video-udp int UDP live video fan-out port (default %d, env: PHOTON_VIDEO_UDP_PORT)\n", DefaultVideoUdpPort)
 		fmt.Fprintf(output, "  -data-dir, -storage-path string Storage directory (default %q, env: PHOTON_DATA_DIR)\n", DefaultDataDir)
-		fmt.Fprintf(output, "  -tsdb-dir string             TSDB root (default <data-dir>/tsdb, env: PHOTON_TSDB_DIR)\n")
-		fmt.Fprintf(output, "  -dbc string                  DBC for live TSDB writer (env: PHOTON_DBC)\n")
-		fmt.Fprintf(output, "  -live-writer string          photon-index path, or off (env: PHOTON_LIVE_WRITER)\n")
-		fmt.Fprintf(output, "  -ui string                   local photon-backend + page, or off (env: PHOTON_UI)\n")
+		fmt.Fprintf(output, "  -dbc-hash string             Registered default DBC SHA-256 hash (env: PHOTON_DBC_HASH)\n")
+		fmt.Fprintf(output, "  -ui string                   UI assets directory, or off (env: PHOTON_UI)\n")
 		fmt.Fprintf(output, "  -password string             client password (env: PHOTON_PASSWORD; random if unset)\n")
 	}
 
@@ -285,9 +286,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.VideoClientPort = videoClientPortFlag
 	cfg.VideoUdpPort = videoUdpPortFlag
 	cfg.DataDir = dataDirFlag
-	cfg.TsdbDir = tsdbDirFlag
-	cfg.DbcPath = dbcPathFlag
-	cfg.LiveWriter = liveWriterFlag
+	cfg.DefaultDBCHash = strings.TrimSpace(dbcHashFlag)
 	cfg.Ui = uiFlag
 	cfg.Password = passwordFlag
 

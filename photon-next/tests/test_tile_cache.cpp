@@ -1,7 +1,8 @@
-#include "photon/control.hpp"
-#include "photon/protocol.hpp"
-#include "photon_ui/history_io.hpp"
-#include "photon_ui/tile_cache.hpp"
+#include "wire/control.hpp"
+#include "wire/protocol.hpp"
+#include "ui/history_io.hpp"
+#include "ui/tile_cache.hpp"
+#include "ui/plot_time.hpp"
 #include "test_harness.hpp"
 
 #include <algorithm>
@@ -75,6 +76,24 @@ void testFilesByServedLevel() {
     CHECK(plot.y[0] == 1.0);
     CHECK(plot.y[2] == 3.0);
     CHECK(plot.yMin.empty());
+}
+
+void testDecodingCacheScope() {
+    TileCache cache;
+    cache.setDecodeId("first");
+    cache.setSession("recording", "dbc", 0, 3000);
+    const auto qid = cache.prepareQuery(3, 0, 3000, 0, false, false);
+    cache.ingestResult(makeResult(qid, 3, 0, 1));
+    cache.ingestChunk(makeRawChunk(qid, 3, 0, {1000.0}, {10.0f}, true));
+    CHECK(cache.gatherPlot(3, 0, 3000, 0).t.size() == 1);
+    cache.setDecodeId("second");
+    cache.setSession("recording", "dbc", 0, 3000);
+    CHECK(cache.dbcHash() == "dbc");
+    double value = 0;
+    CHECK(!cache.sampleNear(3, 1000, value, 0));
+    cache.setDecodeId("first");
+    cache.setSession("recording", "dbc", 0, 3000);
+    CHECK(cache.gatherPlot(3, 0, 3000, 0).t.size() == 1);
 }
 
 void testProgressivePerRange() {
@@ -421,13 +440,13 @@ void testSwitchingSessionDropsPreviousLog() {
     TileCache cache;
     cache.setTileStore(nullptr);
     cache.setSession("2026-07-23-01", "dbc", 5000, 7000);
-    const auto q = cache.prepareQuery(1, 5000, 7000, 0, false, false);
+    const auto q = cache.prepareQuery(1, 5000, 7000, 0, false, true);
     cache.ingestResult(makeResult(q, 1, 0, 2, false, false, 0, 0, 11.0, 99.0, 5000, 7000));
     cache.ingestChunk(makeRawChunk(q, 1, 0, {5000.0, 7000.0}, {120.0f, 121.0f}, true));
     CHECK(cache.gatherPlot(1, 5000, 7000, 0).t.size() == 2);
 
     cache.setSession("2026-07-18-01", "dbc", 100, 300);
-    CHECK(cache.tileCount() == 0);
+    CHECK(cache.tileCount() > 0);
     const auto leftover = cache.gatherPlot(1, 100, 7000, 0);
     bool finite = false;
     for (double y : leftover.y) {
@@ -439,6 +458,20 @@ void testSwitchingSessionDropsPreviousLog() {
     CHECK(cache.sessionId() == "2026-07-18-01");
     CHECK(cache.sessionMinMs() == 100);
     CHECK(cache.sessionMaxMs() == 300);
+    double value = 0;
+    CHECK(!cache.sampleNear(1, 5000, value, 10000));
+    CHECK(!cache.sampleFirstAbs(1, value, 1));
+    cache.setSession("2026-07-23-01", "dbc", 5000, 7000);
+    RecordingIO io;
+    cache.setCompactFetch(true);
+    const std::uint32_t ids[] = {1};
+    CHECK(cache.requestCursorWindow(io, ids, 5000));
+    CHECK(io.requested.empty());
+    CHECK(cache.gatherPlot(1, 5000, 7000, 0).t.size() == 2);
+    cache.setSession("new-log", "dbc", 100, 300);
+    cache.setBudget(64);
+    cache.requestCursorWindow(io, ids, 200);
+    CHECK(cache.tileCount() == 0); // Inactive overview is reclaimable too.
 }
 
 void testRunSwitchDoesNotClipNewSession() {
@@ -451,7 +484,7 @@ void testRunSwitchDoesNotClipNewSession() {
     CHECK(cache.gatherPlot(1, 1000, 5000, 0).t.size() == 1);
 
     cache.setSession("run-b", "dbc", 10000, 20000);
-    CHECK(cache.tileCount() == 0);
+    CHECK(cache.tileCount() > 0);
     CHECK(cache.seamFor(1) == 0);
     const auto qb = cache.prepareQuery(1, 10000, 20000, 0, false, false);
     cache.ingestResult(makeResult(qb, 1, 0, 2, false, false, 0, 0, 11.0, 99.0, 10000, 20000));
@@ -460,6 +493,58 @@ void testRunSwitchDoesNotClipNewSession() {
     CHECK(plot.t.size() == 2);
     CHECK(plot.t[0] == 12000.0);
     CHECK(plot.t[1] == 18000.0);
+}
+
+void testPanningAcrossMissingTilesBreaksLines() {
+    TileCache cache;
+    const auto span = photon::history::tileSpanMs(0);
+    cache.setSession("gap-run", "dbc", 0, span * 3);
+    auto load = [&](std::uint64_t from, float value) {
+        const auto q = cache.prepareQuery(1, from, from + span - 1, 0, false, false);
+        cache.ingestResult(makeResult(q, 1, 0, 2, false, false, 0, 0, 0, 0, from, from + span - 1));
+        cache.ingestChunk(makeRawChunk(q, 1, 0, {double(from + 10), double(from + 20)},
+                                      {value, value * 2}, true));
+    };
+    load(0, 1);
+    load(span * 2, 100);
+    auto plot = cache.gatherPlot(1, 0, span * 3 - 1, 0);
+    CHECK(plot.incomplete);
+    CHECK(plot.gaps.size() == 1);
+    CHECK(plot.t.size() == 4);
+    std::size_t segments = 0;
+    photon::ui::forEachPlotSegment(plot.t, plot.gaps, [&](std::size_t, std::size_t count) {
+        ++segments;
+        CHECK(count == 2);
+    });
+    CHECK(segments == 2);
+    // Even a tiny point budget must not average across the missing block.
+    auto folded = cache.gatherPlot(1, 0, span * 3 - 1, 1);
+    CHECK(folded.t.size() == 2);
+    CHECK(folded.y[0] == 1.5);
+    CHECK(folded.y[1] == 150);
+    CHECK(folded.gaps.size() == 1);
+    // Loading the missing tile restores continuous plotting automatically.
+    load(span, 10);
+    plot = cache.gatherPlot(1, 0, span * 3 - 1, 0);
+    CHECK(!plot.incomplete);
+    CHECK(plot.gaps.empty());
+    segments = 0;
+    photon::ui::forEachPlotSegment(plot.t, plot.gaps, [&](std::size_t, std::size_t) { ++segments; });
+    CHECK(segments == 1);
+    TileCache partial;
+    partial.setSession("partial-tile", "dbc", 0, span);
+    const auto q = partial.prepareQuery(1, 0, span - 1, 0, false, false);
+    partial.ingestResult(makeResult(q, 1, 0, 6, false, false, 0, 0, 0, 0, 0, span - 1));
+    partial.ingestChunk(makeRawChunk(q, 1, 0, {10, 20, 30, 45000, 45010, 45020},
+                                    {1, 2, 3, 100, 200, 300}, true));
+    plot = partial.gatherPlot(1, 0, span - 1, 0);
+    CHECK(plot.gaps.size() == 1);
+    segments = 0;
+    photon::ui::forEachPlotSegment(plot.t, plot.gaps, [&](std::size_t, std::size_t count) {
+        CHECK(count == 3);
+        ++segments;
+    });
+    CHECK(segments == 2);
 }
 
 void testBoundBytesInBudget() {
@@ -485,6 +570,24 @@ void testBoundBytesInBudget() {
 }  // namespace
 
 void runTileCacheTests() {
+    testDecodingCacheScope();
+    {
+        TileCache cache;
+        cache.setTileStore(nullptr);
+        cache.setSession("a", "dbc", 0, 60000);
+        cache.setCompactFetch(true);
+        RecordingIO io;
+        std::vector<std::uint32_t> ids;
+        for (std::uint32_t id = 1; id <= 20; ++id) ids.push_back(id);
+        CHECK(!cache.requestCursorWindow(io, ids, 1000));
+        CHECK(io.requested.size() == 16);
+        cache.cancelAll(io);
+        CHECK(cache.tileCount() == 0);
+        const auto before = io.requested.size();
+        const std::uint32_t one[] = {1};
+        CHECK(cache.requestCursorWindow(io, one, 1000));
+        CHECK(io.requested.size() == before + 1);
+    }
     testFilesByServedLevel();
     testProgressivePerRange();
     testPerSignalSeam();
@@ -502,4 +605,5 @@ void runTileCacheTests() {
     testSwitchingSessionDropsPreviousLog();
     testRunSwitchDoesNotClipNewSession();
     testBoundBytesInBudget();
+    testPanningAcrossMissingTilesBreaksLines();
 }

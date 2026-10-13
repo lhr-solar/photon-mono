@@ -1,9 +1,9 @@
 #include "live_fanout.hpp"
 
-#include "photon/canp.hpp"
-#include "photon/client_auth.hpp"
-#include "photon/dbc.hpp"
-#include "photon/tsdb.hpp"
+#include "wire/canp.hpp"
+#include "net/client_auth.hpp"
+#include "decode/dbc.hpp"
+#include "store/tsdb.hpp"
 
 #include <chrono>
 #include <cstdio>

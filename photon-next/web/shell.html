@@ -1582,16 +1582,11 @@
           var host = location.hostname || '';
           var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
           if (!host || location.protocol === 'file:') {
-            return 'ws://127.0.0.1:8765';
-          }
-          var local = host === '127.0.0.1' || host === 'localhost' || host === '[::1]';
-          var port = location.port || '';
-          if (local && port !== '' && port !== '8080' && port !== '80' && port !== '443') {
-            return 'ws://127.0.0.1:8765';
+            return 'ws://127.0.0.1:8080/ws';
           }
           return proto + '//' + location.host + '/ws';
         } catch (e) {
-          return 'ws://127.0.0.1:8765';
+          return 'ws://127.0.0.1:8080/ws';
         }
       };
       window.photonSharedConsole = function() {

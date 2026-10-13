@@ -10,5 +10,5 @@ if (-not (Test-Path (Join-Path $Web "photon.html"))) {
 
 Write-Host "Serving $Web on http://127.0.0.1:$Port/photon.html"
 Write-Host "Start the backend separately:"
-Write-Host "  .\.artifacts\photon\daemon\photon-backend.exe --ws-port 8765"
+Write-Host "  .\.artifacts\src\daemon\photon-backend.exe --ws-port 8765"
 python -m http.server $Port --directory $Web

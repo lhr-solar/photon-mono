@@ -215,7 +215,7 @@ func (s *VideoStore) AppendStamped(payload []byte, timestampMs uint64, rtpTs uin
 	if discardableNALType(nalType) {
 		return 0, nil
 	}
-	flags := flagsForNALType(nalType)
+	flags := flagsForAnnexBNAL(payload)
 	if nalType == nalTypeSPS {
 		s.sps = cloneBytes(payload)
 	}
@@ -421,25 +421,6 @@ func (s *VideoStore) ConfigNALs() (sps, pps []byte) {
 	return cloneBytes(s.sps), cloneBytes(s.pps)
 }
 
-func (s *VideoStore) FindKeyframeAtOrBefore(t uint64) (VideoFrame, uint64, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	idx, ok := s.keyframeIndexAtOrBeforeLocked(t)
-	if !ok {
-		return VideoFrame{}, 0, false
-	}
-	entry := s.entries[s.keyframes[idx]]
-	payload, err := s.readPayloadLocked(entry)
-	if err != nil {
-		return VideoFrame{}, 0, false
-	}
-	return VideoFrame{
-		TimestampMs: entry.timestampMs,
-		Flags:       entry.flags,
-		Payload:     payload,
-	}, entry.seq, true
-}
-
 func (s *VideoStore) keyframeIndexAtOrBeforeLocked(t uint64) (int, bool) {
 	if len(s.keyframes) == 0 {
 		return 0, false
@@ -488,49 +469,6 @@ func (s *VideoStore) ReadSeq(seq uint64) (VideoFrame, bool, error) {
 		Flags:       entry.flags,
 		Payload:     payload,
 	}, true, nil
-}
-
-func (s *VideoStore) ReplayFrom(t uint64) ([]VideoFrame, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	start := 0
-	if idx, ok := s.keyframeIndexAtOrBeforeLocked(t); ok {
-		start = s.keyframes[idx]
-	} else if len(s.keyframes) > 0 {
-		start = s.keyframes[0]
-	} else if len(s.entries) == 0 {
-		return nil, nil
-	}
-
-	frames := make([]VideoFrame, 0, len(s.entries)-start+2)
-	if sps := s.configForEntryLocked(start, nalTypeSPS); len(sps) > 0 {
-		ts := uint64(0)
-		if start < len(s.entries) {
-			ts = s.entries[start].timestampMs
-		}
-		frames = append(frames, VideoFrame{TimestampMs: ts, Flags: VideoFlagConfig, Payload: sps})
-	}
-	if pps := s.configForEntryLocked(start, nalTypePPS); len(pps) > 0 {
-		ts := uint64(0)
-		if start < len(s.entries) {
-			ts = s.entries[start].timestampMs
-		}
-		frames = append(frames, VideoFrame{TimestampMs: ts, Flags: VideoFlagConfig, Payload: pps})
-	}
-	for i := start; i < len(s.entries); i++ {
-		entry := s.entries[i]
-		payload, err := s.readPayloadLocked(entry)
-		if err != nil {
-			return nil, err
-		}
-		frames = append(frames, VideoFrame{
-			TimestampMs: entry.timestampMs,
-			Flags:       entry.flags,
-			Payload:     payload,
-		})
-	}
-	return frames, nil
 }
 
 func (s *VideoStore) configForEntryLocked(entryIdx int, want uint8) []byte {
@@ -605,15 +543,6 @@ func (s *VideoStore) ReadOrWait(seq uint64) (VideoFrame, uint64, error) {
 			Payload:     payload,
 		}, entry.seq, nil
 	}
-}
-
-func (s *VideoStore) LatestSeqUnlockedFallback() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.nextSeq == 1 {
-		return 0
-	}
-	return s.nextSeq - 1
 }
 
 func (s *VideoStore) entryBySeqLocked(seq uint64) (videoIndexEntry, bool) {
@@ -776,7 +705,7 @@ func (s *VideoStore) recoverSegment(id uint64) error {
 				TimestampMs: ts,
 				Offset:      uint64(covered),
 				Size:        uint32(len(nal)),
-				Flags:       flagsForNALType(nalType),
+				Flags:       flagsForAnnexBNAL(nal),
 				NALType:     nalType,
 			}
 			records = append(records, rec)
@@ -815,7 +744,7 @@ func (s *VideoStore) recoverSegment(id uint64) error {
 				TimestampMs: ts,
 				Offset:      uint64(offset),
 				Size:        uint32(len(nal)),
-				Flags:       flagsForNALType(nalType),
+				Flags:       flagsForAnnexBNAL(nal),
 				NALType:     nalType,
 			})
 			if nalType == nalTypeSPS {
@@ -854,6 +783,12 @@ func (s *VideoStore) recoverSegment(id uint64) error {
 	s.segments[id] = seg
 
 	for _, rec := range records {
+		// Old indexes marked every IDR slice as a keyframe. Normalize in
+		// memory from authoritative payload bytes before rebuilding the VPT.
+		if rec.NALType == nalTypeIDR && rec.Size > 0 && rec.Offset+uint64(rec.Size) <= uint64(len(data)) {
+			rec.Flags = (rec.Flags &^ VideoFlagKeyframe) |
+				(flagsForAnnexBNAL(data[rec.Offset:rec.Offset+uint64(rec.Size)]) & VideoFlagKeyframe)
+		}
 		entry := videoIndexEntry{
 			seq:          s.nextSeq,
 			segmentID:    id,
@@ -1231,4 +1166,760 @@ func cloneBytes(in []byte) []byte {
 
 func videoNowMS() uint64 {
 	return uint64(time.Now().UnixMilli())
+}
+
+// video_locate and byte-range reads (tsdb-architecture.md §8.2).
+//
+// Returning byte ranges instead of frames is what makes seeking seamless: the
+// client gets the entry GOP for a timestamp plus the pointers that follow, and
+// walks forward through the byte stream instead of tearing down the connection
+// and re-subscribing.
+
+// VideoLocateResult is one answer to "where does this timestamp live".
+type VideoLocateResult struct {
+	Found bool
+
+	// Entry is the GOP containing AtMs: the last keyframe at or before it.
+	// A decoder starts here and discards output before AtMs.
+	Entry GopRow
+	// Prefetch are the GOPs immediately after Entry, so the client can request
+	// ahead instead of stalling at each GOP boundary.
+	Prefetch []GopRow
+	Coverage []SegmentCoverage
+
+	SPS []byte
+	PPS []byte
+
+	// ClockOffsetMs is the manual nudge a client must add to stored video
+	// timestamps before comparing them to telemetry timestamps.
+	ClockOffsetMs int64
+	// ClockProv is how the entry GOP's own timestamps were derived. Anything
+	// below clockProvRTCP means A/V sync is unverified (§8.5).
+	ClockProv uint8
+	// ResidualMs is mapped wall clock minus raw receive time for the entry
+	// keyframe: network delay plus sender/receiver clock disagreement. §8.5
+	// item 4 asks for this to be recorded rather than assumed away.
+	ResidualMs int64
+
+	TotalRows uint32
+	MinMs     uint64
+	MaxMs     uint64
+}
+
+// Locate maps a timestamp to a byte offset and the containing GOP.
+func (s *VideoStore) Locate(streamID uint8, atMs uint64, prefetch int) VideoLocateResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rows := s.vpt.snapshot()
+	lo, hi := s.vpt.bounds()
+	out := VideoLocateResult{
+		ClockOffsetMs: s.vpt.clockOffset,
+		TotalRows:     uint32(len(rows)),
+		MinMs:         lo,
+		MaxMs:         hi,
+		ClockProv:     s.vpt.clockProv,
+	}
+	// Publish coverage even on a miss. Historical requests after EOF must
+	// not masquerade as successful reads of the final (often partial) GOP.
+	out.Coverage = coverageOf(rows, streamID, lo, hi)
+	streamLo, streamHi := streamBounds(rows, streamID)
+	if streamLo == streamHi {
+		return out
+	}
+	if atMs != 0 && atMs > rows[streamHi-1].EndMs {
+		return out
+	}
+	// atMs == 0 is the live probe ("newest GOP"), not "before the epoch".
+	// locateEntry(0) used to return the earliest keyframe, so Live View
+	// froze on the first still and every later t=0 locate was the same GOP.
+	idx := -1
+	if atMs == 0 {
+		idx = lastKeyframe(rows, streamID)
+	} else {
+		idx = locateEntry(rows, streamID, atMs)
+	}
+	if idx < 0 {
+		return out
+	}
+	entry := rows[idx]
+	// locateEntry is "last keyframe at or before atMs". Across a recording
+	// hole that is the final GOP of the previous clip, which is what made
+	// Sep 7 11:16 catalog pins replay the Sep 6 22:50 0.45s tail after the
+	// camera resumed. Consecutive GOPs are 1–2 s apart; anything farther
+	// is a gap, not "hold the last picture".
+	if atMs != 0 && atMs > entry.EndMs+videoLocateHoldMs {
+		next := nextKeyframe(rows, idx, streamID)
+		if next < 0 || rows[next].StartMs > atMs+videoLocateHoldMs {
+			return out
+		}
+	}
+	out.Found = true
+	out.Entry = entry
+
+	if prefetch > 0 {
+		_, streamHi := streamBounds(rows, streamID)
+		end := idx + 1 + prefetch
+		if end > streamHi {
+			end = streamHi
+		}
+		if end > idx+1 {
+			out.Prefetch = append(out.Prefetch, rows[idx+1:end]...)
+		}
+	}
+
+	// Coverage spans the whole table rather than the requested window: §8.2
+	// says return the coverage map for the range plus the single entry
+	// pointer, and at segment granularity the whole table is ~240 rows for 4 h.
+	out.Coverage = coverageOf(rows, streamID, lo, hi)
+
+	// SPS/PPS as of the entry keyframe, so a decoder configured from this
+	// reply matches the bytes it is about to be fed.
+	if e := s.entryIndexInRowLocked(out.Entry); e >= 0 {
+		out.SPS = s.configForEntryLocked(e, nalTypeSPS)
+		out.PPS = s.configForEntryLocked(e, nalTypePPS)
+		out.ClockProv = s.entries[e].clockProv
+		out.ResidualMs = int64(s.entries[e].timestampMs) - int64(s.entries[e].receiveMs)
+	} else {
+		out.SPS = cloneBytes(s.sps)
+		out.PPS = cloneBytes(s.pps)
+	}
+	return out
+}
+
+// entryIndexInRowLocked finds the keyframe NAL inside a GOP row.
+//
+// Entries are appended in (segment, offset) order, so this is a binary search
+// rather than a scan.
+func (s *VideoStore) entryIndexInRowLocked(row GopRow) int {
+	seg := uint64(row.SegmentID)
+	start := int64(row.ByteOffset)
+	end := start + int64(row.ByteLength)
+	i := sort.Search(len(s.entries), func(k int) bool {
+		e := s.entries[k]
+		if e.segmentID != seg {
+			return e.segmentID > seg
+		}
+		return e.offset >= start
+	})
+	for ; i < len(s.entries); i++ {
+		e := s.entries[i]
+		if e.segmentID != seg || e.offset >= end {
+			break
+		}
+		if e.flags&VideoFlagKeyframe != 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// ReadRange returns a byte span from a segment so a pointer can be fetched
+// directly, without a keyframe search (§8.2 transport change 2).
+func (s *VideoStore) ReadRange(segmentID uint32, offset uint64, length uint32) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if length == 0 {
+		return nil, nil
+	}
+	if length > videoRangeMaxBytes {
+		return nil, fmt.Errorf("range of %d bytes exceeds the %d byte limit", length, videoRangeMaxBytes)
+	}
+	seg, ok := s.segments[uint64(segmentID)]
+	if !ok {
+		return nil, fmt.Errorf("video segment %d is missing", segmentID)
+	}
+	if int64(offset) >= seg.size {
+		return nil, fmt.Errorf("offset %d is past the end of segment %d (%d bytes)", offset, segmentID, seg.size)
+	}
+	// Clamp rather than fail: the tail GOP of an active segment grows, so a
+	// pointer fetched a moment ago can name more bytes than are on disk.
+	avail := seg.size - int64(offset)
+	if int64(length) > avail {
+		length = uint32(avail)
+	}
+	file, err := s.segmentReadFileLocked(seg)
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, length)
+	if _, err := file.ReadAt(buf, int64(offset)); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// PointerRows exposes the table for tests and diagnostics.
+func (s *VideoStore) PointerRows() []GopRow {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.vpt.snapshot()
+}
+
+// rebuildVptLocked regenerates every row from the .idx-derived entries.
+//
+// The table is derived state, so this is both the recovery path and the
+// self-heal for a truncated or deleted video.vpt.
+func (s *VideoStore) rebuildVptLocked() {
+	rows := s.vpt.rows
+	_ = rows
+	path := s.vpt.path
+	offset := s.vpt.clockOffset
+	prov := s.vpt.clockProv
+	s.vpt.reset(path)
+	s.vpt.clockOffset = offset
+	s.vpt.clockProv = prov
+	s.vpt.persisted = 0
+	for _, e := range s.entries {
+		s.vpt.add(videoDefaultStreamID, uint32(e.segmentID), e.timestampMs, uint64(e.offset), uint32(e.size),
+			e.flags, e.nalType)
+	}
+	// Truncate the file so stale rows behind the rebuilt set cannot survive.
+	if path != "" {
+		if err := os.Truncate(path, 0); err != nil && !os.IsNotExist(err) {
+			// Non-fatal: flush() rewrites the header and truncates to the new
+			// length anyway. Reported so a broken table is not silent.
+			fmt.Printf("[photon-server] video.vpt truncate failed: %v\n", err)
+		}
+	}
+}
+
+// backfillClockLocked re-derives wall clock for NALs already stored with
+// receive time, now that an RTCP mapping exists.
+//
+// Bounded to the active segment: an RTCP sender report arrives within seconds
+// of the stream starting, so the receive-stamped head of a recording is short.
+// Without this, the first segment of every recording carries unknown skew even
+// though the information needed to fix it was recorded alongside it.
+func (s *VideoStore) backfillClockLocked() error {
+	s.backfilled = true
+	if s.clock == nil || s.active == nil {
+		return nil
+	}
+	activeID := s.active.id
+	changed := 0
+	for i := range s.entries {
+		e := &s.entries[i]
+		if e.segmentID != activeID || e.clockProv != clockProvReceive || e.rtpTimestamp == 0 {
+			continue
+		}
+		mapped, prov := s.clock.WallMs(e.rtpTimestamp, e.receiveMs)
+		if prov != clockProvRTCP {
+			continue
+		}
+		e.timestampMs = mapped
+		e.clockProv = prov
+		changed++
+	}
+	if changed == 0 {
+		return nil
+	}
+	// Rewrite the segment's records so the correction survives a restart.
+	if err := s.rewriteActiveIndexLocked(); err != nil {
+		return err
+	}
+	s.rebuildVptLocked()
+	fmt.Printf("[photon-server] video clock backfill: %d NALs in segment %d re-stamped from RTP\n",
+		changed, activeID)
+	return nil
+}
+
+func (s *VideoStore) rewriteActiveIndexLocked() error {
+	if s.active == nil || s.active.idxFile == nil {
+		return nil
+	}
+	activeID := s.active.id
+	var records []videoNALRecord
+	for _, e := range s.entries {
+		if e.segmentID != activeID {
+			continue
+		}
+		records = append(records, videoNALRecord{
+			TimestampMs:  e.timestampMs,
+			Offset:       uint64(e.offset),
+			Size:         uint32(e.size),
+			Flags:        e.flags,
+			NALType:      e.nalType,
+			ClockProv:    e.clockProv,
+			RTPTimestamp: e.rtpTimestamp,
+			ReceiveMs:    e.receiveMs,
+		})
+	}
+	buf := make([]byte, len(records)*videoNALRecordSizeV2)
+	for i, rec := range records {
+		encodeNALRecord(buf[i*videoNALRecordSizeV2:(i+1)*videoNALRecordSizeV2], rec)
+	}
+	if _, err := s.active.idxFile.WriteAt(buf, int64(videoIndexHeaderSize)); err != nil {
+		return err
+	}
+	if _, err := s.active.idxFile.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+	// Segment bounds move with the timestamps.
+	if len(records) > 0 {
+		s.active.startMs = records[0].TimestampMs
+		s.active.endMs = records[len(records)-1].TimestampMs
+		for _, rec := range records {
+			if rec.TimestampMs < s.active.startMs {
+				s.active.startMs = rec.TimestampMs
+			}
+			if rec.TimestampMs > s.active.endMs {
+				s.active.endMs = rec.TimestampMs
+			}
+		}
+		s.lastNALMS = s.active.endMs
+	}
+	return nil
+}
+
+// video.vpt — the video pointer table (tsdb-architecture.md §8.1).
+//
+// One row per GOP, built live as NALs arrive rather than by a post-processing
+// pass. A row is the byte span a decoder needs to start at a keyframe and play
+// forward, so a timestamp can be turned into a seek without scanning the
+// stream.
+//
+// The table is derived state: it is rebuilt from the authoritative per-segment
+// .idx records on recovery, so deleting it loses nothing.
+const (
+	vptMagic      = uint32(0x56505431) // "VPT1"
+	vptVersion    = uint16(1)
+	vptHeaderSize = 64
+	vptRowSize    = 40
+
+	// Row flags.
+	//
+	// vptFlagConfigInline says the byte span begins with SPS/PPS, so a client
+	// that fetches only this range can configure a decoder from it.
+	vptFlagConfigInline = uint8(1 << 0)
+	// vptFlagContinuation says the row does not begin at a keyframe. A GOP
+	// split across a segment boundary (which the 128 MiB / 120 s hard rotation
+	// cap can force) yields a keyframe row plus one continuation row. A
+	// continuation row is a legal byte range to read but not a legal place to
+	// start decoding, so Locate never returns one as an entry.
+	vptFlagContinuation = uint8(1 << 1)
+)
+
+// Clock provenance for video timestamps (§8.5). Ordered worst to best so a
+// caller can compare: anything below clockProvRTCP means A/V sync is unverified.
+const (
+	clockProvReceive = uint8(0)
+	clockProvManual  = uint8(1)
+	clockProvNTP     = uint8(2)
+	clockProvRTCP    = uint8(3)
+)
+
+func clockProvenanceName(p uint8) string {
+	switch p {
+	case clockProvRTCP:
+		return "rtcp"
+	case clockProvNTP:
+		return "ntp"
+	case clockProvManual:
+		return "manual"
+	default:
+		return "receive"
+	}
+}
+
+// GopRow is the 40-byte on-disk pointer row. Field order and offsets are fixed
+// by §8.1; do not reorder.
+type GopRow struct {
+	StartMs    uint64 // keyframe timestamp
+	EndMs      uint64 // last NAL before the next keyframe
+	ByteOffset uint64 // into the segment's .h264
+	ByteLength uint32
+	SegmentID  uint32
+	NalCount   uint32
+	StreamID   uint8
+	Flags      uint8
+}
+
+func (r GopRow) IsContinuation() bool { return r.Flags&vptFlagContinuation != 0 }
+
+func encodeGopRow(dst []byte, r GopRow) {
+	binary.BigEndian.PutUint64(dst[0:8], r.StartMs)
+	binary.BigEndian.PutUint64(dst[8:16], r.EndMs)
+	binary.BigEndian.PutUint64(dst[16:24], r.ByteOffset)
+	binary.BigEndian.PutUint32(dst[24:28], r.ByteLength)
+	binary.BigEndian.PutUint32(dst[28:32], r.SegmentID)
+	binary.BigEndian.PutUint32(dst[32:36], r.NalCount)
+	dst[36] = r.StreamID
+	dst[37] = r.Flags
+	binary.BigEndian.PutUint16(dst[38:40], 0)
+}
+
+// vptHeader is the 64-byte file header. It carries the clock offset and its
+// provenance so a reader of the table alone knows whether video timestamps are
+// comparable to telemetry timestamps (§8.5).
+type vptHeader struct {
+	rowCount      uint32
+	minMs         uint64
+	maxMs         uint64
+	clockOffsetMs int64
+	clockProv     uint8
+}
+
+func encodeVptHeader(h vptHeader) []byte {
+	buf := make([]byte, vptHeaderSize)
+	binary.BigEndian.PutUint32(buf[0:4], vptMagic)
+	binary.BigEndian.PutUint16(buf[4:6], vptVersion)
+	binary.BigEndian.PutUint16(buf[6:8], uint16(vptHeaderSize))
+	binary.BigEndian.PutUint16(buf[8:10], uint16(vptRowSize))
+	binary.BigEndian.PutUint32(buf[12:16], h.rowCount)
+	binary.BigEndian.PutUint64(buf[16:24], h.minMs)
+	binary.BigEndian.PutUint64(buf[24:32], h.maxMs)
+	binary.BigEndian.PutUint64(buf[32:40], uint64(h.clockOffsetMs))
+	buf[40] = h.clockProv
+	return buf
+}
+
+// vptBuilder turns the NAL stream into GOP rows as it arrives.
+//
+// It is fed in append order and holds exactly one open row: the GOP that the
+// next keyframe will close. The open row is visible to queries immediately but
+// is only appended to disk once closed, because its length and end timestamp
+// are still growing.
+type vptBuilder struct {
+	rows []GopRow
+
+	open      bool
+	cur       GopRow
+	persisted int // rows already appended to the file
+
+	// Trailing run of config NALs (SPS/PPS) seen since the last keyframe.
+	// A keyframe pulls them into its byte span so the GOP is independently
+	// decodable, which is what vptFlagConfigInline advertises.
+	cfgRun      bool
+	cfgSegment  uint32
+	cfgOffset   uint64
+	cfgLength   uint32
+	cfgCount    uint32
+	cfgStartMs  uint64
+	path        string
+	clockOffset int64
+	clockProv   uint8
+	dirty       bool
+}
+
+func (b *vptBuilder) reset(path string) {
+	b.rows = nil
+	b.open = false
+	b.cur = GopRow{}
+	b.persisted = 0
+	b.clearConfigRun()
+	b.path = path
+	b.dirty = true
+}
+
+func (b *vptBuilder) clearConfigRun() {
+	b.cfgRun = false
+	b.cfgSegment = 0
+	b.cfgOffset = 0
+	b.cfgLength = 0
+	b.cfgCount = 0
+	b.cfgStartMs = 0
+}
+
+func (b *vptBuilder) closeOpen() {
+	if !b.open {
+		return
+	}
+	b.rows = append(b.rows, b.cur)
+	b.open = false
+	b.cur = GopRow{}
+	b.dirty = true
+}
+
+// add folds one appended NAL into the table.
+func (b *vptBuilder) add(streamID uint8, segmentID uint32, timestampMs uint64, offset uint64, size uint32,
+	flags uint8, nalType uint8) {
+
+	if flags&VideoFlagConfig != 0 {
+		// Extend or start the trailing config run, but only while it stays
+		// contiguous in one segment. A gap means the bytes cannot be handed
+		// out as a single range.
+		if b.cfgRun && b.cfgSegment == segmentID && b.cfgOffset+uint64(b.cfgLength) == offset {
+			b.cfgLength += size
+			b.cfgCount++
+		} else {
+			b.cfgRun = true
+			b.cfgSegment = segmentID
+			b.cfgOffset = offset
+			b.cfgLength = size
+			b.cfgCount = 1
+			b.cfgStartMs = timestampMs
+		}
+		// Config NALs also belong to whatever GOP is open, so its byte span
+		// stays contiguous with the stream. EndMs deliberately does not move:
+		// a config NAL that turns out to precede the next keyframe gets pulled
+		// into that keyframe's row, and if EndMs had followed it the two rows
+		// would overlap and a timestamp on the boundary would be in both.
+		if b.open && b.cur.SegmentID == segmentID &&
+			b.cur.ByteOffset+uint64(b.cur.ByteLength) == offset {
+			b.cur.ByteLength += size
+			b.cur.NalCount++
+		}
+		_ = nalType
+		return
+	}
+
+	if flags&VideoFlagKeyframe != 0 {
+		start := offset
+		length := size
+		nals := uint32(1)
+		rowFlags := uint8(0)
+		startMs := timestampMs
+		// Pull an immediately preceding, contiguous config run into this GOP.
+		if b.cfgRun && b.cfgSegment == segmentID && b.cfgOffset+uint64(b.cfgLength) == offset {
+			// Those bytes may already be counted in the GOP we are about to
+			// close; trim them off it so no byte is claimed twice.
+			if b.open && b.cur.SegmentID == segmentID &&
+				b.cur.ByteLength >= b.cfgLength &&
+				b.cur.ByteOffset+uint64(b.cur.ByteLength) == offset {
+				b.cur.ByteLength -= b.cfgLength
+				if b.cur.NalCount >= b.cfgCount {
+					b.cur.NalCount -= b.cfgCount
+				}
+			}
+			start = b.cfgOffset
+			length += b.cfgLength
+			nals += b.cfgCount
+			rowFlags |= vptFlagConfigInline
+			if b.cfgStartMs < startMs {
+				startMs = b.cfgStartMs
+			}
+		}
+		b.closeOpen()
+		b.clearConfigRun()
+		b.open = true
+		b.cur = GopRow{
+			StartMs:    startMs,
+			EndMs:      timestampMs,
+			ByteOffset: start,
+			ByteLength: length,
+			SegmentID:  segmentID,
+			NalCount:   nals,
+			StreamID:   streamID,
+			Flags:      rowFlags,
+		}
+		return
+	}
+
+	b.clearConfigRun()
+
+	// Non-keyframe. Extend the open GOP when it stays contiguous, otherwise
+	// start a continuation row: a forced rotation can move the rest of a GOP
+	// into the next segment, and those bytes still have to be addressable.
+	if b.open && b.cur.SegmentID == segmentID &&
+		b.cur.ByteOffset+uint64(b.cur.ByteLength) == offset {
+		b.cur.ByteLength += size
+		b.cur.NalCount++
+		if timestampMs > b.cur.EndMs {
+			b.cur.EndMs = timestampMs
+		}
+		return
+	}
+	prevStream := streamID
+	if b.open {
+		prevStream = b.cur.StreamID
+	}
+	b.closeOpen()
+	b.open = true
+	b.cur = GopRow{
+		StartMs:    timestampMs,
+		EndMs:      timestampMs,
+		ByteOffset: offset,
+		ByteLength: size,
+		SegmentID:  segmentID,
+		NalCount:   1,
+		StreamID:   prevStream,
+		Flags:      vptFlagContinuation,
+	}
+}
+
+// snapshot returns every row including the still-growing open one, sorted by
+// (streamId, startMs) as §8.1 requires. Rows arrive in time order for a single
+// stream, so the sort only does work once multi-camera is real.
+func (b *vptBuilder) snapshot() []GopRow {
+	out := make([]GopRow, 0, len(b.rows)+1)
+	out = append(out, b.rows...)
+	if b.open {
+		out = append(out, b.cur)
+	}
+	if !sort.SliceIsSorted(out, func(i, j int) bool {
+		if out[i].StreamID != out[j].StreamID {
+			return out[i].StreamID < out[j].StreamID
+		}
+		return out[i].StartMs < out[j].StartMs
+	}) {
+		sort.SliceStable(out, func(i, j int) bool {
+			if out[i].StreamID != out[j].StreamID {
+				return out[i].StreamID < out[j].StreamID
+			}
+			return out[i].StartMs < out[j].StartMs
+		})
+	}
+	return out
+}
+
+func (b *vptBuilder) bounds() (uint64, uint64) {
+	var lo, hi uint64
+	first := true
+	for _, r := range b.snapshot() {
+		if first || r.StartMs < lo {
+			lo = r.StartMs
+		}
+		if first || r.EndMs > hi {
+			hi = r.EndMs
+		}
+		first = false
+	}
+	return lo, hi
+}
+
+// flush appends newly closed rows to video.vpt and refreshes the header.
+//
+// Only closed rows are persisted, which keeps the file append-only in the
+// common case: one 40-byte write per GOP, ~1800 rows/hour.
+func (b *vptBuilder) flush() error {
+	if b.path == "" {
+		return nil
+	}
+	pending := len(b.rows) - b.persisted
+	if pending <= 0 && !b.dirty {
+		return nil
+	}
+	file, err := os.OpenFile(b.path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if pending > 0 {
+		buf := make([]byte, pending*vptRowSize)
+		for i := 0; i < pending; i++ {
+			encodeGopRow(buf[i*vptRowSize:(i+1)*vptRowSize], b.rows[b.persisted+i])
+		}
+		off := int64(vptHeaderSize) + int64(b.persisted)*vptRowSize
+		if _, err := file.WriteAt(buf, off); err != nil {
+			return err
+		}
+		b.persisted = len(b.rows)
+	}
+	lo, hi := b.bounds()
+	hdr := encodeVptHeader(vptHeader{
+		rowCount:      uint32(b.persisted),
+		minMs:         lo,
+		maxMs:         hi,
+		clockOffsetMs: b.clockOffset,
+		clockProv:     b.clockProv,
+	})
+	if _, err := file.WriteAt(hdr, 0); err != nil {
+		return err
+	}
+	// A partial rewrite could leave a stale tail behind a shorter table.
+	if err := file.Truncate(int64(vptHeaderSize) + int64(b.persisted)*vptRowSize); err != nil {
+		return err
+	}
+	b.dirty = false
+	return file.Sync()
+}
+
+// flushAll persists the open row too. Used at shutdown, where there is no
+// following keyframe to close it.
+func (b *vptBuilder) flushAll() error {
+	b.closeOpen()
+	return b.flush()
+}
+
+func nextKeyframe(rows []GopRow, idx int, streamID uint8) int {
+	_, hi := streamBounds(rows, streamID)
+	for j := idx + 1; j < hi; j++ {
+		if !rows[j].IsContinuation() {
+			return j
+		}
+	}
+	return -1
+}
+
+func lastKeyframe(rows []GopRow, streamID uint8) int {
+	lo, hi := streamBounds(rows, streamID)
+	now := videoNowMS()
+	// Skip only absurdly future rows (broken RTCP, hours ahead). A 2.5 s cap
+	// treated RTP/NTP skew of ~1 min as "future" and walked back to an old
+	// still — Live View froze on that shop GOP at 0 fps while new segments
+	// were still being written.
+	const futureSkewMs = 10 * 60 * 1000
+	for j := hi - 1; j >= lo; j-- {
+		if rows[j].IsContinuation() {
+			continue
+		}
+		if rows[j].StartMs > now+futureSkewMs {
+			continue
+		}
+		return j
+	}
+	return -1
+}
+
+// locateEntry finds the GOP a timestamp lands in: the last keyframe row at or
+// before atMs. Returns the index into rows, or -1.
+//
+// Rows are sorted, so this is the O(log K) search §8 says already exists for
+// keyframes, lifted to GOP granularity.
+func locateEntry(rows []GopRow, streamID uint8, atMs uint64) int {
+	lo, hi := streamBounds(rows, streamID)
+	if lo == hi {
+		return -1
+	}
+	// First row of this stream that starts strictly after atMs.
+	i := lo + sort.Search(hi-lo, func(k int) bool { return rows[lo+k].StartMs > atMs })
+	for j := i - 1; j >= lo; j-- {
+		if !rows[j].IsContinuation() {
+			return j
+		}
+	}
+	// atMs is before every keyframe: the earliest one is the only place a
+	// decoder can start, so hand that back rather than nothing.
+	for j := lo; j < hi; j++ {
+		if !rows[j].IsContinuation() {
+			return j
+		}
+	}
+	return -1
+}
+
+func streamBounds(rows []GopRow, streamID uint8) (int, int) {
+	lo := sort.Search(len(rows), func(k int) bool { return rows[k].StreamID >= streamID })
+	hi := sort.Search(len(rows), func(k int) bool { return rows[k].StreamID > streamID })
+	return lo, hi
+}
+
+// SegmentCoverage is one row of the coarse coverage map (§8.2): segment
+// granularity, so a 4 h range is ~240 rows and the scrubber can shade where
+// video exists instead of the user finding gaps by landing in one.
+type SegmentCoverage struct {
+	SegmentID uint32
+	StartMs   uint64
+	EndMs     uint64
+}
+
+func coverageOf(rows []GopRow, streamID uint8, fromMs, toMs uint64) []SegmentCoverage {
+	lo, hi := streamBounds(rows, streamID)
+	var out []SegmentCoverage
+	for i := lo; i < hi; i++ {
+		r := rows[i]
+		if r.EndMs < fromMs || r.StartMs > toMs {
+			continue
+		}
+		if n := len(out); n > 0 && out[n-1].SegmentID == r.SegmentID {
+			if r.EndMs > out[n-1].EndMs {
+				out[n-1].EndMs = r.EndMs
+			}
+			continue
+		}
+		out = append(out, SegmentCoverage{SegmentID: r.SegmentID, StartMs: r.StartMs, EndMs: r.EndMs})
+	}
+	return out
 }

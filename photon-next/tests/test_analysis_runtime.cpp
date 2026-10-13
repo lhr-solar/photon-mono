@@ -1,7 +1,7 @@
-#include "photon/control.hpp"
-#include "photon/protocol.hpp"
-#include "photon_ui/analysis_runtime.hpp"
-#include "photon_ui/tile_cache.hpp"
+#include "wire/control.hpp"
+#include "wire/protocol.hpp"
+#include "ui/analysis_runtime.hpp"
+#include "ui/tile_cache.hpp"
 #include "test_harness.hpp"
 
 #include <cstdint>

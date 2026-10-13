@@ -1,6 +1,6 @@
-#include "photon/canp.hpp"
-#include "photon/endian.hpp"
-#include "photon/vsd1.hpp"
+#include "wire/canp.hpp"
+#include "base/endian.hpp"
+#include "store/vsd1.hpp"
 #include "test_harness.hpp"
 
 #include <cstdint>

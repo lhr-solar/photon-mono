@@ -29,9 +29,9 @@ endif()
 
 project(photon-next VERSION 0.1.0 LANGUAGES C CXX)
 
-# Empty keeps daemon binaries under the build tree. The repo `photon build`
+# Empty keeps native binaries under the build tree. The repo `photon build`
 # sets this to <repo>/build so the server finds them beside its own exe.
-set(PHOTON_SHIP_DIR "" CACHE PATH "Directory for photon-backend, photon-index, and photon-ui")
+set(PHOTON_SHIP_DIR "" CACHE PATH "Directory for photon-ui and native server helpers")
 
 if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(WARNING
@@ -53,9 +53,9 @@ endfunction()
 find_program(CLANG_FORMAT_EXE NAMES clang-format HINTS "C:/Program Files/LLVM/bin")
 if(CLANG_FORMAT_EXE)
     file(GLOB_RECURSE PHOTON_FORMAT_FILES
-        "${CMAKE_SOURCE_DIR}/photon/*.cpp"
-        "${CMAKE_SOURCE_DIR}/photon/*.hpp"
-        "${CMAKE_SOURCE_DIR}/photon/*.h"
+        "${CMAKE_SOURCE_DIR}/src/*.cpp"
+        "${CMAKE_SOURCE_DIR}/src/*.hpp"
+        "${CMAKE_SOURCE_DIR}/src/*.h"
     )
     file(GLOB PHOTON_FORMAT_TEST_FILES
         "${CMAKE_SOURCE_DIR}/tests/*.cpp"
@@ -97,14 +97,15 @@ if(PHOTON_FRONTEND)
             "Use web/scripts/build.ps1 or:\n"
             "  emcmake cmake -S . -B .artifacts-web -G Ninja -DPHOTON_FRONTEND=ON -DBUILD_TESTING=OFF")
     endif()
-    add_subdirectory(photon)
-    add_subdirectory(photon/ui)
+    add_subdirectory(src)
+    add_subdirectory(src/ui)
 else()
-    add_subdirectory(photon)
+    add_subdirectory(src)
     add_subdirectory(tools/photon-export)
-    add_subdirectory(photon/daemon)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/../photon-server/workers ${CMAKE_BINARY_DIR}/server-workers)
+    include(CTest)
     if(PHOTON_NATIVE_UI)
-        add_subdirectory(photon/ui)
+        add_subdirectory(src/ui)
     endif()
     include(CTest)
     if(BUILD_TESTING)

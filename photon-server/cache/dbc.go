@@ -20,6 +20,7 @@ func ParseDBC(text string) (*SessionCache, error) {
 	var currentID uint32
 	var currentExtended bool
 	var currentMessage string
+	var currentDLC uint8
 	var hasMessage bool
 	valueTypes := make(map[SignalID]int)
 	scanner := bufio.NewScanner(strings.NewReader(text))
@@ -41,6 +42,7 @@ func ParseDBC(text string) (*SessionCache, error) {
 			currentID = uint32(id) & 0x1fffffff
 			currentExtended = uint32(id)&0x80000000 != 0
 			currentMessage = parts[2]
+			currentDLC = uint8(dlc)
 			hasMessage = true
 		case strings.HasPrefix(line, "SG_ ") && hasMessage:
 			parts := signalLine.FindStringSubmatch(line)
@@ -54,14 +56,17 @@ func ParseDBC(text string) (*SessionCache, error) {
 			}
 			factor, e1 := strconv.ParseFloat(strings.TrimSpace(parts[6]), 64)
 			offset, e2 := strconv.ParseFloat(strings.TrimSpace(parts[7]), 64)
-			if e1 != nil || e2 != nil || start < 0 || start > 65535 || length > 65535 {
+			min, e3 := strconv.ParseFloat(strings.TrimSpace(parts[8]), 64)
+			max, e4 := strconv.ParseFloat(strings.TrimSpace(parts[9]), 64)
+			if e1 != nil || e2 != nil || e3 != nil || e4 != nil || start < 0 || start > 65535 || length > 65535 {
 				continue
 			}
 			id := SignalID{CANID: currentID, Extended: currentExtended, Name: parts[1]}
 			cache.Definitions[id] = SignalDef{
-				ID: id, Message: currentMessage, StartBit: uint16(start), BitLength: uint16(length),
+				ID: id, Message: currentMessage, DLC: currentDLC, StartBit: uint16(start), BitLength: uint16(length),
 				LittleEndian: parts[4] == "1", Signed: parts[5] == "-",
 				Factor: factor, Offset: offset, Unit: parts[10],
+				Min: min, Max: max,
 			}
 		case strings.HasPrefix(line, "SIG_VALTYPE_ "):
 			parts := valueTypeLine.FindStringSubmatch(line)
@@ -88,6 +93,7 @@ func ParseDBC(text string) (*SessionCache, error) {
 		cache.Definitions[id] = def
 		cache.byCANID[id.CANID] = append(cache.byCANID[id.CANID], def)
 	}
+	cache.BuildIndex()
 	return cache, nil
 }
 

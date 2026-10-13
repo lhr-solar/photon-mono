@@ -1,90 +1,49 @@
 # Photon Server
 
-Photon Server is the ingest server on the **PC** (CANP, video store, fan-out, observer). It starts `photon-index --live-fanout` so the TSDB is written on this machine, and a **local UI** (`photon-backend` + `photon.html`) pointed at loopback fan-out. That local UI is how you watch the car when you are sitting at the PC. The laptop runs its own client when you want a different source (USB PCAN, another host). Oracle is a pipe *to* this process (public IP + WireGuard DNAT).
+Go owns CAN ingest, durable raw recordings, DBC decoding, Influx summaries and queries, browser sessions, replay, exports, events, and video delivery. Photon Next connects directly to `/ws`. The old C++ session daemon and its process launchers have been removed.
 
-Telemetry rides the lightweight CANP wire protocol over TCP. Incoming H.264 from the car/pit is accepted as RTP/UDP, stored as a **separate** compressed elementary stream (never re-encoded), and served via GOP pointers. See [docs/video-protocol.md](docs/video-protocol.md) for the wire format.
+## Code walkthrough
 
-## Architecture
+Follow one CAN frame through these files:
 
-```
-                            ┌───────────────┐
-                            │ Ingress Source│ (FPGA / CANP source)
-                            └───────┬───────┘
-                                    │ TCP :6100 (CANP)
-                                    ▼
-                         ┌────────────────────┐
-                         │   photon-server    │  the server (on the PC)
-                         │                    │
-                         └───┬───────────┬────┘
-            TCP :6500 (Fan-out)│           │ TCP :5400 (JSON)
-           ┌───────────────────┼───────────────────┐
-           ▼                   ▼                   ▼
-  ┌──────────────────┐ ┌──────────────────┐ ┌─────────────────┐
-  │ photon-index     │ │ PC local UI      │ │ laptop client   │
-  │ --live-fanout    │ │ photon-backend   │ │ photon-backend  │
-  │ 127.0.0.1:6500   │ │ 127.0.0.1:6500   │ │ --daq-host <pc> │
-  │ → data/tsdb/     │ │ :8080 / :8765    │ │ or --source pcan│
-  └────────┬─────────┘ └──────────────────┘ └─────────────────┘
-                 │ video.vpt
-                 ▼
-  Car/pit camera ── UDP :6200 RTP/H.264 ──► (Oracle WG DNAT) ──► VideoStore (./data/video/)
-                                                 │
-                                                 ▼
-                                          TCP :6700  video_locate / range
-                                          + photon-observer :5400
-```
+1. `server/main.go`: configuration, startup, listeners, shutdown; `readIngressConnection` reads each connection independently.
+2. `wire/canp.go`: incremental CANP framing, payload validation, timestamps and flags.
+3. `server/recordings.go`: source ownership, persist-before-delivery, DBC epochs, decoding workers, retries.
+4. `recording/store.go`: VSD1 raw segments, crash recovery, timestamp index and bounded replay pages.
+5. `cache/dbc.go`, `cache/decode.go`: immutable signal definitions, bit extraction, signed/IEEE values, mutable one-second tallies.
+6. `influx/client.go`: acknowledged native writes, parameterized SQL, exact integer strings.
+7. `server/browser.go`: authenticated HTTP and WebSocket connections; independent selection, cursor, speed and playback for every client.
+History delivery, cancellation, numerical jobs and analysis bundles are also in `server/browser.go`.
 
-## Ports
+Supporting features:
 
-| Port | Protocol | Bind | Purpose |
-|------|----------|------|---------|
-| `6100` | TCP | `0.0.0.0` | Ingress: CANP telemetry |
-| `6500` | TCP | `0.0.0.0` | Fan-out: downstream clients |
-| `5400` | TCP | `0.0.0.0` | Observer: JSON telemetry / TUI |
-| `6200` | UDP+TCP | `0.0.0.0` | Video ingress: RTP/H.264 |
-| `6700` | TCP | `0.0.0.0` | Video clients: live / replay / locate |
-| `6800` | UDP | `0.0.0.0` | Video live fan-out (PVU1 NALs) |
-| `8765` / `8080` | TCP | `127.0.0.1` | Local UI (photon-backend WS / photon.html) |
-| `2222` | TCP | `127.0.0.1` | photon-sshd admin shell / SFTP |
-
-## Build
-
-```bash
-go build -o photon-server ./server
-go build -o photon-observer ./observer
-```
+- `recording/registry.go`: validated DBC uploads, content hashes, original files and aliases.
+- `server/http_ui.go`: UI assets, HTTP authentication and crash reports. This replaces `local_ui.go`; there is no proxy to another backend.
+- `server/client.go`: compatibility TCP clients and their bounded RAM buffer. It does not write or delete recordings.
+- `server/config.go`: runtime flags and registered default DBC selection.
+- `server/events.go`: manual event marks, persisted thresholds and crossing detection.
+- `server/pcan_adapter.go`: local capture adapter control and transmit arming/watchdog.
+- `server/video_store.go`: compressed video storage and clock-aligned delivery.
 
 ## Run
 
-Production is the PC scheduled task: `scripts/install-autostart.ps1` registers a watchdog that keeps `photon-server` and `photon-sshd` running (`scripts/ensure-running.ps1`).
+From the repository root, `photon build`, then `photon server`. The Go server serves the page and `/ws` on HTTP port 8080. CANP ingress defaults to 6100. Configure InfluxDB 3 Core using `PHOTON_INFLUX_URL`, `PHOTON_INFLUX_DATABASE` and `PHOTON_INFLUX_TOKEN_FILE`. Credentials remain on the server. Use `photon_dev` for validation.
 
-By hand:
+`POST /api/dbcs?name=car.dbc` accepts up to 4 MiB of DBC text. Upload registers it without applying it. `dbc_apply` starts a new live decoding epoch; `recording_redecode` creates a historical version for a finished raw recording. Earlier versions remain selectable.
 
-```bash
-./photon-server            # defaults are correct; set PHOTON_PASSWORD or one is generated
-./photon-observer          # TUI against 127.0.0.1:5400
+Startup loads saved DBCs from `<data-dir>/dbcs/`. To select one for new recordings, pass `-dbc-hash <SHA-256 hash>` or set `PHOTON_DBC_HASH`; the hash is returned by the upload API and listed by `GET /api/dbcs`. An unknown hash fails startup. Without a configured hash, new recordings remain raw until a DBC is applied. The previous `-dbc` file option, `PHOTON_DBC` / `PHOTON_DBC_PATH`, and automatic bundled DBC loading have been removed. For a new installation, start without a default, upload the DBC, then restart with its hash or apply it through `dbc_apply`.
+
+`workers` contains the USB capture adapter and offline TSDB exporter. They do not own browser connections. Track Sim and its numerical worker have been removed.
+
+For a server review, start with the files in the walkthrough. `oracle/` and `workers/` contain deployment helpers and native tools. They support the running system and can be left out of the walkthrough.
+
+## Checks
+
+```powershell
+go build ./...
+go vet ./...
 ```
 
-`photon-server -h` lists the remaining flags (ports, data dir, DBC path). You should not need them; the defaults are the deployed topology.
+Test files have been removed from `photon-server`. Real Influx, physical PCAN and camera acceptance still require validation on the target environment. No production database was changed during the migration.
 
-## Storage
-
-Two stores on this PC, one timeline. `photon-server` starts `photon-index --live-fanout` so the TSDB is written here; the laptop must not write a second store (`--no-live-tail`).
-
-```
-data/
-├── tsdb/                     # telemetry store (photon-index --live-fanout)
-│   ├── catalog.json
-│   └── <session>/video.vpt   # GOP pointers into the video store
-└── video/
-    ├── video.vpt             # live pointer table
-    └── segments/             # compressed H.264 elementary stream (.h264 + .idx)
-```
-
-On startup the server recovers existing segments, rebuilds missing video indexes from the `.h264` streams, and resumes appending. `SIGINT`/`SIGTERM` drain and flush cleanly. Saturday check: `data/tsdb/catalog.json` grows on the PC.
-
-## Tests
-
-```bash
-go test ./...
-```
+The optional `cmd/photon-import` and `cmd/photon-sshd` programs have been removed, along with their terminal UI and SSH implementation. Existing Go recordings and browser replay remain available. Old VSD1/TSDB import commands are no longer provided.

@@ -1,4 +1,4 @@
-#include "photon/interp.hpp"
+#include "decode/interp.hpp"
 #include "test_harness.hpp"
 
 #include <cmath>

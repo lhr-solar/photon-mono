@@ -1,4 +1,4 @@
-#include "photon/video_index.hpp"
+#include "store/video_index.hpp"
 #include "test_harness.hpp"
 
 #include <cstdint>
@@ -619,7 +619,8 @@ void testGopRingBoundsAndKeyframeSearch() {
     GopRing ring;
     ring.setBudget(4096);
 
-    const std::vector<std::uint8_t> keyNal(1000, 0x65);
+    std::vector<std::uint8_t> keyNal(1000, 0x65);
+    keyNal[1] = 0x80; // first_mb_in_slice == 0
     const std::vector<std::uint8_t> deltaNal(300, 0x41);
 
     // 10 GOPs of 1 key + 3 delta at 2 s spacing: 19 kB against a 4 kB budget.
@@ -692,6 +693,25 @@ void testReplayWindowDropsOtherDaysGop() {
 }  // namespace
 
 void runVideoIndexTests() {
+    {
+        GopRing ring;
+        ring.push(1000, 1, std::vector<std::uint8_t>{0,0,1,0x65,0x80});
+        ring.push(1000, 1, std::vector<std::uint8_t>{0,0,1,0x65,0x40});
+        ring.push(1000, 1, std::vector<std::uint8_t>{0,0,1,0x65,0x60});
+        CHECK(ring.keyframeAtOrBefore(1000) == 0);
+    }
+    {
+        CursorPlayback pb;
+        CHECK(pb.update(500000, PlaybackMode::Committed).requestLocate);
+        pb.applyLocate(LocateReply{});
+        pb.markMissingVideoAt(500000);
+        for (int i = 0; i < 100; ++i) {
+            CHECK(!pb.update(500000, PlaybackMode::Committed).requestLocate);
+        }
+        CHECK(pb.update(501000, PlaybackMode::Committed).requestLocate);
+        pb.clear();
+        CHECK(!pb.missingVideoAt(500000));
+    }
     testGopRowWireLayout();
     testRequestFraming();
     testLocateReplyDecode();

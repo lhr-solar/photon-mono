@@ -1,6 +1,6 @@
-#include "photon/video_framing.hpp"
-#include "photon_ui/video_release.hpp"
-#include "photon/video_framing.hpp"
+#include "wire/video_framing.hpp"
+#include "ui/video_release.hpp"
+#include "wire/video_framing.hpp"
 #include "test_harness.hpp"
 
 #include <cstdint>
@@ -298,7 +298,9 @@ void runVideoTests() {
     CHECK(types[2] == 5);
     CHECK(flagsForNalType(7) == kFlagConfig);
     CHECK(flagsForNalType(5) == kFlagKeyframe);
-    CHECK(photon::video::nalIsTinyPslice(delta.payload));
+    CHECK(!photon::video::nalIsTinyPslice(delta.payload));
+    const std::vector<std::uint8_t> emptySlice{0, 0, 1, 0x41};
+    CHECK(photon::video::nalIsTinyPslice(emptySlice));
     std::vector<std::uint8_t> fatP(40, 0);
     fatP[3] = 1;
     fatP[4] = 0x41;
@@ -361,10 +363,11 @@ void runVideoTests() {
         packedTypes.push_back(t);
         packedFlags.push_back(photon::video::flagsForNalType(t));
     });
-    CHECK(packedTypes.size() == 3);
+    CHECK(packedTypes.size() == 4);
     CHECK(packedTypes[0] == 7);
     CHECK(packedTypes[1] == 8);
     CHECK(packedTypes[2] == 5);
+    CHECK(packedTypes[3] == 1);
     CHECK(packedFlags[2] == kFlagKeyframe);
 
     photon::vidx::GopRing late;

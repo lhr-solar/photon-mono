@@ -1,9 +1,9 @@
-#include "photon/control.hpp"
-#include "photon/protocol.hpp"
-#include "photon/tsdb.hpp"
-#include "photon_ui/history_io.hpp"
-#include "photon_ui/tile_cache.hpp"
-#include "photon_ui/tile_store.hpp"
+#include "wire/control.hpp"
+#include "wire/protocol.hpp"
+#include "store/tsdb.hpp"
+#include "ui/history_io.hpp"
+#include "ui/tile_cache.hpp"
+#include "ui/tile_store.hpp"
 #include "test_harness.hpp"
 
 #include <cstdint>
@@ -55,16 +55,7 @@ struct FakeTileStore : photon::ui::TileStore {
 
     void setScope(const std::string& sessionId, const std::string& dbcHash) override {
         scope = sessionId + "|" + dbcHash;
-        if (ignoreScope) {
-            return;
-        }
-        std::vector<Record> keep;
-        for (auto& r : records) {
-            if (r.scope == scope) {
-                keep.push_back(std::move(r));
-            }
-        }
-        records = std::move(keep);
+        // Scope selects records; the shared budget handles eviction.
     }
 
     bool requestRange(std::uint32_t signalId, std::uint8_t level, std::int64_t indexFrom,
@@ -814,6 +805,28 @@ void testRefusedReadIsRetried() {
 }  // namespace
 
 void runTilePersistTests() {
+    {
+        FakeTileStore store;
+        TileCache cache;
+        cache.setTileStore(&store);
+        cache.setSession("a", "dbc", 0, 600000);
+        ingestL0Tile(cache, 7, 0);
+        pump(cache, 0, 600000);
+        cache.setSession("b", "dbc", 0, 600000);
+        ingestL0Tile(cache, 7, 0);
+        pump(cache, 0, 600000);
+        CHECK(store.records.size() == 2);
+        TileCache fresh;
+        fresh.setTileStore(&store);
+        fresh.setSession("a", "dbc", 0, 600000);
+        LoggingIO io;
+        const std::uint32_t ids[] = {7};
+        fresh.requestCursorWindow(io, ids, 2000);
+        store.deliver();
+        fresh.requestCursorWindow(io, ids, 2000);
+        CHECK(fresh.persistRestoredCount() == 1);
+        CHECK(fresh.gatherL0(7, 0, 60000).t.size() == 3);
+    }
     testTileBlobRoundTrip();
     testRangeEnvelopeRoundTrip();
     testColdStartRestoresAndSuppressesRequest();

@@ -1,5 +1,5 @@
-#include "photon/control.hpp"
-#include "photon/pcan.hpp"
+#include "wire/control.hpp"
+#include "hw/pcan.hpp"
 #include "test_harness.hpp"
 
 #include <optional>

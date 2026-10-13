@@ -1,4 +1,4 @@
-#include "photon/dbc.hpp"
+#include "decode/dbc.hpp"
 #include "test_harness.hpp"
 
 #include <algorithm>

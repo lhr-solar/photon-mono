@@ -1,6 +1,6 @@
 #include "live_fanout.hpp"
-#include "photon/dbc.hpp"
-#include "photon/tsdb.hpp"
+#include "decode/dbc.hpp"
+#include "store/tsdb.hpp"
 
 #include <algorithm>
 #include <chrono>

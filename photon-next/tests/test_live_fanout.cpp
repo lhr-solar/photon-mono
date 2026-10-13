@@ -1,6 +1,6 @@
 #include "live_fanout.hpp"
-#include "photon/canp.hpp"
-#include "photon/net.hpp"
+#include "wire/canp.hpp"
+#include "net/net.hpp"
 
 #ifdef near
 #undef near

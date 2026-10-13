@@ -245,6 +245,19 @@ func flagsForNALType(nalType uint8) uint8 {
 	return flags
 }
 
+// Only first_mb_in_slice == 0 begins an IDR picture. The following IDR
+// slices are part of that same picture, not independent seek points.
+func flagsForAnnexBNAL(data []byte) uint8 {
+	flags := flagsForNALType(nalTypeOfAnnexB(data))
+	if flags&VideoFlagKeyframe != 0 {
+		i := annexBStartLen(data) + 1
+		if i >= len(data) || data[i]&0x80 == 0 {
+			flags &^= VideoFlagKeyframe
+		}
+	}
+	return flags
+}
+
 func splitAnnexB(data []byte) [][]byte {
 	if len(data) == 0 {
 		return nil

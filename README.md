@@ -1,6 +1,6 @@
 # Photon
 
-Two programs. `photon-server` is the ingest server. `photon-next` is the UI and the daemon that feeds it. Run either one, and name what the UI is reading.
+`photon-server` owns ingest, raw recordings, DBC decoding, Influx queries, browser sessions, and replay. `photon-next` is the display client. See [the Go replay service](photon-server/readme.md) for configuration, DBC uploads, and replay.
 
 ```text
 photon build
@@ -10,20 +10,20 @@ photon ui local
 photon ui daq HOST[:PORT]
 photon ui oracle
 photon ui pcan
-photon ui log PATH
+photon ui log RECORDING_ID
 photon station
 ```
 
-`server` is ingest only. The DAQ dials port `6100`. `photon server ingest PORT` moves that port. `ui local` reads the server on this machine (`127.0.0.1:6500`, video `:6700`). `ui daq` reads a CANP fan-out; the port defaults to 6500, and the public Oracle fan-out is `150.136.85.207:6110`. `ui oracle` is that public pipe. `ui pcan` reads a USB PCAN. `ui log` replays a VSD1 log. `station` runs the server and the UI together, with the UI on this machine's fan-out. `photon station ingest PORT` moves the DAQ port the same way.
+`server` accepts DAQ CANP on `6100` and serves the authenticated UI and `/ws` on `8080`. `server ingest PORT` changes CAN ingress. `ui local` and `ui daq HOST[:PORT]` connect directly to Go; the client port defaults to `8080`. `ui oracle` opens the public browser page. `ui pcan` starts a local Go server and USB capture adapter; local InfluxDB is required for plots. `ui log RECORDING_ID` opens an existing recording on the local Go server. `station` runs Go and the native display together.
 
-`photon build` writes `photon-server.exe`, `photon-backend.exe`, `photon-index.exe`, `photon-ui.exe`, and one `assets\` tree into `build\`. The server only looks next to that executable. The DBC source is `photon-next\assets\dbc`. The page, from `photon-next\web\scripts\build.ps1`, is copied to `build\ui\photon.html`.
+`photon build` writes the Go server, `photon-ui`, the PCAN adapter, the offline TSDB exporter, and one `assets\` tree into `build\`. The DBC source is `photon-next\assets\dbc`. The page, from `photon-next\web\scripts\build.ps1`, is copied to `build\ui\photon.html`.
 
-`PHOTON_PASSWORD` defaults to `laptop`. `PHOTON_DATA_DIR` defaults to `data\` in this repo. Flags after the use case are passed through to `photon-server` or `photon-backend`.
+`PHOTON_PASSWORD` defaults to `laptop` in the launcher. `PHOTON_DATA_DIR` defaults to `data\` in this repo. Flags after the use case are passed through to `photon-server` or `photon-ui`. Influx credentials stay on Go; use `photon_dev` for validation.
+
+Select a previously registered default DBC with `photon server -dbc-hash <SHA-256 hash>` or `PHOTON_DBC_HASH`. Startup loads saved DBCs from `<data-dir>/dbcs/`; without a selected default, new recordings remain raw until a DBC is applied. See the server README for upload and selection details.
 
 `Photon/` stays its own repo. That tree is the native desktop client and the embedded sharepoint.
 
 InfluxDB 3 Core and Grafana are installed programs on the PC. They bind to `127.0.0.1`. Dashboard JSON for those panels belongs in `dashboards/`.
 
-## Live checkouts
-
-`F:\lhr\photon-server` and `F:\lhr\photon-next` are still the running trees. MacBook ingest has not moved.
+This checkout is the server and the UI. There is no separate `photon-server` or `photon-next` repo beside it.

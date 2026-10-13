@@ -1,6 +1,6 @@
 #pragma once
 
-#include "photon/tsdb.hpp"
+#include "store/tsdb.hpp"
 
 #include <cstdint>
 #include <functional>

@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -223,18 +222,6 @@ func trimSince(in []time.Time, since time.Time) []time.Time {
 		return in
 	}
 	return append([]time.Time(nil), in[i:]...)
-}
-
-func WriteClientAuth(w io.Writer, password string) error {
-	if password == "" || len(password) > authPasswordMax {
-		return fmt.Errorf("invalid password")
-	}
-	buf := make([]byte, 5+len(password))
-	copy(buf[:4], authMagic)
-	buf[4] = byte(len(password))
-	copy(buf[5:], password)
-	_, err := w.Write(buf)
-	return err
 }
 
 func ReadClientAuth(r io.Reader) (string, error) {

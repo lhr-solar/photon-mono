@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -63,46 +64,6 @@ func (t *ClientTracker) Unregister(client *Client) {
 		t.retiredLastSend = last
 	}
 	delete(t.clients, client.ID)
-}
-
-func (t *ClientTracker) MinNextID(defaultID MessageID) MessageID {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	if len(t.clients) == 0 {
-		return defaultID
-	}
-
-	minID := MessageID(^uint64(0))
-	for _, client := range t.clients {
-		nextID := MessageID(client.nextID.Load())
-		if nextID < minID {
-			minID = nextID
-		}
-	}
-	return minID
-}
-
-func (t *ClientTracker) MaxLag(latestID MessageID) uint64 {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	var max uint64
-	for _, client := range t.clients {
-		nextID := MessageID(client.nextID.Load())
-		if latestID >= nextID {
-			lag := uint64(latestID - nextID + 1)
-			if lag > max {
-				max = lag
-			}
-		}
-	}
-	return max
-}
-
-func (t *ClientTracker) Count() int {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return len(t.clients)
 }
 
 func listenForClients(
@@ -243,4 +204,156 @@ func (t *ClientTracker) Snapshot(latestID MessageID) ClientsMetadata {
 		return snapshot.Clients[i].ID < snapshot.Clients[j].ID
 	})
 	return snapshot
+}
+
+type MessageID uint64
+
+const storeInspectBytes = 20 + 64*29
+const hotTailBytes = 32 * 1024 * 1024
+
+type Message struct {
+	ID      MessageID
+	Payload []byte
+}
+type StoreStats struct {
+	LatestID          MessageID
+	OldestID          MessageID
+	RetainedMessages  uint64
+	Segments          int
+	ActiveSegmentID   MessageID
+	ActiveSegmentSize int64
+	DiskBytes         int64
+	HotBytes          int64
+	PressureHigh      bool
+}
+
+type StoreRecord struct {
+	ID       MessageID
+	Bytes    int
+	Captured int
+	Data     [storeInspectBytes]byte
+}
+
+type StoreSnapshot struct {
+	Stats  StoreStats
+	Recent []StoreRecord
+}
+
+type StreamStore struct {
+	mu               sync.Mutex
+	cond             *sync.Cond
+	closed           bool
+	nextID, oldestID MessageID
+	hotMessages      map[MessageID][]byte
+	hotOrder         []MessageID
+	hotBytes         int64
+}
+
+func OpenLiveStreamStore() *StreamStore {
+	s := &StreamStore{nextID: 1, hotMessages: make(map[MessageID][]byte)}
+	s.cond = sync.NewCond(&s.mu)
+	return s
+}
+func (s *StreamStore) Append(payload []byte) (MessageID, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, errors.New("live buffer is closed")
+	}
+	if len(payload) > hotTailBytes {
+		return 0, errors.New("payload exceeds live buffer capacity")
+	}
+	id := s.nextID
+	s.nextID++
+	s.addHotLocked(id, payload)
+	s.oldestID = s.hotOrder[0]
+	s.cond.Broadcast()
+	return id, nil
+}
+func (s *StreamStore) ReadOrWait(id MessageID) (Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id >= s.nextID && !s.closed {
+		s.cond.Wait()
+	}
+	if s.closed {
+		return Message{}, errors.New("live buffer is closed")
+	}
+	if payload, ok := s.hotMessages[id]; ok {
+		return Message{id, payload}, nil
+	}
+	return Message{}, fmt.Errorf("message %d is no longer available", id)
+}
+func (s *StreamStore) Read(id MessageID) (Message, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if payload, ok := s.hotMessages[id]; ok {
+		return Message{id, payload}, true, nil
+	}
+	if id >= s.nextID {
+		return Message{}, false, nil
+	}
+	return Message{}, false, fmt.Errorf("message %d is no longer available", id)
+}
+func (s *StreamStore) statsLocked() StoreStats {
+	latest := s.nextID - 1
+	return StoreStats{LatestID: latest, OldestID: s.oldestID, RetainedMessages: uint64(len(s.hotMessages)), HotBytes: s.hotBytes}
+}
+func (s *StreamStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	s.cond.Broadcast()
+	return nil
+}
+func (s *StreamStore) StartIDForNewClient() MessageID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nextID
+}
+
+func (s *StreamStore) Stats() StoreStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.statsLocked()
+}
+
+func (s *StreamStore) Snapshot(recentLimit int) StoreSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshot := StoreSnapshot{Stats: s.statsLocked()}
+	if recentLimit <= 0 {
+		return snapshot
+	}
+	snapshot.Recent = make([]StoreRecord, 0, min(recentLimit, len(s.hotOrder)))
+	for i := len(s.hotOrder) - 1; i >= 0 && len(snapshot.Recent) < recentLimit; i-- {
+		id := s.hotOrder[i]
+		payload, ok := s.hotMessages[id]
+		if !ok {
+			continue
+		}
+		record := StoreRecord{ID: id, Bytes: len(payload)}
+		record.Captured = copy(record.Data[:], payload)
+		snapshot.Recent = append(snapshot.Recent, record)
+	}
+	return snapshot
+}
+
+func (s *StreamStore) addHotLocked(id MessageID, payload []byte) {
+	copyPayload := make([]byte, len(payload))
+	copy(copyPayload, payload)
+
+	s.hotMessages[id] = copyPayload
+	s.hotOrder = append(s.hotOrder, id)
+	s.hotBytes += int64(len(copyPayload))
+
+	for s.hotBytes > hotTailBytes && len(s.hotOrder) > 0 {
+		oldest := s.hotOrder[0]
+		s.hotOrder = s.hotOrder[1:]
+		if payload, ok := s.hotMessages[oldest]; ok {
+			s.hotBytes -= int64(len(payload))
+			delete(s.hotMessages, oldest)
+		}
+	}
 }
