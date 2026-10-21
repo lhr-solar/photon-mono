@@ -195,6 +195,12 @@ void SessionHub::stop() {
         }
     }
     trackSimJobs_.clear();
+    for (auto& job : arraySimJobs_) {
+        if (job.future.valid()) {
+            job.future.wait();
+        }
+    }
+    arraySimJobs_.clear();
     cancelAllAnalysisJobs();
     sources_.stop();
     videoRelay_.stop();
@@ -368,6 +374,7 @@ void SessionHub::tick(std::uint64_t nowTick) {
     streamVideoStatus(nowTick, false);
     checkTxWatchdog(nowTick);
     pollTrackSimJobs();
+    pollArraySimJobs();
     pollAnalysisJobs();
     pollHistoryJobs();
     historyRemote_.tick(nowTick);

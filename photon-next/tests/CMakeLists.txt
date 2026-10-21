@@ -49,3 +49,9 @@ target_compile_definitions(photon-tests PRIVATE PHOTON_ASSETS_DIR="${PHOTON_ASSE
 photon_apply_warnings(photon-tests)
 
 add_test(NAME photon-protocol COMMAND photon-tests)
+
+add_executable(photon-array-tests test_array_sim.cpp)
+target_link_libraries(photon-array-tests PRIVATE photon_array_sim photon_wire)
+target_include_directories(photon-array-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+photon_apply_warnings(photon-array-tests)
+add_test(NAME photon-array COMMAND photon-array-tests)

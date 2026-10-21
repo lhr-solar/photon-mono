@@ -1,4 +1,5 @@
 #include "photon/session.hpp"
+#include "photon/array_sim.hpp"
 
 #include "photon/log_sessions.hpp"
 #include "photon/video_index.hpp"
@@ -63,6 +64,9 @@ ctrl::Message SessionHub::helloAckMessage() const {
     auto ack = ctrl::helloAck({"daq_tcp", "log_replay", "pcan", "dbc", "track_sim", "video", "history",
                                "video_locate", "live_tail", "video_clock", "analysis_compute", "catalog"},
                               sources_.activeSource());
+    if (array_sim::available()) {
+        ack.features.push_back("array_sim");
+    }
     ack.driveDays = driveDays_;
     if (dbcLoaded_) {
         ack.dbcId = dbc_.label;
@@ -328,6 +332,9 @@ void SessionHub::handleText(ClientSession& client, std::string_view text, std::u
             break;
         case ctrl::Type::TrackSimRequest:
             enqueueTrackSim(client, *msg);
+            break;
+        case ctrl::Type::ArraySimRequest:
+            enqueueArraySim(client, *msg);
             break;
         case ctrl::Type::VideoSubscribe: {
             if (!client.helloOk) {
@@ -659,6 +666,7 @@ void SessionHub::handleText(ClientSession& client, std::string_view text, std::u
         case ctrl::Type::TxArmStatus:
         case ctrl::Type::ErrorAlert:
         case ctrl::Type::TrackSimResult:
+        case ctrl::Type::ArraySimResult:
         case ctrl::Type::SignalCatalog:
         case ctrl::Type::VideoStatus:
         case ctrl::Type::HistoryResult:

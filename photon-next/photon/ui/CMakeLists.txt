@@ -95,6 +95,7 @@ set(PHOTON_UI_SOURCES
     src/screens/scene3d.cpp
     src/screens/stubs.cpp
     src/screens/tracksim.cpp
+    src/screens/array_sim.cpp
 )
 
 set(PHOTON_MODELS_DIR "${CMAKE_SOURCE_DIR}/assets/models")

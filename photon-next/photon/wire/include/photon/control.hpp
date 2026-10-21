@@ -27,6 +27,8 @@ enum class Type {
     TrackSimList,
     TrackSimRequest,
     TrackSimResult,
+    ArraySimRequest,
+    ArraySimResult,
     SelectDbc,
     SignalCatalog,
     TxCanFrame,
@@ -122,6 +124,36 @@ struct Message {
     std::vector<tracksim::SegmentResult> trackSegments;
     std::vector<tracksim::TrackInfo> tracks;
     tracksim::MeasuredDrive measured;
+
+    // One stationary ArrayShading run; paths refer to the backend machine.
+    double arrayAzimuthDeg = 125.75;
+    double arrayElevationDeg = 72.05125;
+    double arrayDniWm2 = 850.0;
+    double arrayDhiWm2 = 110.0;
+    std::uint32_t arrayDirectSamples = 3;
+    std::uint32_t arrayHemisphereSamples = 64;
+    std::uint32_t arrayReflectionDepth = 2;
+    std::string arrayError;
+    std::uint64_t arrayTriangleCount = 0;
+    std::uint64_t arrayCellCount = 0;
+    std::uint64_t arrayTwoByThreeCount = 0;
+    std::uint64_t arrayOneByThreeCount = 0;
+    double arrayAreaM2 = 0.0;
+    double arrayMeanIrradianceWm2 = 0.0;
+    double arrayIncidentPowerW = 0.0;
+    struct ArrayCell {
+        std::uint32_t row = 0;
+        std::uint32_t column = 0;
+        std::uint32_t moduleId = 0;
+        double directWm2 = 0.0;
+        double diffuseWm2 = 0.0;
+        double reflectedWm2 = 0.0;
+        double totalWm2 = 0.0;
+        double activeAreaM2 = 0.0;
+        double incidentW = 0.0;
+        double directVisibility = 0.0;
+    };
+    std::vector<ArrayCell> arrayCells;
 
     // select_dbc / signal_catalog / hello_ack.dbc (additive, protocol v1)
     std::string dbcId;

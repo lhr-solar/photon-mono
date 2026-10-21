@@ -331,6 +331,10 @@ void Client::handleClose(const char* why, bool error) {
     wsHandshakeOk_ = false;
 #endif
     state_ = State::Disconnected;
+    if (arena_.arraySim.running) {
+        arena_.arraySim.running = false;
+        arena_.arraySim.error = "Connection lost during Array Sim run";
+    }
     arena_.pushLog(why, error);
     scheduleReconnect(nowMs());
 }
@@ -381,6 +385,11 @@ void Client::handleText(std::string_view text) {
         case ctrl::Type::TrackSimResult:
             arena_.applyTrackSimResult(*msg);
             arena_.pushLog(std::string("rx track_sim_result feasible=") + (msg->feasible ? "true" : "false"));
+            break;
+        case ctrl::Type::ArraySimResult:
+            arena_.applyArraySimResult(*msg);
+            arena_.pushLog(msg->arrayError.empty() ? "rx array_sim_result" : "array_sim: " + msg->arrayError,
+                           !msg->arrayError.empty());
             break;
         case ctrl::Type::SignalCatalog: {
             arena_.applySignalCatalog(*msg);

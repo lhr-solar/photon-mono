@@ -1,5 +1,6 @@
 #include "photon/canp.hpp"
 #include "photon/control.hpp"
+#include "photon/array_sim.hpp"
 #include "photon/protocol.hpp"
 #include "photon/video_udp.hpp"
 #include "photon/ws_handshake.hpp"
@@ -592,6 +593,50 @@ void testWsAcceptKey() {
     CHECK(accept == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
 }
 
+void testArraySimRoundTrip() {
+    photon::ctrl::Message request;
+    request.type = photon::ctrl::Type::ArraySimRequest;
+    request.path = "C:\\solar\\car.stl";
+    request.arrayAzimuthDeg = 135.0;
+    request.arrayElevationDeg = 55.0;
+    request.arrayDniWm2 = 840.0;
+    request.arrayDhiWm2 = 115.0;
+    request.arrayDirectSamples = 4;
+    request.arrayHemisphereSamples = 32;
+    request.arrayReflectionDepth = 2;
+    const auto decodedRequest = photon::ctrl::parse(photon::ctrl::serialize(request));
+    CHECK(decodedRequest.has_value());
+    CHECK(decodedRequest->type == photon::ctrl::Type::ArraySimRequest);
+    CHECK(decodedRequest->path == request.path);
+    CHECK(near(decodedRequest->arrayAzimuthDeg, 135.0));
+    CHECK(near(decodedRequest->arrayElevationDeg, 55.0));
+    CHECK(near(decodedRequest->arrayDniWm2, 840.0));
+    CHECK(decodedRequest->arrayDirectSamples == 4);
+    CHECK(decodedRequest->arrayHemisphereSamples == 32);
+
+    photon::ctrl::Message result;
+    result.type = photon::ctrl::Type::ArraySimResult;
+    result.arrayTriangleCount = 120;
+    result.arrayCellCount = 1;
+    result.arrayTwoByThreeCount = 1;
+    result.arrayAreaM2 = 0.0153;
+    result.arrayMeanIrradianceWm2 = 720.0;
+    result.arrayIncidentPowerW = 11.016;
+    result.arrayCells.push_back({2, 3, 1, 600.0, 100.0, 20.0, 720.0, 0.0153, 11.016, 0.75});
+    const auto decodedResult = photon::ctrl::parse(photon::ctrl::serialize(result));
+    CHECK(decodedResult.has_value());
+    CHECK(decodedResult->type == photon::ctrl::Type::ArraySimResult);
+    CHECK(decodedResult->arrayTriangleCount == 120);
+    CHECK(decodedResult->arrayCellCount == 1);
+    CHECK(near(decodedResult->arrayIncidentPowerW, 11.016));
+    CHECK(decodedResult->arrayCells.size() == 1);
+    CHECK(near(decodedResult->arrayCells[0].directVisibility, 0.75));
+    CHECK(near(decodedResult->arrayCells[0].incidentW, 11.016));
+
+    photon::array_sim::Request badInput;
+    CHECK(!photon::array_sim::run(badInput).error.empty());
+}
+
 }  // namespace
 
 int main() {
@@ -603,6 +648,7 @@ int main() {
     testVideoFrameRoundTrip();
     testVideoUdpAssemble();
     testControlJsonRoundTrip();
+    testArraySimRoundTrip();
     testCanpRoundTrip();
     testWsAcceptKey();
     runTrackSimTests();

@@ -456,6 +456,24 @@ void ClientArena::applyTrackSimResult(const ctrl::Message& msg) {
     trackSim.segments = msg.trackSegments;
 }
 
+void ClientArena::applyArraySimResult(const ctrl::Message& msg) {
+    arraySim.running = false;
+    arraySim.haveResult = msg.arrayError.empty();
+    arraySim.error = msg.arrayError;
+    if (!arraySim.haveResult) {
+        arraySim.cells.clear();
+        return;
+    }
+    arraySim.triangleCount = msg.arrayTriangleCount;
+    arraySim.cellCount = msg.arrayCellCount;
+    arraySim.twoByThreeCount = msg.arrayTwoByThreeCount;
+    arraySim.oneByThreeCount = msg.arrayOneByThreeCount;
+    arraySim.activeAreaM2 = msg.arrayAreaM2;
+    arraySim.meanIrradianceWm2 = msg.arrayMeanIrradianceWm2;
+    arraySim.incidentPowerW = msg.arrayIncidentPowerW;
+    arraySim.cells = msg.arrayCells;
+}
+
 void ClientArena::applyControlError(const ctrl::Message& msg) {
     if (!trackSim.solving && !trackSim.catalogPending) {
         return;

@@ -1,5 +1,8 @@
 add_subdirectory(base)
 add_subdirectory(synth)
+if(NOT EMSCRIPTEN)
+    add_subdirectory(array_sim)
+endif()
 add_subdirectory(wire)
 add_subdirectory(decode)
 add_subdirectory(store)

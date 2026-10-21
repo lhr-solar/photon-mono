@@ -150,6 +150,23 @@ private:
     void sendSolve(UiContext& ui);
 };
 
+class ArraySimScreen final : public Screen {
+public:
+    const char* id() const override { return "arraysim"; }
+    const char* label() const override { return "Array Sim"; }
+    void draw(UiContext& ui) override;
+
+private:
+    char stlPath_[1024]{};
+    float azimuthDeg_ = 125.75f;
+    float elevationDeg_ = 72.05125f;
+    float dniWm2_ = 850.0f;
+    float dhiWm2_ = 110.0f;
+    int directSamples_ = 3;
+    int hemisphereSamples_ = 64;
+    int reflectionDepth_ = 2;
+};
+
 class CanScreen final : public Screen {
 public:
     const char* id() const override { return "can"; }

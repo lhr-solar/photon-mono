@@ -113,6 +113,20 @@ struct TrackSimState {
     tracksim::MeasuredDrive measured;
 };
 
+struct ArraySimState {
+    bool running = false;
+    bool haveResult = false;
+    std::string error;
+    std::uint64_t triangleCount = 0;
+    std::uint64_t cellCount = 0;
+    std::uint64_t twoByThreeCount = 0;
+    std::uint64_t oneByThreeCount = 0;
+    double activeAreaM2 = 0.0;
+    double meanIrradianceWm2 = 0.0;
+    double incidentPowerW = 0.0;
+    std::vector<ctrl::Message::ArrayCell> cells;
+};
+
 class ClientArena {
 public:
     ClientArena();
@@ -138,6 +152,7 @@ public:
     void pushLog(std::string text, bool error = false);
     void applyTrackSimList(const ctrl::Message& msg);
     void applyTrackSimResult(const ctrl::Message& msg);
+    void applyArraySimResult(const ctrl::Message& msg);
     void applyControlError(const ctrl::Message& msg);
     void resetTrackSimCatalog();
     void beginTrackSimSolve(double timeBudgetS);
@@ -226,6 +241,7 @@ public:
     std::string txReason;
     std::vector<std::string> features;
     TrackSimState trackSim;
+    ArraySimState arraySim;
     std::vector<ctrl::CatalogSignal> signalCatalog;
     bool haveSignalCatalog = false;
     std::string dbcId;

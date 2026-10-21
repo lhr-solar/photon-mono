@@ -44,6 +44,52 @@ json::Value segmentResultsJson(const std::vector<tracksim::SegmentResult>& rows)
     return json::Value(std::move(arr));
 }
 
+json::Value arrayCellsJson(const std::vector<Message::ArrayCell>& cells) {
+    json::Array rows;
+    rows.reserve(cells.size());
+    for (const auto& cell : cells) {
+        json::Object row;
+        row.emplace("row", json::Value(static_cast<std::uint64_t>(cell.row)));
+        row.emplace("column", json::Value(static_cast<std::uint64_t>(cell.column)));
+        row.emplace("module_id", json::Value(static_cast<std::uint64_t>(cell.moduleId)));
+        row.emplace("direct_w_m2", json::Value(cell.directWm2));
+        row.emplace("diffuse_w_m2", json::Value(cell.diffuseWm2));
+        row.emplace("reflected_w_m2", json::Value(cell.reflectedWm2));
+        row.emplace("total_w_m2", json::Value(cell.totalWm2));
+        row.emplace("active_area_m2", json::Value(cell.activeAreaM2));
+        row.emplace("incident_w", json::Value(cell.incidentW));
+        row.emplace("direct_visibility", json::Value(cell.directVisibility));
+        rows.emplace_back(std::move(row));
+    }
+    return json::Value(std::move(rows));
+}
+
+std::vector<Message::ArrayCell> readArrayCells(const json::Value& value) {
+    std::vector<Message::ArrayCell> cells;
+    if (!value.isArray()) {
+        return cells;
+    }
+    cells.reserve(value.asArray().size());
+    for (const auto& row : value.asArray()) {
+        if (!row.isObject()) {
+            continue;
+        }
+        Message::ArrayCell cell;
+        cell.row = static_cast<std::uint32_t>(row["row"].asInt());
+        cell.column = static_cast<std::uint32_t>(row["column"].asInt());
+        cell.moduleId = static_cast<std::uint32_t>(row["module_id"].asInt());
+        cell.directWm2 = row["direct_w_m2"].asNumber();
+        cell.diffuseWm2 = row["diffuse_w_m2"].asNumber();
+        cell.reflectedWm2 = row["reflected_w_m2"].asNumber();
+        cell.totalWm2 = row["total_w_m2"].asNumber();
+        cell.activeAreaM2 = row["active_area_m2"].asNumber();
+        cell.incidentW = row["incident_w"].asNumber();
+        cell.directVisibility = row["direct_visibility"].asNumber();
+        cells.push_back(cell);
+    }
+    return cells;
+}
+
 std::vector<tracksim::SegmentResult> readSegmentResults(const json::Value& value) {
     std::vector<tracksim::SegmentResult> rows;
     if (!value.isArray()) {
@@ -224,6 +270,10 @@ std::string_view typeName(Type type) {
             return "track_sim_request";
         case Type::TrackSimResult:
             return "track_sim_result";
+        case Type::ArraySimRequest:
+            return "array_sim_request";
+        case Type::ArraySimResult:
+            return "array_sim_result";
         case Type::SelectDbc:
             return "select_dbc";
         case Type::SignalCatalog:
@@ -305,6 +355,12 @@ std::optional<Type> typeFromName(std::string_view name) {
     }
     if (name == "track_sim_result") {
         return Type::TrackSimResult;
+    }
+    if (name == "array_sim_request") {
+        return Type::ArraySimRequest;
+    }
+    if (name == "array_sim_result") {
+        return Type::ArraySimResult;
     }
     if (name == "select_dbc") {
         return Type::SelectDbc;
@@ -595,6 +651,29 @@ std::optional<Message> parse(std::string_view jsonText, std::string* error) {
     }
     if ((*root)["measured"].isObject()) {
         msg.measured = tracksim::measuredDriveFromValue((*root)["measured"]);
+    }
+    if (*type == Type::ArraySimRequest || *type == Type::ArraySimResult) {
+        const auto& a = (*root)["array"];
+        if (a.isObject()) {
+            if (a.contains("azimuth_deg")) msg.arrayAzimuthDeg = a["azimuth_deg"].asNumber();
+            if (a.contains("elevation_deg")) msg.arrayElevationDeg = a["elevation_deg"].asNumber();
+            if (a.contains("dni_w_m2")) msg.arrayDniWm2 = a["dni_w_m2"].asNumber();
+            if (a.contains("dhi_w_m2")) msg.arrayDhiWm2 = a["dhi_w_m2"].asNumber();
+            if (a.contains("direct_samples")) msg.arrayDirectSamples = static_cast<std::uint32_t>(a["direct_samples"].asInt());
+            if (a.contains("hemisphere_samples")) msg.arrayHemisphereSamples = static_cast<std::uint32_t>(a["hemisphere_samples"].asInt());
+            if (a.contains("reflection_depth")) msg.arrayReflectionDepth = static_cast<std::uint32_t>(a["reflection_depth"].asInt());
+        }
+        if (*type == Type::ArraySimResult) {
+            msg.arrayError = (*root)["error"].asString();
+            msg.arrayTriangleCount = static_cast<std::uint64_t>((*root)["triangle_count"].asInt());
+            msg.arrayCellCount = static_cast<std::uint64_t>((*root)["cell_count"].asInt());
+            msg.arrayTwoByThreeCount = static_cast<std::uint64_t>((*root)["two_by_three_modules"].asInt());
+            msg.arrayOneByThreeCount = static_cast<std::uint64_t>((*root)["one_by_three_modules"].asInt());
+            msg.arrayAreaM2 = (*root)["active_area_m2"].asNumber();
+            msg.arrayMeanIrradianceWm2 = (*root)["mean_irradiance_w_m2"].asNumber();
+            msg.arrayIncidentPowerW = (*root)["incident_power_w"].asNumber();
+            msg.arrayCells = readArrayCells((*root)["cells"]);
+        }
     }
     if (root->contains("start_ms")) {
         msg.startMs = static_cast<std::uint64_t>((*root)["start_ms"].asInt());
@@ -928,6 +1007,29 @@ std::string serialize(const Message& msg) {
         obj.emplace("end_soc", json::Value(msg.endSoc));
         obj.emplace("dE_dT", json::Value(msg.dEdT));
         obj.emplace("segments", segmentResultsJson(msg.trackSegments));
+    }
+    if (msg.type == Type::ArraySimRequest) {
+        putString(obj, "path", msg.path);
+        json::Object a;
+        a.emplace("azimuth_deg", json::Value(msg.arrayAzimuthDeg));
+        a.emplace("elevation_deg", json::Value(msg.arrayElevationDeg));
+        a.emplace("dni_w_m2", json::Value(msg.arrayDniWm2));
+        a.emplace("dhi_w_m2", json::Value(msg.arrayDhiWm2));
+        a.emplace("direct_samples", json::Value(static_cast<std::uint64_t>(msg.arrayDirectSamples)));
+        a.emplace("hemisphere_samples", json::Value(static_cast<std::uint64_t>(msg.arrayHemisphereSamples)));
+        a.emplace("reflection_depth", json::Value(static_cast<std::uint64_t>(msg.arrayReflectionDepth)));
+        obj.emplace("array", json::Value(std::move(a)));
+    }
+    if (msg.type == Type::ArraySimResult) {
+        putString(obj, "error", msg.arrayError);
+        obj.emplace("triangle_count", json::Value(msg.arrayTriangleCount));
+        obj.emplace("cell_count", json::Value(msg.arrayCellCount));
+        obj.emplace("two_by_three_modules", json::Value(msg.arrayTwoByThreeCount));
+        obj.emplace("one_by_three_modules", json::Value(msg.arrayOneByThreeCount));
+        obj.emplace("active_area_m2", json::Value(msg.arrayAreaM2));
+        obj.emplace("mean_irradiance_w_m2", json::Value(msg.arrayMeanIrradianceWm2));
+        obj.emplace("incident_power_w", json::Value(msg.arrayIncidentPowerW));
+        obj.emplace("cells", arrayCellsJson(msg.arrayCells));
     }
     if (msg.type == Type::VideoSubscribe) {
         obj.emplace("mode", json::Value(std::string(videoModeName(msg.videoMode))));

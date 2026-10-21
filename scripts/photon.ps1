@@ -152,6 +152,14 @@ function Start-Logged {
 function Start-Build {
     $ship = Join-Path $Root 'build'
     $cache = Join-Path $UiDir '.artifacts'
+    $vcpkgToolchain = $null
+    if ($env:VCPKG_ROOT) {
+        $vcpkgToolchain = Join-Path $env:VCPKG_ROOT 'scripts\buildsystems\vcpkg.cmake'
+        if (-not (Test-Path $vcpkgToolchain)) {
+            throw "VCPKG_ROOT is set but vcpkg.cmake was not found at $vcpkgToolchain"
+        }
+        $cache = Join-Path $UiDir '.artifacts-vcpkg'
+    }
     if (-not $DryRun) {
         New-Item -ItemType Directory -Force -Path $ship | Out-Null
     }
@@ -163,6 +171,10 @@ function Start-Build {
         '-D', 'CMAKE_CXX_COMPILER=clang++',
         '-D', ("PHOTON_SHIP_DIR=" + ($ship -replace '\\', '/'))
     )
+    if ($vcpkgToolchain) {
+        $cmakeArgs += @('-D', ("CMAKE_TOOLCHAIN_FILE=" + ($vcpkgToolchain -replace '\\', '/')))
+        $cmakeArgs += @('-D', 'PHOTON_REQUIRE_ARRAY_SIM=ON')
+    }
     $buildArgs = @('--build', $cache, '--target', 'photon-backend', 'photon-index', 'photon-ui')
     if ($DryRun) {
         Show-Command 'cmake' 'cmake' $null $cmakeArgs

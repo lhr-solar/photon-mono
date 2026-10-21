@@ -1,6 +1,7 @@
 #include "photon/session.hpp"
 
 #include "photon/analysis_compute.hpp"
+#include "photon/array_sim.hpp"
 #include "photon/csv_export.hpp"
 
 #include <cctype>
@@ -97,6 +98,69 @@ void SessionHub::pollTrackSimJobs() {
             sendControl(*client, msg);
         }
         it = trackSimJobs_.erase(it);
+    }
+}
+
+void SessionHub::enqueueArraySim(ClientSession& client, const ctrl::Message& req) {
+    if (!client.helloOk) {
+        sendControl(client, ctrl::errorAlert("bad_message", "hello required first"));
+        return;
+    }
+    if (arraySimJobs_.size() >= 1) {
+        ctrl::Message busy;
+        busy.type = ctrl::Type::ArraySimResult;
+        busy.arrayError = "Array Sim is already running";
+        sendControl(client, busy);
+        return;
+    }
+
+    array_sim::Request input;
+    input.stlPath = req.path;
+    input.azimuthDeg = req.arrayAzimuthDeg;
+    input.elevationDeg = req.arrayElevationDeg;
+    input.dniWm2 = req.arrayDniWm2;
+    input.dhiWm2 = req.arrayDhiWm2;
+    input.directSamplesPerAxis = req.arrayDirectSamples;
+    input.hemisphereSamples = req.arrayHemisphereSamples;
+    input.reflectionDepth = req.arrayReflectionDepth;
+
+    arraySimJobs_.push_back(TrackSimJob{
+        client.id,
+        std::async(std::launch::async, [input]() {
+            const array_sim::Result result = array_sim::run(input);
+            ctrl::Message message;
+            message.type = ctrl::Type::ArraySimResult;
+            message.arrayError = result.error;
+            message.arrayTriangleCount = result.triangleCount;
+            message.arrayCellCount = result.cellCount;
+            message.arrayTwoByThreeCount = result.twoByThreeModules;
+            message.arrayOneByThreeCount = result.oneByThreeModules;
+            message.arrayAreaM2 = result.activeAreaM2;
+            message.arrayMeanIrradianceWm2 = result.meanIrradianceWm2;
+            message.arrayIncidentPowerW = result.incidentPowerW;
+            message.arrayCells.reserve(result.cells.size());
+            for (const auto& cell : result.cells) {
+                message.arrayCells.push_back(ctrl::Message::ArrayCell{
+                    cell.row, cell.column, cell.moduleId, cell.directWm2,
+                    cell.diffuseWm2, cell.reflectedWm2, cell.totalWm2,
+                    cell.activeAreaM2, cell.incidentW, cell.directVisibility});
+            }
+            return message;
+        }),
+    });
+}
+
+void SessionHub::pollArraySimJobs() {
+    for (auto it = arraySimJobs_.begin(); it != arraySimJobs_.end();) {
+        if (it->future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            ++it;
+            continue;
+        }
+        auto message = it->future.get();
+        if (auto* client = findClient(it->clientId)) {
+            sendControl(*client, message);
+        }
+        it = arraySimJobs_.erase(it);
     }
 }
 

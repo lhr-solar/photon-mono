@@ -239,6 +239,7 @@ bool App::init() {
     screens_.push_back(std::make_unique<LiveViewScreen>());
     screens_.push_back(std::make_unique<Scene3dScreen>());
     screens_.push_back(std::make_unique<TrackSimScreen>());
+    screens_.push_back(std::make_unique<ArraySimScreen>());
     screens_.push_back(std::make_unique<CanScreen>());
     screens_.push_back(std::make_unique<NetworkScreen>());
     screens_.push_back(std::make_unique<AnalysisScreen>());

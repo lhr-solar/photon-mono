@@ -128,6 +128,7 @@ private:
         std::future<ctrl::Message> future;
     };
     std::vector<TrackSimJob> trackSimJobs_;
+    std::vector<TrackSimJob> arraySimJobs_;
     struct AnalysisJob {
         std::uint64_t clientId = 0;
         std::string jobId;
@@ -175,6 +176,8 @@ private:
     void checkTxWatchdog(std::uint64_t nowMs);
     void enqueueTrackSim(ClientSession& client, const ctrl::Message& req);
     void pollTrackSimJobs();
+    void enqueueArraySim(ClientSession& client, const ctrl::Message& req);
+    void pollArraySimJobs();
     void handleAnalysisCompute(ClientSession& client, const ctrl::Message& req);
     void handleAnalysisCancel(ClientSession& client, const ctrl::Message& req);
     void pollAnalysisJobs();

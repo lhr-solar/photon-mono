@@ -19,7 +19,7 @@ add_library(photon_daemon STATIC
     src/video_relay.cpp
 )
 target_include_directories(photon_daemon PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(photon_daemon PUBLIC photon-core photon-export-lib)
+target_link_libraries(photon_daemon PUBLIC photon-core photon-export-lib photon_array_sim)
 if(WIN32)
     target_link_libraries(photon_daemon PRIVATE ws2_32)
 endif()
