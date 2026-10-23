@@ -1,48 +1,52 @@
 <h1 align="center">Photon</h1>
-<p align="center">Telemetry for the LHR solar car.</p>
-<p align="center">Decoded CAN, the onboard camera, and the car on track. One playhead for every screen.</p>
+<p align="center">How to move around the page.</p>
+<p align="center">The top bar picks the screen. LOGS on the left picks the moment. Every screen follows that one playhead.</p>
 
 <p align="center">
   <a href="https://lhr-solar.github.io/photon-mono/">Project page</a>
 </p>
 
-<p align="center">
-  <img src="docs/assets/pit.png" alt="Pit during a saved run, with Logs open" width="960">
-</p>
-
-Pit during a saved run. Logs is open on the left: the timeline, the calendar, and the runs from that day.
+## Top bar
 
 <p align="center">
-  <img src="docs/assets/pit-idle.png" alt="Pit with Logs closed, waiting for a car" width="960">
+  <img src="docs/assets/nav.png" alt="Top bar: Pit, Dashboard, Plots, Mechanical, PDU, Live View, CAN, then Live, Play, and Pause" width="960">
 </p>
 
-Pit with Logs closed, before a car is connected.
+The names on the left are the screens. The underlined name is the one you are on. Click another name to move. Changing screens does not move the playhead.
 
-The same page is published with the Cayman theme at [lhr-solar.github.io/photon-mono](https://lhr-solar.github.io/photon-mono/).
+| You want | Open |
+| --- | --- |
+| Pack, contactors, and whether the car is ready | Pit |
+| Faults, coolant, motor limits, and the cell grid | Dashboard |
+| One channel, or a longer window | Plots |
+| Pedals, brakes, suspension, yaw, wheels, and the G-G | Mechanical |
+| A switched 12 V channel | PDU |
+| The camera and the 3D car, full size | Live View |
+| Whether a message is on the bus, and its rate | CAN |
 
-## Screens
+On the right are the car name, the day, and Live, Play, and Pause. The clock at the far right is the moment the whole page is showing. PLAY means a saved run is walking forward. `ready` means the page is connected.
 
-Pit is the home screen. Pack state, contactors, cell taps, the camera, and the 3D view sit on one page. The other screens are Dashboard, Plots, Mechanical, PDU, Live View, and CAN. Dynamics is a tab inside Mechanical.
+The green row under the names is BPS, VCU, and MC. OK means that controller is talking.
 
-Logs picks the run and the playhead. Charts on Mechanical draw the last 15 seconds at that playhead. Move the playhead before you decide a channel is dead.
+## Logs
 
-Plots is where a chart needs a different shape. Export a CSV from the open run when the stint needs a spreadsheet.
+<p align="center">
+  <img src="docs/assets/logs-drawer.png" alt="Logs drawer: playhead, hour minute and second bars, calendar, and the runs for that day" width="420">
+</p>
 
-## Run
+The vertical LOGS tab is on the left edge. Open it before you trust an empty chart.
 
-```text
-photon build
-photon server
-photon ui local
-photon ui daq HOST[:PORT]
-photon ui oracle
-photon ui pcan
-photon ui log RECORDING_ID
-photon station
-```
+The clock above the bars is the playhead. The word beside it is the mode: LIVE is the car right now, PLAY is a saved run walking forward, and PAUSE is that run held still.
 
-`photon server` accepts CAN on port 6100 and serves the page and `/ws` on port 8080. `photon build` writes the server, the page, the PCAN adapter, and the offline exporter into `build\`.
+- Drag the hour bar, then the minute bar, then the second bar. Each drag pauses on the new time, so the camera and the charts land on the same moment.
+- Live leaves the recording and returns to the car.
+- Play walks the open run forward. If no run is selected yet, it starts at the beginning.
+- Pause holds the playhead.
+- The calendar lists days that have data. Pick the day, then click a run. The highlighted row is the run you are in.
+- CSV on a run row exports that run. `vid` means the run has camera.
 
-`photon-server` owns ingest, recordings, DBC decoding, browser sessions, replay, and video. `photon-next` is the display client, as `photon.html` or `photon-ui`. See [the server readme](photon-server/readme.md) and [the photon-next readme](photon-next/README.md).
+Charts on Mechanical are the last 15 seconds at this playhead. Plots can show a longer window. A click in a Plots chart moves the playhead and pauses. A drag inside a Plots chart pans, and does not seek.
 
-`Photon/` is a separate repository. That tree is the native desktop client.
+You can change screens while a run is playing. The clock keeps moving. Pause first when you want a still frame and a chart of the same moment.
+
+The same tour is published at [lhr-solar.github.io/photon-mono](https://lhr-solar.github.io/photon-mono/).
