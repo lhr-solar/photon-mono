@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "vuepress build ."
+  },
+  "devDependencies": {
+    "vuepress": "1.9.10"
+  }
+}

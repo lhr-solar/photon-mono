@@ -1,11 +1,10 @@
 ---
-layout: default
 title: Top bar
-parent: Navigate
-nav_order: 1
 ---
 
-![Top bar: Pit, Dashboard, Plots, Mechanical, PDU, Live View, CAN, then Live, Play, and Pause]({{ '/assets/nav.png' | relative_url }})
+# Top bar
+
+![Top bar: Pit, Dashboard, Plots, Mechanical, PDU, Live View, CAN, then Live, Play, and Pause](./assets/nav.png)
 
 The names on the left are the screens. The underlined name is the one you are on. Click another name to move. Changing screens does not move the playhead.
 

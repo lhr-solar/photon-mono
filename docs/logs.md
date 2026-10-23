@@ -1,11 +1,10 @@
 ---
-layout: default
 title: Logs
-parent: Navigate
-nav_order: 2
 ---
 
-![Logs drawer: playhead, hour minute and second bars, calendar, and the runs for that day]({{ '/assets/logs-drawer.png' | relative_url }})
+# Logs
+
+![Logs drawer: playhead, hour minute and second bars, calendar, and the runs for that day](./assets/logs-drawer.png)
 
 The vertical LOGS tab is on the left edge. Open it before you trust an empty chart.
 
