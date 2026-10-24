@@ -86,9 +86,19 @@ func ParseDBC(text string) (*SessionCache, error) {
 	for id, def := range cache.Definitions {
 		def.ValueType = valueTypes[id]
 		cache.Definitions[id] = def
-		cache.byCANID[id.CANID] = append(cache.byCANID[id.CANID], def)
+		key := wireID(id)
+		cache.byCANID[key] = append(cache.byCANID[key], def)
 	}
 	return cache, nil
+}
+
+// wireID is the CAN ID as the car sends it: extended IDs carry bit 31, as in
+// the DBC, so standard and extended IDs with the same number stay apart.
+func wireID(id SignalID) uint32 {
+	if id.Extended {
+		return id.CANID | 0x80000000
+	}
+	return id.CANID
 }
 
 func LoadDBC(path string) (*SessionCache, error) {
@@ -100,5 +110,6 @@ func LoadDBC(path string) (*SessionCache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse DBC %q: %w", path, err)
 	}
+	cache.DBCSHA = SHA1Hex(data)
 	return cache, nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"io"
@@ -35,9 +36,8 @@ func main() {
 	}
 	defer store.Close()
 
-	SessionCache := cache.New()
-	cache.LoadDBC("")
-
+	// The tally is optional: a bad DBC or tally dir turns it off, never ingest.
+	tally := startTally(cfg, startedAt)
 
 	stats := store.Stats()
 	log.Printf("[photon-server] Store initialized: %d segments recovered (oldest ID: %d, latest ID: %d, disk bytes: %d)",
@@ -152,7 +152,7 @@ func main() {
 	defer localUI.Stop()
 
 	clients := NewClientTracker()
-	ingress := make(chan []byte, 1024)
+	ingress := make(chan ingressPayload, 1024)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -163,7 +163,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		appendLoop(store, ingress, SessionCache)
+		appendLoop(store, ingress, tally)
 	}()
 
 	// Ingress listener & connection tracking
@@ -171,7 +171,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		listenForIngress(ctx, ingressListener, ingress, &ingressConnWg)
+		listenForIngress(ctx, ingressListener, ingress, tally != nil, &ingressConnWg)
 	}()
 
 	// Client fan-out listener & connection tracking
@@ -282,10 +282,88 @@ func main() {
 	}
 }
 
-// Segment files stay. Plot rows are the one-second tally in package cache.
-// That package is not called from here. go test ./cache is the proof.
-func appendLoop(store *StreamStore, ingress <-chan []byte, sessionCache *cache.SessionCache) {
-	for payload := range ingress {
+// ingressPayload is one TCP read. Raw goes to the segment store unchanged;
+// Frames feed the one-second tally (see tallyWriter).
+type ingressPayload struct {
+	Raw    []byte
+	Frames []cache.Frame
+}
+
+const (
+	canpMagic      = 0x43414e31
+	canpVersion    = 3
+	canpMaxBatch   = 64
+	canpHeaderSize = 20
+	canpPacketSize = 29
+)
+
+// ingressDecoder turns a TCP byte stream of CANP batches into frames
+type ingressDecoder struct {
+	pending []byte
+}
+
+func (d *ingressDecoder) Decode(b []byte) []cache.Frame {
+	d.pending = append(d.pending, b...)
+	var frames []cache.Frame
+	for len(d.pending) >= canpHeaderSize {
+		p := d.pending
+		magic := binary.BigEndian.Uint32(p[0:4])
+		version := binary.BigEndian.Uint16(p[4:6])
+		count := int(binary.BigEndian.Uint16(p[6:8]))
+		if magic != canpMagic || version != canpVersion || count == 0 || count > canpMaxBatch {
+			d.pending = p[1:]
+			continue
+		}
+		need := canpHeaderSize + count*canpPacketSize
+		if len(p) < need {
+			break
+		}
+		ts := binary.BigEndian.Uint64(p[12:20])
+		for i := 0; i < count; i++ {
+			pkt := p[canpHeaderSize+i*canpPacketSize:]
+			age := uint64(binary.BigEndian.Uint16(pkt[13:15])) // δt[0]: ms before header timestamp
+			t := ts
+			if age <= ts {
+				t = ts - age
+			}
+			fr := cache.Frame{
+				TimeMs: t,
+				CANID:  binary.BigEndian.Uint32(pkt[0:4]),
+				DLC:    int(pkt[4]),
+			}
+			copy(fr.Data[:], pkt[5:13])
+			frames = append(frames, fr)
+		}
+		d.pending = p[need:]
+	}
+	return frames
+}
+
+// appendLoop owns the tally: folding and draining stay on this goroutine, so
+// the cache needs no lock. tally is nil when no DBC is loaded.
+func appendLoop(store *StreamStore, ingress <-chan ingressPayload, tally *tallyWriter) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	if tally != nil {
+		// main gives shutdown 5 s in all; leave the sink most of it.
+		defer tally.Close(3 * time.Second)
+	}
+
+	for {
+		var payload ingressPayload
+		select {
+		case p, ok := <-ingress:
+			if !ok {
+				return
+			}
+			payload = p
+		case <-tick.C:
+			if tally != nil {
+				tally.FlushClosed()
+			}
+			continue
+		}
+
 		if store.StoragePressureHigh() {
 			started := time.Now()
 			queueStats.blockStartedNS.Store(started.UnixNano())
@@ -295,17 +373,20 @@ func appendLoop(store *StreamStore, ingress <-chan []byte, sessionCache *cache.S
 			queueStats.blockStartedNS.Store(0)
 			queueStats.blockedNS.Add(time.Since(started).Nanoseconds())
 		}
-		if _, err := store.Append(payload); err != nil {
+		if _, err := store.Append(payload.Raw); err != nil {
 			// Append error during store closure or write failure
 		}
-		
+		if tally != nil {
+			tally.Fold(payload.Frames)
+		}
 	}
 }
 
 func listenForIngress(
 	ctx context.Context,
 	listener net.Listener,
-	ingress chan<- []byte,
+	ingress chan<- ingressPayload,
+	decode bool,
 	connWg *sync.WaitGroup,
 ) {
 	ingressStats.listening.Store(true)
@@ -328,12 +409,13 @@ func listenForIngress(
 		connWg.Add(1)
 		go func(c net.Conn) {
 			defer connWg.Done()
-			readIngressConnection(ctx, c, ingress)
+			readIngressConnection(ctx, c, ingress, decode)
 		}(conn)
 	}
 }
 
-func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []byte) {
+// decode is false when no DBC is loaded; frames would only be thrown away.
+func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- ingressPayload, decode bool) {
 	const readBuffer = 32 * 1024 // This reader owns the connection and its active-connection count.
 	defer conn.Close()
 	defer ingressStats.active.Add(-1)
@@ -351,27 +433,38 @@ func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []
 	}()
 
 	buf := make([]byte, readBuffer)
+	var decoder ingressDecoder
+
 	for {
 		n, err := conn.Read(buf)
+		if n > 0 {
+			ingressStats.bytes.Add(uint64(n))
+			ingressStats.reads.Add(1)
+			ingressStats.lastReceiveMS.Store(time.Now().UnixMilli())
+			payload := ingressPayload{Raw: append([]byte(nil), buf[:n]...)}
+			if decode {
+				payload.Frames = decoder.Decode(buf[:n])
+			}
+			// Send when there is room, even during shutdown; wait on ctx only
+			// when the queue is full, so shutdown cannot hang here.
+			select {
+			case ingress <- payload:
+			default:
+				select {
+				case ingress <- payload:
+				case <-ctx.Done():
+					return
+				}
+			}
+
+			observeQueueDepth(len(ingress))
+		}
 		if err != nil {
 			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
 				ingressStats.readFailures.Add(1)
 			}
 			return
 		}
-		ingressStats.bytes.Add(uint64(n))
-		ingressStats.reads.Add(1)
-		ingressStats.lastReceiveMS.Store(time.Now().UnixMilli())
-		payload := make([]byte, n)
-		// Read reuses buf, so give the append loop its own copy of these bytes.
-		copy(payload, buf[:n])
-		// All ingress connections feed the same channel and append loop.
-		ingress <- payload
-
-		
-		// decode frame and pass back to parent funciton
-
-		observeQueueDepth(len(ingress))
 	}
 }
 

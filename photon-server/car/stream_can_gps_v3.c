@@ -112,6 +112,7 @@ typedef struct
     uint8_t dlc;
     uint8_t data[8];
     uint8_t bus;   // 0 = can0, 1 = can1, 2 = GPS
+    uint64_t rx_ms;
 } __attribute__((packed)) can_packet_t;
 
 typedef struct
@@ -187,6 +188,19 @@ static uint64_t current_time_ms(void)
 
     return (uint64_t)ts.tv_sec * 1000ULL +
            (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+
+/*
+ * CAN ID as sent to the server. Extended IDs keep all 29 bits and carry
+ * bit 31, as the DBC writes them. Only standard can0 IDs get CAN0_GPS_MASK.
+ */
+static uint32_t wire_can_id(canid_t raw, int bus0)
+{
+    if (raw & CAN_EFF_FLAG)
+        return (raw & CAN_EFF_MASK) | 0x80000000u;
+
+    uint32_t id = raw & CAN_SFF_MASK;
+    return bus0 ? (id | CAN0_GPS_MASK) : id;
 }
 
 /* ============================================================
@@ -800,17 +814,19 @@ static void *can_thread(void *arg)
 
                 if (bytes_read > 0)
                 {
-                    uint32_t can_id = frame.can_id & CAN_SFF_MASK;
-
                     /*
-                     * CAN ID 0x000 is generated locally by
+                     * Standard CAN ID 0x000 is generated locally by
                      * timer_can_thread(). Ignore it, but still process
                      * can1 during this same poll iteration.
                      */
-                    if (can_id != 0x000)
+                    int is_timer = !(frame.can_id & CAN_EFF_FLAG) &&
+                                   (frame.can_id & CAN_SFF_MASK) == 0x000;
+
+                    if (!is_timer)
                     {
                         can_packet_t pkt;
-                        pkt.can_id = can_id | CAN0_GPS_MASK;
+                        pkt.rx_ms = current_time_ms();
+                        pkt.can_id = wire_can_id(frame.can_id, 1);
                         pkt.dlc = frame.can_dlc;
                         memcpy(pkt.data, frame.data, 8);
                         pkt.bus = 0;
@@ -828,7 +844,8 @@ static void *can_thread(void *arg)
                 if (bytes_read > 0)
                 {
                     can_packet_t pkt;
-                    pkt.can_id = frame.can_id & CAN_SFF_MASK;
+                    pkt.rx_ms = current_time_ms();
+                    pkt.can_id = wire_can_id(frame.can_id, 0);
                     pkt.dlc = frame.can_dlc;
                     memcpy(pkt.data, frame.data, 8);
                     pkt.bus = 1;
@@ -1054,6 +1071,7 @@ static void push_can(uint32_t id, const void *data, uint8_t len)
 {
     can_packet_t pkt;
 
+    pkt.rx_ms = current_time_ms();
     pkt.can_id = id | CAN0_GPS_MASK;
     pkt.dlc = len;
     memset(pkt.data, 0, 8);
@@ -1664,6 +1682,8 @@ int main(void)
                 {
                     uint32_t id = raw[i].can_id;
                     uint16_t dt[8] = {0};
+                    uint64_t age = batch.timestamp > raw[i].rx_ms ? batch.timestamp - raw[i].rx_ms : 0;
+                    dt[0] = age > 0xFFFF ? 0xFFFF : (uint16_t)age;   // clamp at ~65 s
 
                     batch.packets[i] = canpMakePacket(
                         id,

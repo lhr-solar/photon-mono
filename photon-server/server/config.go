@@ -20,6 +20,8 @@ const (
 	DefaultVideoClientPort  = 6700
 	DefaultVideoUdpPort     = 6800
 	DefaultDataDir          = "./data"
+	DefaultInfluxURL        = "http://127.0.0.1:8181"
+	DefaultInfluxDB         = "photon_dev"
 )
 
 // Config holds runtime configuration for the photon server.
@@ -37,6 +39,9 @@ type Config struct {
 	LiveWriter       string
 	Ui               string
 	Password         string
+	InfluxURL        string // InfluxDB 3 base URL for the live tally, or "off"
+	InfluxDB         string
+	InfluxToken      string // env only, so it stays out of process listings
 }
 
 // IngressAddr returns the TCP listen address for the ingress service.
@@ -160,6 +165,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		VideoClientPort:  DefaultVideoClientPort,
 		VideoUdpPort:     DefaultVideoUdpPort,
 		DataDir:          DefaultDataDir,
+		InfluxURL:        DefaultInfluxURL,
+		InfluxDB:         DefaultInfluxDB,
 	}
 
 	// Environment variable fallbacks
@@ -214,6 +221,13 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	if secret := getenvFirst(getenv, "PHOTON_PASSWORD"); secret != "" {
 		cfg.Password = secret
 	}
+	if u := getenvFirst(getenv, "PHOTON_INFLUX_URL"); u != "" {
+		cfg.InfluxURL = u
+	}
+	if db := getenvFirst(getenv, "PHOTON_INFLUX_DB"); db != "" {
+		cfg.InfluxDB = db
+	}
+	cfg.InfluxToken = getenvFirst(getenv, "PHOTON_INFLUX_TOKEN", "INFLUXDB3_AUTH_TOKEN")
 
 	fs := flag.NewFlagSet("photon-server", flag.ContinueOnError)
 	fs.SetOutput(output)
@@ -231,6 +245,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var liveWriterFlag string
 	var uiFlag string
 	var passwordFlag string
+	var influxURLFlag string
+	var influxDBFlag string
 
 	fs.StringVar(&hostFlag, "host", cfg.Host, "Bind host/IP address (e.g. 0.0.0.0 for all interfaces, 127.0.0.1 for local only)")
 	fs.StringVar(&hostFlag, "bind", cfg.Host, "Alias for -host")
@@ -249,10 +265,12 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.StringVar(&dataDirFlag, "data-dir", cfg.DataDir, "Directory path for persistent storage segments")
 	fs.StringVar(&dataDirFlag, "storage-path", cfg.DataDir, "Alias for -data-dir")
 	fs.StringVar(&tsdbDirFlag, "tsdb-dir", cfg.TsdbDir, "TSDB root (default: <data-dir>/tsdb)")
-	fs.StringVar(&dbcPathFlag, "dbc", cfg.DbcPath, "DBC file for the live TSDB writer")
+	fs.StringVar(&dbcPathFlag, "dbc", cfg.DbcPath, "DBC file for the live TSDB writer and the live tally")
 	fs.StringVar(&liveWriterFlag, "live-writer", cfg.LiveWriter, "photon-index binary that writes the TSDB, or 'off'")
 	fs.StringVar(&uiFlag, "ui", cfg.Ui, "local UI backend (photon-backend), or off")
 	fs.StringVar(&passwordFlag, "password", cfg.Password, "shared client password (env: PHOTON_PASSWORD)")
+	fs.StringVar(&influxURLFlag, "influx-url", cfg.InfluxURL, "InfluxDB 3 URL for the live tally, or 'off'")
+	fs.StringVar(&influxDBFlag, "influx-db", cfg.InfluxDB, "InfluxDB database for the live tally")
 
 	fs.Usage = func() {
 		fmt.Fprintf(output, "Usage of photon-server:\n")
@@ -267,10 +285,13 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -video-udp-port, -video-udp int UDP live video fan-out port (default %d, env: PHOTON_VIDEO_UDP_PORT)\n", DefaultVideoUdpPort)
 		fmt.Fprintf(output, "  -data-dir, -storage-path string Storage directory (default %q, env: PHOTON_DATA_DIR)\n", DefaultDataDir)
 		fmt.Fprintf(output, "  -tsdb-dir string             TSDB root (default <data-dir>/tsdb, env: PHOTON_TSDB_DIR)\n")
-		fmt.Fprintf(output, "  -dbc string                  DBC for live TSDB writer (env: PHOTON_DBC)\n")
+		fmt.Fprintf(output, "  -dbc string                  DBC for live TSDB writer and tally (env: PHOTON_DBC)\n")
 		fmt.Fprintf(output, "  -live-writer string          photon-index path, or off (env: PHOTON_LIVE_WRITER)\n")
 		fmt.Fprintf(output, "  -ui string                   local photon-backend + page, or off (env: PHOTON_UI)\n")
 		fmt.Fprintf(output, "  -password string             client password (env: PHOTON_PASSWORD; random if unset)\n")
+		fmt.Fprintf(output, "  -influx-url string           InfluxDB 3 URL for the live tally, or off (default %q, env: PHOTON_INFLUX_URL)\n", DefaultInfluxURL)
+		fmt.Fprintf(output, "  -influx-db string            InfluxDB database (default %q, env: PHOTON_INFLUX_DB)\n", DefaultInfluxDB)
+		fmt.Fprintf(output, "                               token: env PHOTON_INFLUX_TOKEN or INFLUXDB3_AUTH_TOKEN\n")
 	}
 
 	if err := fs.Parse(args); err != nil {
@@ -290,6 +311,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.LiveWriter = liveWriterFlag
 	cfg.Ui = uiFlag
 	cfg.Password = passwordFlag
+	cfg.InfluxURL = influxURLFlag
+	cfg.InfluxDB = influxDBFlag
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
