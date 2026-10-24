@@ -130,7 +130,7 @@ func listenForObservers(
 	startedAt time.Time,
 	store *StreamStore,
 	clients *ClientTracker,
-	ingress <-chan []byte,
+	ingress <-chan ingressPayload,
 	video *VideoStore,
 	gate *ClientGate,
 	connWg *sync.WaitGroup,
@@ -164,7 +164,7 @@ func writeServerMetadata(
 	startedAt time.Time,
 	store *StreamStore,
 	clients *ClientTracker,
-	ingress <-chan []byte,
+	ingress <-chan ingressPayload,
 	video *VideoStore,
 ) {
 	defer conn.Close()
