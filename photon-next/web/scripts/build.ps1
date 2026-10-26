@@ -25,7 +25,14 @@ $wasm = Join-Path $Build "photon.wasm"
 # (LinkError: import "a" "a" is not a callable).
 $ver = "20260906a"
 if (Test-Path $wasm) {
-    $ver = "20260905ab-" + (Get-FileHash $wasm -Algorithm SHA256).Hash.Substring(0, 10).ToLower()
+    # .NET rather than Get-FileHash: Windows PowerShell started from pwsh 7 cannot load that cmdlet.
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha.ComputeHash([IO.File]::ReadAllBytes($wasm))
+    } finally {
+        $sha.Dispose()
+    }
+    $ver = "20260905ab-" + ([BitConverter]::ToString($digest) -replace '-', '').Substring(0, 10).ToLower()
 }
 if (Test-Path $html) {
     $text = [IO.File]::ReadAllText($html)

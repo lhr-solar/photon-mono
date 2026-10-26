@@ -57,7 +57,8 @@ class CarSideC(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_car_streamer_compiles(self):
-        self.compile([SERVER_SRC / "car" / "stream_can_gps_v3.c"], self.tmp / "stream.o", ["-c"])
+        # The car build sits beside canp/ and includes "canp.h" from it.
+        self.compile([SERVER_SRC / "car" / "stream_can_gps_v3.c"], self.tmp / "stream.o", ["-c", "-I", str(CANP)])
 
     def test_canp_sink_compiles(self):
         self.compile([CANP / "canp.c", CANP / "test" / "sink.c"], self.tmp / "sink", ["-lpthread"])
@@ -75,22 +76,31 @@ class CarSideC(unittest.TestCase):
         for flag in ("client", "video-ingress", "video-client", "video-udp"):
             args += ["-" + flag, free_port()]
         server = Proc("canp-server", args, cwd=self.tmp)
+
+        def ingested() -> int:
+            with socket.create_connection(("127.0.0.1", observer), timeout=5) as sock:
+                sock.sendall(client_auth(PASSWORD))
+                line = sock.makefile("rb").readline()
+            return json.loads(line)["ingress"]["bytes"]
+
         try:
             server.wait_for_output("Ready to process streams", 30)
-            writer = Proc("canp-source", [source, "127.0.0.1"])
+            # printf into a file is block-buffered, so "connected" may never reach the log;
+            # line-buffer it for reading, but judge the connection by what the server counts.
+            line_buffered = ["stdbuf", "-oL"] if shutil.which("stdbuf") else []
+            writer = Proc("canp-source", [*line_buffered, source, "127.0.0.1"])
             try:
-                writer.wait_for_output("connected", 15)
+
+                def flowing():
+                    if writer.p.poll() is not None:
+                        raise AssertionError(f"the CANP source exited with {writer.p.returncode}:\n{writer.tail()}")
+                    return ingested() > 0
+
+                wait_until(flowing, 15, "the server to count CANP bytes", step=0.25)
                 time.sleep(2)
             finally:
                 writer.kill()
-
-            def ingested():
-                with socket.create_connection(("127.0.0.1", observer), timeout=5) as sock:
-                    sock.sendall(client_auth(PASSWORD))
-                    line = sock.makefile("rb").readline()
-                return json.loads(line)["ingress"]["bytes"] > 0
-
-            wait_until(ingested, 15, "the server to count CANP bytes")
+            self.assertGreater(ingested(), 100 * 29)
         finally:
             self.assertEqual(server.stop(), 0, server.tail())
 
