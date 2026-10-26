@@ -20,9 +20,9 @@ ctest --test-dir .artifacts --output-on-failure
 
 ## WASM page
 
-Pinned third-party (FetchContent into `.external/`): emsdk **6.0.7**, Dear ImGui `v1.92.9-docking`, ImPlot `v0.17`, Emscripten `--use-port=sdl2` + WebGL2/GLES3.
+Pinned third-party (FetchContent into `.external/`): emsdk **6.0.13**, Dear ImGui `v1.92.9-docking`, ImPlot `v0.17`, Emscripten `--use-port=sdl2` + WebGL2/GLES3.
 
-Install emsdk once: `.\web\scripts\setup-emsdk.ps1` (or clone `emscripten-core/emsdk` into `.external/emsdk` and `emsdk install latest; emsdk activate latest`).
+Install emsdk once: `.\web\scripts\setup-emsdk.ps1` installs and activates 6.0.13 (or clone `emscripten-core/emsdk` into `.external/emsdk` and `emsdk install 6.0.13; emsdk activate 6.0.13`).
 
 ```powershell
 .\web\scripts\build.ps1
@@ -36,7 +36,7 @@ emcmake cmake -S . -B .artifacts-web -G Ninja -DPHOTON_FRONTEND=ON -DBUILD_TESTI
 cmake --build .artifacts-web
 ```
 
-Outputs: `.artifacts-web/photon.{html,js,wasm,data}`. Do not mix `.artifacts-web` with the native `.artifacts` configure (`PHOTON_FRONTEND` defaults OFF). `build.ps1` copies the page to `photon-server/ui/` when that sibling exists.
+Outputs: `.artifacts-web/photon.{html,js,wasm,data}` and `.artifacts-web/models/`. Do not mix `.artifacts-web` with the native `.artifacts` configure (`PHOTON_FRONTEND` defaults OFF). In the monorepo, `photon build client --ui web` runs `build.ps1` and copies the page and `models/` to `build/ui/`.
 
 Serve: `.\web\scripts\serve.ps1`, open `http://127.0.0.1:8080/photon.html` (never `file://`). Headless protocol check: `python .\web\scripts\smoke_ws.py`.
 

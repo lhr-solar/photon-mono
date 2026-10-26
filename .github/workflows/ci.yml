@@ -1,0 +1,171 @@
+name: CI
+
+# Every push builds everything and runs every test. When all of it passes, the
+# bundles for that commit are attached to the run as downloadable artifacts.
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A newer push to a branch replaces its older run; every commit on main keeps its builds.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  server:
+    name: Server tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: photon-server/go.mod
+          cache-dependency-path: photon-server/go.sum
+      - name: go vet and test
+        run: .\photon.cmd test go
+      - name: Unfinished cache package (does not block)
+        continue-on-error: true
+        working-directory: photon-server
+        run: go test -count=1 ./cache
+
+  linux:
+    name: Server and car C code (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: photon-server/go.mod
+          cache-dependency-path: photon-server/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: go vet and test
+        working-directory: photon-server
+        run: |
+          go vet ./...
+          go test -count=1 ./server ./observer ./sshd ./cmd/...
+          go build -o ../build/photon-server ./server
+      - name: CANP source against photon-server
+        env:
+          PHOTON_E2E_STRICT: "1"
+          PHOTON_E2E_LOGS: ${{ runner.temp }}/e2e-logs
+        run: python -m unittest discover -s tests/e2e -t tests/e2e -p test_canp.py -v
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-linux
+          path: ${{ runner.temp }}/e2e-logs
+          retention-days: 7
+
+  windows:
+    name: Build and test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: photon-server/go.mod
+          cache-dependency-path: photon-server/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: |
+          python -m pip install --disable-pip-version-check ninja
+          # The runner image ships LLVM; install it if this image does not.
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) { choco install llvm -y --no-progress }
+          # Put clang ahead of anything else named clang.
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Versions
+        run: |
+          clang --version
+          cmake --version
+          ninja --version
+          go version
+      - name: emsdk
+        uses: actions/cache@v4
+        with:
+          path: photon-next/.external/emsdk
+          # Bump with EmsdkVersion in scripts/setup.ps1 and web/scripts/setup-emsdk.ps1.
+          key: emsdk-6.0.13-${{ runner.os }}
+      - name: Build
+        run: .\photon.cmd build server client tools --ui both --config Release
+      - name: C++ and decoder tests
+        run: .\photon.cmd test native --config Release
+      - name: End-to-end tests
+        env:
+          PHOTON_E2E_LOGS: ${{ runner.temp }}\e2e-logs
+        run: .\photon.cmd test e2e --strict
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-windows
+          path: ${{ runner.temp }}\e2e-logs
+          retention-days: 7
+      - name: Package
+        run: .\photon.cmd package dist
+      # Held here until the other jobs pass; publish turns it into the downloads.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staging
+          path: dist
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish builds
+    needs: [server, linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: staging
+          path: dist
+      - name: Name
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photon-station-${{ env.TAG }}
+          path: dist/station
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photon-server-${{ env.TAG }}
+          path: dist/server
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photon-client-desktop-${{ env.TAG }}
+          path: dist/client-desktop
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photon-tools-${{ env.TAG }}
+          path: dist/tools
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photon-symbols-${{ env.TAG }}
+          path: dist/symbols
+          if-no-files-found: error
+      - name: Drop the staging copy
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --jq '.artifacts[] | select(.name == "staging") | .id' |
+            xargs -r -I{} gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/{}"
