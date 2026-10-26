@@ -1,6 +1,6 @@
 # Build trees and binaries at any level
 /build/
-/dist/
+/out/
 .artifacts/
 .artifacts-*/
 .external/

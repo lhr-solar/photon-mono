@@ -29,9 +29,21 @@ endif()
 
 project(photon-next VERSION 0.1.0 LANGUAGES C CXX)
 
-# Empty keeps daemon binaries under the build tree. The repo `photon build`
-# sets this to <repo>/build so the server finds them beside its own exe.
-set(PHOTON_SHIP_DIR "" CACHE PATH "Directory for photon-backend, photon-index, and photon-ui")
+# Binaries stay in the build tree. Runnable bundles come from install components,
+# which the repo's photon build installs into out/dist (see README):
+#   server   photon-index, assets/dbc
+#   client   photon-backend, assets/dbc, assets/tracks
+#   desktop  photon-ui, assets/fonts, assets/models, assets/maps3d.*
+#   web      ui/ (the page and its models)
+#   tools    photon-export
+#   symbols  .pdb files for the above
+function(photon_install_symbols target)
+    if(WIN32 AND NOT EMSCRIPTEN)
+        # Release photon-backend links without /DEBUG, so a missing .pdb is fine.
+        install(FILES "$<TARGET_FILE_DIR:${target}>/$<TARGET_FILE_BASE_NAME:${target}>.pdb"
+            DESTINATION . COMPONENT symbols OPTIONAL)
+    endif()
+endfunction()
 
 if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(WARNING
@@ -94,14 +106,17 @@ if(PHOTON_FRONTEND)
     if(NOT EMSCRIPTEN)
         message(FATAL_ERROR
             "PHOTON_FRONTEND=ON requires the Emscripten toolchain.\n"
-            "Use web/scripts/build.ps1 or:\n"
-            "  emcmake cmake -S . -B .artifacts-web -G Ninja -DPHOTON_FRONTEND=ON -DBUILD_TESTING=OFF")
+            "Use web/scripts/build.ps1, or load emsdk_env and run:\n"
+            "  cmake --preset web-release")
     endif()
     add_subdirectory(photon)
     add_subdirectory(photon/ui)
 else()
     # Before tools/photon-export, which registers its own test.
     include(CTest)
+    # photon-index reads the DBC; photon-backend reads the DBCs and the track catalog.
+    install(DIRECTORY assets/dbc DESTINATION assets COMPONENT server)
+    install(DIRECTORY assets/dbc assets/tracks DESTINATION assets COMPONENT client)
     add_subdirectory(photon)
     add_subdirectory(tools/photon-export)
     add_subdirectory(photon/daemon)

@@ -8,13 +8,13 @@ import unittest
 from pathlib import Path
 
 from support import (
-    BUILD,
     EXAMPLE_DIR,
     EXAMPLE_LOG,
     MODE_PAUSE,
     MODE_PLAY,
     PhotonClient,
     Proc,
+    bundle,
     clip_batches,
     exe,
     free_port,
@@ -32,7 +32,8 @@ def fnv1a32(text: str) -> int:
 class ReplayBackend(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        require(exe("photon-backend"), BUILD / "assets" / "dbc")
+        assets = bundle("client") / "assets"
+        require(exe("client", "photon-backend"), assets / "dbc", assets / "tracks")
         # The backend writes a .photon-idx cache beside the log; keep that out of examples\.
         cls.tmp = Path(tempfile.mkdtemp(prefix="photon-e2e-replay-"))
         cls.log = cls.tmp / EXAMPLE_LOG.name
@@ -41,12 +42,12 @@ class ReplayBackend(unittest.TestCase):
         cls.backend = Proc(
             "backend-replay",
             [
-                exe("photon-backend"),
+                exe("client", "photon-backend"),
                 "--ws-port", cls.port,
                 "--source", "log_replay",
                 "--log-path", cls.log,
                 "--no-live-tail",
-                "--assets-dir", BUILD / "assets",
+                "--assets-dir", assets,
             ],
         )
         try:

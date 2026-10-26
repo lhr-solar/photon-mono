@@ -16,8 +16,8 @@ PCAN / DAQ TCP / log replay
                 │  WebSocket 127.0.0.1:8765
                 ▼
      ImGui UI  photon/ui
-       WASM:   .artifacts-web/photon.html
-       native: .artifacts/photon-ui.exe
+       WASM:   photon.html (web-release preset)
+       native: photon-ui.exe (desktop-* presets)
 ```
 
 `photon-server` is the ingest server on the PC. Oracle is a pipe to it. Laptop clients connect to the PC fan-out (`:6500` CANP, `:6700` video). `photon-index --live-fanout` writes `data/tsdb` on the PC.
@@ -42,36 +42,40 @@ PCAN / DAQ TCP / log replay
 
 ## Build
 
-Windows host with clang, Ninja, CMake 3.25+:
+In the monorepo, `photon build` at the repo root builds this and assembles the runnable bundles in `out\dist` (see the root README). Underneath it are the presets in `CMakePresets.json`, which also work on their own from this folder. Windows host with clang, Ninja, CMake 3.25+:
 
 ```powershell
-cmake -S . -B .artifacts -G Ninja -D CMAKE_C_COMPILER=clang -D CMAKE_CXX_COMPILER=clang++
-cmake --build .artifacts
+cmake --preset desktop-debug
+cmake --build --preset desktop-debug
 ```
 
-WASM page (emsdk once via `.\web\scripts\setup-emsdk.ps1`):
+| Preset | Builds | Tree |
+| --- | --- | --- |
+| `headless-debug`, `headless-release` | `photon-backend`, `photon-index`, `photon-export`, tests; no SDL, ImGui, or WebView2 | `..\out\build\headless-<config>` |
+| `desktop-debug`, `desktop-release` | all of that plus `photon-ui` | `..\out\build\desktop-<config>` |
+| `web-release` | the WASM page | `..\out\build\web-release` |
 
-```powershell
-.\web\scripts\build.ps1
-```
+The WASM page needs emsdk loaded first, so build it with `.\web\scripts\build.ps1` (it installs emsdk once through `.\web\scripts\setup-emsdk.ps1`).
 
-Binaries land at `.artifacts/photon/daemon/photon-backend.exe`, `.artifacts/photon-ui.exe`, and `.artifacts-web/photon.html`. Do not mix the native `.artifacts` tree with the WASM configure.
+In a tree, binaries are at `photon\daemon\photon-backend.exe`, `photon\daemon\photon-index.exe`, `photon-ui.exe`, and `photon.html`. Run from a tree, they read `assets\` from this checkout. Install components (`server`, `client`, `desktop`, `web`, `tools`, `symbols`) copy each program with the assets it reads, for running anywhere: `cmake --install ..\out\build\desktop-debug --component client --prefix <dir>`.
 
 ## Run
 
-The PC console is started by photon-server. On a laptop (or any other source: `--source pcan`):
+The PC console is started by photon-server. On a laptop, `photon client <pc-ip>` from the repo root runs the client bundle. From a tree (or any other source: `--source pcan`):
 
 ```powershell
-.\.artifacts\photon\daemon\photon-backend.exe --no-live-tail --daq-host <pc-ip>
+..\out\build\desktop-debug\photon\daemon\photon-backend.exe --no-live-tail --daq-host <pc-ip>
 .\web\scripts\serve.ps1
 ```
 
-Open **http://127.0.0.1:8080/photon.html**. Do not open `photon.html` as `file://`. Same UI as a desktop exe: `.artifacts\photon-ui.exe --ws ws://127.0.0.1:8765`.
+Open **http://127.0.0.1:8080/photon.html**. Do not open `photon.html` as `file://`. Same UI as a desktop exe: `..\out\build\desktop-debug\photon-ui.exe --ws ws://127.0.0.1:8765`.
 
 `photon-backend -h` lists the remaining flags (ws port, source, password). You should not need them; the defaults are the deployed topology.
 
 ## Tests
 
 ```powershell
-ctest --test-dir .artifacts --output-on-failure
+ctest --preset desktop-debug
 ```
+
+`photon test` at the repo root runs these, the Go server tests, and the end-to-end tests against the bundles.

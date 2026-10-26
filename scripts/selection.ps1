@@ -6,7 +6,8 @@
 #   tools    photon-export, photon-observer
 #
 #   --ui desktop|web|both     which client UI; naming a UI implies client
-#   --config Debug|Release    native build type (Debug when omitted)
+#   --config Debug|Release    native build type (Debug when omitted); picks the
+#                             headless-<config> or desktop-<config> CMake preset
 #
 # No component words means server and the desktop client.
 
@@ -37,9 +38,10 @@ function Read-Selection {
                 }
                 $ui = $value
             } else {
-                $configs = @{ debug = 'Debug'; release = 'Release'; relwithdebinfo = 'RelWithDebInfo' }
+                # The presets in photon-next\CMakePresets.json.
+                $configs = @{ debug = 'Debug'; release = 'Release' }
                 if (-not $configs.ContainsKey($value)) {
-                    throw ('--config is Debug, Release, or RelWithDebInfo, not ' + $Words[$i + 1])
+                    throw ('--config is Debug or Release, not ' + $Words[$i + 1])
                 }
                 $sel.Config = $configs[$value]
             }

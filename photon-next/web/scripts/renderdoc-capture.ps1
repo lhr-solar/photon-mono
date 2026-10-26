@@ -3,7 +3,8 @@
 
 $ErrorActionPreference = "Continue"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-$Web = Join-Path $Root ".artifacts-web"
+# The web-release preset's binaryDir (CMakePresets.json).
+$Web = Join-Path $Root "..\out\build\web-release"
 $Html = Join-Path $Web "photon.html"
 $Captures = Join-Path $Web "captures"
 $Profile = Join-Path $Web "chrome-rdc"

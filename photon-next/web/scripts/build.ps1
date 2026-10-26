@@ -1,7 +1,8 @@
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $Emsdk = Join-Path $Root ".external\emsdk"
-$Build = Join-Path $Root ".artifacts-web"
+# The web-release preset's binaryDir (CMakePresets.json).
+$Build = Join-Path $Root "..\out\build\web-release"
 
 if (-not (Test-Path (Join-Path $Emsdk "emsdk_env.ps1"))) {
     & (Join-Path $PSScriptRoot "setup-emsdk.ps1")
@@ -9,14 +10,21 @@ if (-not (Test-Path (Join-Path $Emsdk "emsdk_env.ps1"))) {
 
 . (Join-Path $Emsdk "emsdk_env.ps1")
 
-if (-not (Get-Command emcmake -ErrorAction SilentlyContinue)) {
-    throw "emcmake not on PATH after emsdk_env.ps1"
+if (-not $env:EMSDK) {
+    throw "EMSDK is not set after emsdk_env.ps1"
 }
 
-emcmake cmake -S $Root -B $Build -G Ninja -DPHOTON_FRONTEND=ON -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-cmake --build $Build
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+# The preset finds the Emscripten toolchain through EMSDK, which emsdk_env.ps1 just set.
+Push-Location $Root
+try {
+    cmake --preset web-release
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cmake --build --preset web-release
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} finally {
+    Pop-Location
+}
+$Build = (Resolve-Path $Build).Path
 
 $html = Join-Path $Build "photon.html"
 $js = Join-Path $Build "photon.js"
@@ -102,6 +110,6 @@ $pyFile = Join-Path $Build "_check_glue.py"
 [IO.File]::WriteAllText($pyFile, $py)
 python $pyFile $js $wasm
 if ($LASTEXITCODE -ne 0) { throw "photon.js / photon.wasm import modules do not match" }
-# The repo's photon build copies this page and models\ into build\ui.
+# The repo's photon build installs this page and models\ (the web component) into its bundles' ui\.
 
 Write-Host "Built $Build\photon.html ?v=$ver"

@@ -10,6 +10,11 @@ $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $ServerDir = Join-Path $Root 'photon-server'
 $UiDir = Join-Path $Root 'photon-next'
+# Build trees (CMake presets put theirs here) and the runnable bundles assembled from them.
+$BuildRoot = Join-Path $Root 'out\build'
+$GoOut = Join-Path $BuildRoot 'go'
+$WebTree = Join-Path $BuildRoot 'web-release'
+$Dist = Join-Path $Root 'out\dist'
 . (Join-Path $PSScriptRoot 'selection.ps1')
 
 function Show-Use {
@@ -20,40 +25,36 @@ Photon is two programs. Run the one you need, and name the use case.
       Install what those pieces need to build on this machine.
 
   photon build [server] [client] [station] [tools] [--ui desktop|web|both] [--config Debug|Release]
-      Build those pieces into build\. The server finds photon-backend,
-      photon-index, the page in ui\, and assets beside itself.
+      Build those pieces, then assemble one runnable bundle each under out\dist:
         server   photon-server, photon-sshd, photon-index (no desktop UI libraries)
         client   photon-backend and the UI --ui names (desktop when omitted)
         station  server and client with the web page photon-server serves
         tools    photon-export, photon-observer
+      symbols holds the .pdb files. Build trees are out\build\<preset>.
       Plain photon build is server and the desktop client.
 
   photon test [go] [native] [e2e] [--config Debug|Release] [--strict]
       go       go vet and the photon-server package tests
-      native   the C++ tests (ctest) and the video decoder glue test
-      e2e      tests\e2e against build\: replay, a whole station, the page
+      native   ctest in each native tree for --config, and the video decoder glue test
+      e2e      tests\e2e against out\dist: replay, a whole station, the page
                in a headless browser, import and export. --strict fails
                on a missing piece instead of skipping it.
       No words runs all three.
 
-  photon package DIR
-      Copy build\ into one folder per bundle under DIR: server, station,
-      client-desktop, tools, and symbols (the .pdb files).
-
   photon clean [--deps]
-      Remove build\ and the photon-next build trees (.artifacts*).
+      Remove out\ (build trees and bundles), and the old build\ and .artifacts* trees.
       --deps also removes photon-next\.external (fetched libraries, emsdk).
       data\ is never touched.
 
   photon server [ingest PORT]
-      Ingest only. The DAQ dials the CAN ingress on port 6100, or PORT.
+      Ingest only, from out\dist\server. The DAQ dials the CAN ingress on port 6100, or PORT.
       The video store and the fan-out stay up. The UI stays down.
 
   photon station [ingest PORT]
-      Server and the web UI on this machine, reading this server's fan-out.
+      Server and the web UI on this machine, from out\dist\station.
 
   photon client [FROM] [--ui desktop|web]
-      The UI, reading FROM:
+      The UI from out\dist\client, reading FROM:
         (nothing)     the server on this machine, 127.0.0.1:6500
         HOST[:PORT]   a server's fan-out; the port defaults to 6500
         oracle        the public Oracle pipe, 150.136.85.207:6110
@@ -104,25 +105,9 @@ function Get-DataDir {
     return $dir.Trim()
 }
 
-function Find-Ship {
-    param([string]$Name)
-    $path = Join-Path $Root (Join-Path 'build' $Name)
-    if (Test-Path -LiteralPath $path) {
-        return (Resolve-Path -LiteralPath $path).Path
-    }
-    return $null
-}
-
-function Find-Backend {
-    return Find-Ship 'photon-backend.exe'
-}
-
-function Find-NativeUi {
-    return Find-Ship 'photon-ui.exe'
-}
-
-function Find-Page {
-    $path = Join-Path $Root 'build\ui\photon.html'
+function Find-InBundle {
+    param([string]$Bundle, [string]$Name)
+    $path = Join-Path $Dist (Join-Path $Bundle $Name)
     if (Test-Path -LiteralPath $path) {
         return (Resolve-Path -LiteralPath $path).Path
     }
@@ -179,15 +164,14 @@ function Invoke-Step {
     }
 }
 
-# Copy what is inside From into To, so a second copy does not nest From inside To.
-function Copy-Tree {
-    param([string]$From, [string]$To)
-    if ($DryRun) {
-        Show-Command 'copy' $From $null @('->', $To)
-        return
-    }
-    New-Item -ItemType Directory -Force -Path $To | Out-Null
-    Copy-Item -Path (Join-Path $From '*') -Destination $To -Recurse -Force
+# Processes whose exe lives under one of these folders. Windows will not delete a running
+# exe, so clean and the bundle swap stop on these instead of leaving half a folder.
+function Get-RunningUnder {
+    param([string[]]$Dirs)
+    return @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $path = $_.Path
+            $path -and @($Dirs | Where-Object { $path.StartsWith($_ + '\', [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+        })
 }
 
 function Test-Toolchain {
@@ -212,6 +196,181 @@ function Test-Toolchain {
     }
 }
 
+# The native preset for a build: desktop only when photon-ui is wanted, so a server
+# or web-only client never fetches SDL, ImGui, or WebView2.
+function Get-NativePreset {
+    param([bool]$Desktop, [string]$Config)
+    $kind = 'headless'
+    if ($Desktop) {
+        $kind = 'desktop'
+    }
+    return $kind + '-' + $Config.ToLowerInvariant()
+}
+
+# What each bundle under out\dist holds: install components from the native tree,
+# Go programs from out\build\go, and the page (the web component) from the web tree.
+function Get-Bundles {
+    param($Sel)
+    $bundles = [ordered]@{}
+    $dbc = 'assets\dbc\carcan_telemcan.dbc'
+    if ($Sel.Server) {
+        $bundles['server'] = @{
+            Native = @('server'); Go = @('photon-server.exe', 'photon-sshd.exe'); Web = $false
+            Expect = @('photon-server.exe', 'photon-sshd.exe', 'photon-index.exe', $dbc)
+        }
+    }
+    if ($Sel.Client) {
+        $native = @('client')
+        $expect = @('photon-backend.exe', $dbc, 'assets\tracks')
+        if ($Sel.Desktop) {
+            $native += 'desktop'
+            $expect += @('photon-ui.exe', 'assets\fonts', 'assets\maps3d.html')
+        }
+        if ($Sel.Web) {
+            $expect += @('ui\photon.html', 'ui\photon.wasm')
+        }
+        $bundles['client'] = @{ Native = $native; Go = @(); Web = $Sel.Web; Expect = $expect }
+    }
+    if ($Sel.Server -and $Sel.Client -and $Sel.Web) {
+        $bundles['station'] = @{
+            Native = @('server', 'client'); Go = @('photon-server.exe', 'photon-sshd.exe'); Web = $true
+            Expect = @('photon-server.exe', 'photon-index.exe', 'photon-backend.exe', $dbc, 'assets\tracks', 'ui\photon.html', 'ui\models')
+        }
+    }
+    if ($Sel.Tools) {
+        $bundles['tools'] = @{
+            Native = @('tools'); Go = @('photon-observer.exe'); Web = $false
+            Expect = @('photon-export.exe', 'photon-observer.exe')
+        }
+    }
+    # Only the programs linked with /DEBUG leave a .pdb; an empty bundle is dropped.
+    $bundles['symbols'] = @{ Native = @('symbols'); Go = @(); Web = $false; Expect = @(); Optional = $true }
+    return $bundles
+}
+
+function Get-BundleReadme {
+    param([string]$Name, [string]$Folder)
+    $desktop = Test-Path -LiteralPath (Join-Path $Folder 'photon-ui.exe')
+    $web = Test-Path -LiteralPath (Join-Path $Folder 'ui\photon.html')
+    switch ($Name) {
+        'server' {
+            return @'
+Run from this folder:
+  set PHOTON_PASSWORD=<password>
+  photon-server.exe -data-dir data -ui off
+
+The DAQ dials TCP 6100. Clients read the CANP fan-out on 6500 and video on 6700.
+photon-index.exe writes the TSDB to data\tsdb. photon-server.exe -h lists the flags.
+'@
+        }
+        'station' {
+            return @'
+Run from this folder:
+  set PHOTON_PASSWORD=<password>
+  photon-server.exe -data-dir data
+
+The server starts photon-index and the local UI, then opens
+http://127.0.0.1:8080/photon.html, which asks for the password once.
+'@
+        }
+        'client' {
+            $text = "Run from this folder, the backend first:`n" +
+                "  photon-backend.exe --no-live-tail --assets-dir assets --daq-host <server> --password <password>`n" +
+                "Other sources: --source pcan, or --source log_replay --log-path <log or folder>.`n`nThen a UI:`n"
+            if ($desktop) {
+                $text += "  photon-ui.exe`n"
+            }
+            if ($web) {
+                $text += "  python -m http.server 8080 --bind 127.0.0.1 --directory ui`n" +
+                    "  and open http://127.0.0.1:8080/photon.html`n"
+            }
+            return $text
+        }
+        'tools' {
+            return @'
+photon-export.exe --store <data\tsdb> --list-sessions
+photon-export.exe --store <data\tsdb> --session <id> --out run.parquet --all-signals
+photon-observer.exe watches a running server's status; -h lists its flags.
+'@
+        }
+        default {
+            return "Debug symbols for the .exe files built from the same commit.`n"
+        }
+    }
+}
+
+function Get-CommitLabel {
+    $commit = (& git -C $Root rev-parse --short HEAD 2>$null)
+    if (-not $commit) {
+        return 'commit unknown'
+    }
+    $dirty = (& git -C $Root status --porcelain 2>$null)
+    if ($dirty) {
+        return 'commit ' + $commit + ' with local changes'
+    }
+    return 'commit ' + $commit
+}
+
+# Install into a fresh staging folder, check it, and only then replace the old bundle,
+# so a failed build never leaves a bundle that looks complete.
+function Install-Bundle {
+    param([string]$Name, $Bundle, [string]$Tree, [string]$Label)
+    $staging = Join-Path $Dist ('.staging\' + $Name)
+    $final = Join-Path $Dist $Name
+    if ($DryRun) {
+        foreach ($component in $Bundle.Native) {
+            Show-Command 'install' 'cmake' $null @('--install', $Tree, '--component', $component, '--prefix', $staging)
+        }
+        if ($Bundle.Web) {
+            Show-Command 'install' 'cmake' $null @('--install', $WebTree, '--component', 'web', '--prefix', $staging)
+        }
+        foreach ($go in $Bundle.Go) {
+            Show-Command 'copy' (Join-Path $GoOut $go) $null @('->', $staging)
+        }
+        Show-Command 'swap' $staging $null @('->', $final)
+        return
+    }
+    if (Test-Path -LiteralPath $staging) {
+        Remove-Item -LiteralPath $staging -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $staging | Out-Null
+    $installs = @($Bundle.Native | ForEach-Object { , @($Tree, $_) })
+    if ($Bundle.Web) {
+        $installs += , @($WebTree, 'web')
+    }
+    foreach ($install in $installs) {
+        $log = & cmake --install $install[0] --component $install[1] --prefix $staging 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $log | Write-Output
+            Write-Output ('installing ' + $install[1] + ' into the ' + $Name + ' bundle failed')
+            exit 1
+        }
+    }
+    foreach ($go in $Bundle.Go) {
+        Copy-Item -LiteralPath (Join-Path $GoOut $go) -Destination $staging -Force
+    }
+    if ($Bundle.Optional -and -not (Get-ChildItem -LiteralPath $staging -Force)) {
+        # Nothing for this build, so an older one would only mislead.
+        Remove-Item -LiteralPath $staging -Force
+        if (Test-Path -LiteralPath $final) {
+            Remove-Item -LiteralPath $final -Recurse -Force
+        }
+        return
+    }
+    $missing = @($Bundle.Expect | Where-Object { -not (Test-Path -LiteralPath (Join-Path $staging $_)) })
+    if ($missing.Count -gt 0) {
+        Write-Output ('the ' + $Name + ' bundle is missing ' + ($missing -join ', ') + '; left in ' + $staging)
+        exit 1
+    }
+    $readme = 'Photon ' + $Name + ', ' + $Label + "`n`n" + (Get-BundleReadme $Name $staging)
+    [IO.File]::WriteAllText((Join-Path $staging 'README.txt'), ($readme -replace "`r?`n", "`r`n"))
+    if (Test-Path -LiteralPath $final) {
+        Remove-Item -LiteralPath $final -Recurse -Force
+    }
+    Move-Item -LiteralPath $staging -Destination $final
+    Write-Output ('bundle ' + $final)
+}
+
 function Start-Build {
     try {
         $sel = Read-Selection $script:Rest
@@ -224,67 +383,35 @@ function Start-Build {
         Show-Use
         exit 2
     }
-    $ship = Join-Path $Root 'build'
-    Write-Output ('build ' + (Format-Selection $sel) + ', ' + $sel.Config + ', into ' + $ship)
+    $preset = Get-NativePreset $sel.Desktop $sel.Config
+    $tree = Join-Path $BuildRoot $preset
+    $bundles = Get-Bundles $sel
+    Write-Output ('build ' + (Format-Selection $sel) + ', ' + $sel.Config + ', preset ' + $preset)
     Test-Toolchain $sel ($script:Rest -join ' ')
-    if (-not $DryRun) {
-        New-Item -ItemType Directory -Force -Path $ship | Out-Null
+
+    # Fail before building, not after, if a bundle about to be replaced is running.
+    $busy = Get-RunningUnder @($bundles.Keys | ForEach-Object { Join-Path $Dist $_ })
+    if ($busy.Count -gt 0 -and -not $DryRun) {
+        $names = $busy | ForEach-Object { $_.ProcessName + ' (pid ' + $_.Id + ')' }
+        Write-Output ('stop these first, they run from out\dist: ' + ($names -join ', '))
+        exit 1
     }
 
     $targets = @()
-    $expect = @()
     if ($sel.Server) {
         $targets += 'photon-index'
-        $expect += @('photon-server.exe', 'photon-sshd.exe', 'photon-index.exe', 'assets\dbc\carcan_telemcan.dbc')
     }
     if ($sel.Client) {
         $targets += 'photon-backend'
-        $expect += @('photon-backend.exe', 'assets\dbc\carcan_telemcan.dbc')
     }
     if ($sel.Desktop) {
         $targets += 'photon-ui'
-        $expect += 'photon-ui.exe'
-    }
-    if ($sel.Web) {
-        $expect += @('ui\photon.html', 'ui\photon.js', 'ui\photon.wasm', 'ui\photon.data')
     }
     if ($sel.Tools) {
         $targets += 'photon-export'
-        $expect += @('photon-export.exe', 'photon-observer.exe')
     }
-
-    # Debug stays in .artifacts, the tree the photon-next README and editors use.
-    $cache = Join-Path $UiDir '.artifacts'
-    if ($sel.Config -ne 'Debug') {
-        $cache = Join-Path $UiDir ('.artifacts-' + $sel.Config.ToLowerInvariant())
-    }
-    $cmakeArgs = @(
-        '-S', $UiDir,
-        '-B', $cache,
-        '-G', 'Ninja',
-        '-D', 'CMAKE_C_COMPILER=clang',
-        '-D', 'CMAKE_CXX_COMPILER=clang++',
-        '-D', ('CMAKE_BUILD_TYPE=' + $sel.Config),
-        '-D', ('PHOTON_SHIP_DIR=' + ($ship -replace '\\', '/'))
-    )
-    if ($sel.Desktop) {
-        $cmakeArgs += @('-D', 'PHOTON_NATIVE_UI=ON')
-    } elseif (-not (Test-Path -LiteralPath (Join-Path $cache 'CMakeCache.txt'))) {
-        # A new tree without the desktop UI never fetches SDL, ImGui, or WebView2.
-        $cmakeArgs += @('-D', 'PHOTON_NATIVE_UI=OFF')
-    }
-    if ($targets.Count -gt 0) {
-        Invoke-Step 'cmake' 'cmake' $null $cmakeArgs
-        Invoke-Step 'cmake' 'cmake' $null (@('--build', $cache, '--target') + $targets)
-    }
-    if ($sel.Tools) {
-        $export = Join-Path $cache 'tools\photon-export\photon-export.exe'
-        if ($DryRun) {
-            Show-Command 'copy' $export $null @('->', $ship)
-        } else {
-            Copy-Item -LiteralPath $export -Destination $ship -Force
-        }
-    }
+    Invoke-Step 'cmake' 'cmake' $UiDir @('--preset', $preset)
+    Invoke-Step 'cmake' 'cmake' $UiDir (@('--build', '--preset', $preset, '--target') + $targets)
 
     $goBuilds = @()
     if ($sel.Server) {
@@ -295,38 +422,24 @@ function Start-Build {
         $goBuilds += , @('photon-observer.exe', './observer')
     }
     foreach ($go in $goBuilds) {
-        Invoke-Step 'go' 'go' $ServerDir @('build', '-o', (Join-Path $ship $go[0]), $go[1])
+        Invoke-Step 'go' 'go' $ServerDir @('build', '-o', (Join-Path $GoOut $go[0]), $go[1])
     }
 
     if ($sel.Web) {
         Invoke-Step 'web' (Join-Path $UiDir 'web\scripts\build.ps1') $null @()
-        $web = Join-Path $UiDir '.artifacts-web'
-        $uiOut = Join-Path $ship 'ui'
-        foreach ($name in @('photon.html', 'photon.js', 'photon.wasm', 'photon.data')) {
-            if ($DryRun) {
-                Show-Command 'copy' (Join-Path $web $name) $null @('->', $uiOut)
-            } elseif (Test-Path -LiteralPath (Join-Path $web $name)) {
-                New-Item -ItemType Directory -Force -Path $uiOut | Out-Null
-                Copy-Item -LiteralPath (Join-Path $web $name) -Destination $uiOut -Force
-            }
-        }
-        # The page fetches the car and track GLBs over HTTP, not from photon.data.
-        Copy-Tree (Join-Path $web 'models') (Join-Path $uiOut 'models')
-    }
-    if ($sel.Server -or $sel.Client) {
-        # photon-index takes its DBC from here; a server-only build links nothing that copies it.
-        Copy-Tree (Join-Path $UiDir 'assets') (Join-Path $ship 'assets')
     }
 
-    if ($DryRun) {
-        return
+    $label = (Get-CommitLabel) + ', ' + $sel.Config
+    foreach ($name in $bundles.Keys) {
+        Install-Bundle $name $bundles[$name] $tree $label
     }
-    $missing = @($expect | Select-Object -Unique | Where-Object { -not (Test-Path -LiteralPath (Join-Path $ship $_)) })
-    if ($missing.Count -gt 0) {
-        Write-Output ('build finished without ' + ($missing -join ', '))
-        exit 1
+    if (-not $DryRun) {
+        $staging = Join-Path $Dist '.staging'
+        if ((Test-Path -LiteralPath $staging) -and -not (Get-ChildItem -LiteralPath $staging -Force)) {
+            Remove-Item -LiteralPath $staging -Force
+        }
+        Write-Output ('built ' + (Format-Selection $sel) + ' into ' + $Dist)
     }
-    Write-Output ('built ' + (Format-Selection $sel) + ' into ' + $ship)
 }
 
 function Find-Python {
@@ -348,7 +461,12 @@ function Start-Test {
     while ($i -lt $script:Rest.Count) {
         $word = $script:Rest[$i].ToLowerInvariant()
         if ($word -in @('--config', '-config') -and $i + 1 -lt $script:Rest.Count) {
-            $config = (Read-Selection @('--config', $script:Rest[$i + 1])).Config
+            try {
+                $config = (Read-Selection @('--config', $script:Rest[$i + 1])).Config
+            } catch {
+                Write-Output $_.Exception.Message
+                exit 2
+            }
             $i += 2
             continue
         }
@@ -377,17 +495,17 @@ function Start-Test {
     }
 
     if ($run.native) {
-        $cache = Join-Path $UiDir '.artifacts'
-        if ($config -ne 'Debug') {
-            $cache = Join-Path $UiDir ('.artifacts-' + $config.ToLowerInvariant())
-        }
-        if (-not (Test-Path -LiteralPath (Join-Path $cache 'CMakeCache.txt')) -and -not $DryRun) {
-            Write-Output ($cache + ' is not configured. Run: photon build client --config ' + $config)
+        $presets = @(@($true, $false) | ForEach-Object { Get-NativePreset $_ $config } |
+                Where-Object { Test-Path -LiteralPath (Join-Path $BuildRoot (Join-Path $_ 'CMakeCache.txt')) })
+        if ($presets.Count -eq 0 -and -not $DryRun) {
+            Write-Output ('no native build tree for ' + $config + '. Run: photon build --config ' + $config)
             exit 1
         }
-        # photon build makes only the shipped targets; the test executables come from here.
-        Invoke-Step 'cmake' 'cmake' $null @('--build', $cache)
-        Invoke-Step 'ctest' 'ctest' $null @('--test-dir', $cache, '--output-on-failure')
+        foreach ($preset in $presets) {
+            # photon build makes only the shipped targets; the test executables come from here.
+            Invoke-Step 'cmake' 'cmake' $UiDir @('--build', '--preset', $preset)
+            Invoke-Step 'ctest' 'ctest' $UiDir @('--preset', $preset)
+        }
         if (Get-Command node -ErrorAction SilentlyContinue) {
             Invoke-Step 'node' 'node' $null @((Join-Path $UiDir 'tests\test_video_webcodecs.cjs'))
         } else {
@@ -404,101 +522,9 @@ function Start-Test {
         if ($strict) {
             $env:PHOTON_E2E_STRICT = '1'
         }
-        $env:PHOTON_BUILD_DIR = Join-Path $Root 'build'
+        $env:PHOTON_DIST_DIR = $Dist
         $e2e = Join-Path $Root 'tests\e2e'
         Invoke-Step 'e2e' $py $e2e @('-m', 'unittest', 'discover', '-s', $e2e, '-t', $e2e, '-v')
-    }
-}
-
-function Start-Package {
-    if ($script:Rest.Count -ne 1) {
-        Write-Output 'photon package needs one destination folder'
-        exit 2
-    }
-    $dest = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($script:Rest[0])
-    $ship = Join-Path $Root 'build'
-    $commit = (& git -C $Root rev-parse --short HEAD 2>$null)
-    if (-not $commit) {
-        $commit = 'unknown'
-    }
-    $bundles = [ordered]@{
-        'server'         = @{
-            Files = @('photon-server.exe', 'photon-sshd.exe', 'photon-index.exe', 'assets')
-            Run   = @'
-Run from this folder:
-  set PHOTON_PASSWORD=<password>
-  photon-server.exe -data-dir data -ui off
-
-The DAQ dials TCP 6100. Clients read the CANP fan-out on 6500 and video on 6700.
-photon-index.exe writes the TSDB to data\tsdb. photon-server.exe -h lists the flags.
-'@
-        }
-        'station'        = @{
-            Files = @('photon-server.exe', 'photon-sshd.exe', 'photon-index.exe', 'photon-backend.exe', 'assets', 'ui')
-            Run   = @'
-Run from this folder:
-  set PHOTON_PASSWORD=<password>
-  photon-server.exe -data-dir data
-
-The server starts photon-index and the local UI, then opens
-http://127.0.0.1:8080/photon.html, which asks for the password once.
-'@
-        }
-        'client-desktop' = @{
-            Files = @('photon-backend.exe', 'photon-ui.exe', 'assets')
-            Run   = @'
-Run from this folder, the backend first, then the window:
-  photon-backend.exe --no-live-tail --assets-dir assets --daq-host <server> --password <password>
-  photon-ui.exe
-
-Other sources: --source pcan, or --source log_replay --log-path <log or folder>.
-'@
-        }
-        'tools'          = @{
-            Files = @('photon-export.exe', 'photon-observer.exe')
-            Run   = @'
-photon-export.exe --store <data\tsdb> --list-sessions
-photon-export.exe --store <data\tsdb> --session <id> --out run.parquet --all-signals
-photon-observer.exe watches a running server's status; -h lists its flags.
-'@
-        }
-    }
-    if (-not $DryRun) {
-        New-Item -ItemType Directory -Force -Path $dest | Out-Null
-    }
-    foreach ($name in $bundles.Keys) {
-        $bundle = $bundles[$name]
-        $missing = @($bundle.Files | Where-Object { -not (Test-Path -LiteralPath (Join-Path $ship $_)) })
-        if ($missing.Count -gt 0) {
-            Write-Output ('skip ' + $name + ' (build\ has no ' + ($missing -join ', ') + ')')
-            continue
-        }
-        $out = Join-Path $dest $name
-        if ($DryRun) {
-            Show-Command 'package' $name $null @('->', $out)
-            continue
-        }
-        # A fresh folder, so a file dropped from a bundle does not linger in the next one.
-        if (Test-Path -LiteralPath $out) {
-            Remove-Item -LiteralPath $out -Recurse -Force
-        }
-        New-Item -ItemType Directory -Force -Path $out | Out-Null
-        foreach ($file in $bundle.Files) {
-            Copy-Item -LiteralPath (Join-Path $ship $file) -Destination $out -Recurse -Force
-        }
-        $readme = "Photon $name, commit $commit`r`n`r`n" + ($bundle.Run -replace "`r?`n", "`r`n") + "`r`n"
-        [IO.File]::WriteAllText((Join-Path $out 'README.txt'), $readme)
-        Write-Output ('packaged ' + $name + ' -> ' + $out)
-    }
-    $pdbs = @(Get-ChildItem -LiteralPath $ship -Filter '*.pdb' -File -ErrorAction SilentlyContinue)
-    if ($pdbs.Count -gt 0 -and -not $DryRun) {
-        $out = Join-Path $dest 'symbols'
-        if (Test-Path -LiteralPath $out) {
-            Remove-Item -LiteralPath $out -Recurse -Force
-        }
-        New-Item -ItemType Directory -Force -Path $out | Out-Null
-        $pdbs | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $out }
-        Write-Output ('packaged symbols -> ' + $out)
     }
 }
 
@@ -514,7 +540,8 @@ function Start-Clean {
         }
     }
     # Build output only. data\ holds telemetry and is never touched.
-    $dirs = @(Join-Path $Root 'build')
+    # build\ and photon-next\.artifacts* are where builds went before out\.
+    $dirs = @((Join-Path $Root 'out'), (Join-Path $Root 'build'))
     $dirs += @(Get-ChildItem -LiteralPath $UiDir -Directory -Filter '.artifacts*' | ForEach-Object { $_.FullName })
     if ($deps) {
         # Fetched libraries and emsdk; the next build fetches them again, setup reinstalls emsdk.
@@ -525,11 +552,7 @@ function Start-Clean {
         Write-Output 'nothing to clean'
         return
     }
-    # Windows will not delete a running exe, so stop rather than leave half a tree.
-    $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            $path = $_.Path
-            $path -and @($dirs | Where-Object { $path.StartsWith($_ + '\', [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
-        })
+    $running = Get-RunningUnder $dirs
     if ($running.Count -gt 0) {
         $names = $running | ForEach-Object { $_.ProcessName + ' (pid ' + $_.Id + ')' }
         Write-Output ('stop these first: ' + ($names -join ', '))
@@ -557,8 +580,13 @@ function Start-Server {
     param([switch]$WithUi)
     $password = Get-Password
     $dataDir = Get-DataDir
-    $ship = Join-Path $Root 'build'
-    $exe = Find-Ship 'photon-server.exe'
+    # A station is the server with the local UI beside it; it has its own bundle.
+    $bundle = 'server'
+    if ($WithUi) {
+        $bundle = 'station'
+    }
+    $folder = Join-Path $Dist $bundle
+    $exe = Find-InBundle $bundle 'photon-server.exe'
     $ingress = $null
     if ($script:Rest.Count -gt 0 -and $script:Rest[0].ToLowerInvariant() -eq 'ingest') {
         if ($script:Rest.Count -lt 2 -or $script:Rest[1] -notmatch '^\d+$') {
@@ -576,17 +604,7 @@ function Start-Server {
     if ($ingress) {
         $serverArgs += @('-ingress', $ingress)
     }
-    if ($WithUi) {
-        # photon-server serves the web page itself; photon-ui.exe is not part of a station.
-        if (-not (Find-Backend) -and -not $DryRun) {
-            Write-Output 'build\photon-backend.exe is missing. Run: photon build station'
-            exit 1
-        }
-        if (-not (Find-Page) -and -not $DryRun) {
-            Write-Output 'build\ui\photon.html is missing. Run: photon build station'
-            exit 1
-        }
-    } else {
+    if (-not $WithUi) {
         $serverArgs += @('-ui', 'off')
     }
     if ($Rest) {
@@ -602,13 +620,13 @@ function Start-Server {
     Write-Output ("ingest " + $shownPort + "  password " + $password + "  data " + $dataDir)
     if (-not $exe) {
         if ($DryRun) {
-            Show-Command 'run' (Join-Path $ship 'photon-server.exe') $ship $serverArgs
+            Show-Command 'run' (Join-Path $folder 'photon-server.exe') $folder $serverArgs
             return
         }
-        Write-Output 'build\photon-server.exe is missing. Run: photon build server'
+        Write-Output ('out\dist\' + $bundle + ' is not built. Run: photon build ' + $bundle)
         exit 1
     }
-    Start-Logged $exe $ship $serverArgs
+    Start-Logged $exe $folder $serverArgs
 }
 
 function Start-Ui {
@@ -623,25 +641,22 @@ function Start-Ui {
         [string]$LogPath,
         [string]$Ui
     )
-    $backend = Find-Backend
+    $folder = Join-Path $Dist 'client'
+    $backend = Find-InBundle 'client' 'photon-backend.exe'
     if (-not $backend) {
         if (-not $DryRun) {
-            Write-Output 'build\photon-backend.exe is missing. Run: photon build client'
+            Write-Output 'out\dist\client is not built. Run: photon build client'
             exit 1
         }
-        $backend = Join-Path $Root 'build\photon-backend.exe'
+        $backend = Join-Path $folder 'photon-backend.exe'
     }
     $password = Get-Password
-    $assets = Join-Path $Root 'build\assets'
-    if (-not (Test-Path -LiteralPath $assets)) {
-        $assets = Join-Path $UiDir 'assets'
-    }
     $backendArgs = @(
         '--no-live-tail',
         '--source', $Source,
         '--ws-port', '8765',
         '--password', $password,
-        '--assets-dir', $assets
+        '--assets-dir', (Join-Path $folder 'assets')
     )
     if ($Source -eq 'daq_tcp') {
         $backendArgs += @(
@@ -659,17 +674,17 @@ function Start-Ui {
         $backendArgs += $Rest
     }
 
-    $native = Find-NativeUi
-    $page = Find-Page
+    $native = Find-InBundle 'client' 'photon-ui.exe'
+    $page = Find-InBundle 'client' 'ui\photon.html'
     if ($Ui -eq 'desktop') {
         if (-not $native -and -not $DryRun) {
-            Write-Output 'build\photon-ui.exe is missing. Run: photon build client --ui desktop'
+            Write-Output 'out\dist\client has no photon-ui.exe. Run: photon build client --ui desktop'
             exit 1
         }
         $page = $null
     } elseif ($Ui -eq 'web') {
         if (-not $page -and -not $DryRun) {
-            Write-Output 'build\ui\photon.html is missing. Run: photon build client --ui web'
+            Write-Output 'out\dist\client has no page. Run: photon build client --ui web'
             exit 1
         }
         $native = $null
@@ -683,11 +698,9 @@ function Start-Ui {
     if ($DryRun) {
         Show-Command 'backend' $backend $null $backendArgs
         if ($Ui -eq 'desktop' -or ($native -and $Ui -ne 'web')) {
-            Show-Command 'ui' (Join-Path $Root 'build\photon-ui.exe') $null @()
+            Show-Command 'ui' (Join-Path $folder 'photon-ui.exe') $null @()
         } elseif ($page -or $Ui -eq 'web') {
-            $page = Join-Path $Root 'build\ui\photon.html'
-            $pageDir = Split-Path $page -Parent
-            Show-Command 'page' 'python -m http.server 8080 --bind 127.0.0.1 --directory' $null @($pageDir)
+            Show-Command 'page' 'python -m http.server 8080 --bind 127.0.0.1 --directory' $null @((Join-Path $folder 'ui'))
         } else {
             Write-Output 'ui: not built (run photon build client, or photon build client --ui web for the page)'
         }
@@ -804,9 +817,6 @@ switch ($command) {
     }
     'test' {
         Start-Test
-    }
-    'package' {
-        Start-Package
     }
     'server' {
         Start-Server

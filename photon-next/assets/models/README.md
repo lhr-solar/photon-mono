@@ -8,7 +8,7 @@
 
 ## How they are served
 
-Fonts are `--preload-file`'d into `photon.data`. The car/track GLBs are copied to `.artifacts-web/models/` at build time and fetched at runtime with `emscripten_async_wget2_data` (progress: `loading new_dyn.glb 42%`), then parsed from memory by tinygltf.
+Fonts are `--preload-file`'d into `photon.data`. The car/track GLBs are copied to `models/` in the web-release tree at build time, installed to `ui/models/` with the page (the `web` component), and fetched at runtime with `emscripten_async_wget2_data` (progress: `loading new_dyn.glb 42%`), then parsed from memory by tinygltf.
 
 While the selected GLB is fetching, the 3D view shows that progress over an empty grid — no placeholder model.
 

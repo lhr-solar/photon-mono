@@ -2,21 +2,40 @@
 
 ## Native (Windows, clang + Ninja + CMake 3.25+)
 
+Builds go through the presets in `CMakePresets.json`. `headless-*` leaves out `photon-ui` and never fetches SDL2, ImGui, ImPlot, or WebView2; `desktop-*` builds everything.
+
 ```powershell
-cmake -S . -B .artifacts -G Ninja -D CMAKE_C_COMPILER=clang -D CMAKE_CXX_COMPILER=clang++
-cmake --build .artifacts
-ctest --test-dir .artifacts --output-on-failure
+cmake --preset desktop-debug
+cmake --build --preset desktop-debug
+ctest --preset desktop-debug
 ```
 
-| Binary | Path |
+| Binary | Path in `..\out\build\<preset>` |
 | --- | --- |
-| `photon-backend` | `.artifacts/photon/daemon/photon-backend.exe` |
-| `photon-index` | `.artifacts/photon/daemon/photon-index.exe` |
-| `photon-ui` | `.artifacts/photon-ui.exe` |
-| `photon-export` | `.artifacts/tools/photon-export/photon-export.exe` |
-| `photon-tests` | `.artifacts/tests/photon-tests.exe` |
+| `photon-backend` | `photon/daemon/photon-backend.exe` |
+| `photon-index` | `photon/daemon/photon-index.exe` |
+| `photon-ui` | `photon-ui.exe` (desktop presets) |
+| `photon-export` | `tools/photon-export/photon-export.exe` |
+| `photon-tests` | `tests/photon-tests.exe` |
 
-`cmake --build .artifacts --target format` / `format-check` run clang-format (skipped if not installed).
+`cmake --build --preset desktop-debug --target format` / `format-check` run clang-format (skipped if not installed).
+
+## Install components
+
+Each program installs with the assets it reads at runtime, so an installed copy runs anywhere. The repo's `photon build` installs these into the bundles under `out\dist`.
+
+| Component | Installs |
+| --- | --- |
+| `server` | `photon-index`, `assets/dbc` |
+| `client` | `photon-backend`, `assets/dbc`, `assets/tracks` |
+| `desktop` | `photon-ui`, `assets/fonts`, `assets/models`, `assets/maps3d.html`, `assets/maps3d.js` |
+| `web` | `ui/photon.{html,js,wasm,data}`, `ui/models` (from the `web-release` tree) |
+| `tools` | `photon-export` |
+| `symbols` | the `.pdb` beside each of the above, where the link made one |
+
+```powershell
+cmake --install ..\out\build\desktop-debug --component client --prefix C:\photon-client
+```
 
 ## WASM page
 
@@ -28,15 +47,15 @@ Install emsdk once: `.\web\scripts\setup-emsdk.ps1` installs and activates 6.0.1
 .\web\scripts\build.ps1
 ```
 
-Manual equivalent:
+Manual equivalent (the preset finds the Emscripten toolchain through `EMSDK`, which `emsdk_env.ps1` sets):
 
 ```powershell
 . .\.external\emsdk\emsdk_env.ps1
-emcmake cmake -S . -B .artifacts-web -G Ninja -DPHOTON_FRONTEND=ON -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build .artifacts-web
+cmake --preset web-release
+cmake --build --preset web-release
 ```
 
-Outputs: `.artifacts-web/photon.{html,js,wasm,data}` and `.artifacts-web/models/`. Do not mix `.artifacts-web` with the native `.artifacts` configure (`PHOTON_FRONTEND` defaults OFF). In the monorepo, `photon build client --ui web` runs `build.ps1` and copies the page and `models/` to `build/ui/`.
+`build.ps1` also stamps one cache token into the html and js and checks the JS glue against the wasm, so prefer it. Outputs: `..\out\build\web-release\photon.{html,js,wasm,data}` and `models\`. In the monorepo, `photon build client --ui web` runs `build.ps1` and installs the `web` component into the client bundle's `ui\`.
 
 Serve: `.\web\scripts\serve.ps1`, open `http://127.0.0.1:8080/photon.html` (never `file://`). Headless protocol check: `python .\web\scripts\smoke_ws.py`.
 

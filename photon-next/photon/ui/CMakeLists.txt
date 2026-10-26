@@ -213,9 +213,20 @@ if(PHOTON_WEB_GLBS_EXIST)
             "${PHOTON_WEB_MODELS_DIR}/"
         COMMENT "Copy recovered GLBs to ${PHOTON_WEB_MODELS_DIR} (runtime fetch, not MEMFS)"
     )
+    install(FILES ${PHOTON_WEB_GLBS} DESTINATION ui/models COMPONENT web)
 else()
     message(STATUS "photon-frontend skipping GLB copy (missing files under ${PHOTON_MODELS_DIR})")
 endif()
+
+# web/scripts/build.ps1 stamps a cache token into the html and js after the link,
+# so install after it, not straight after cmake --build.
+install(FILES
+    "${CMAKE_BINARY_DIR}/photon.html"
+    "${CMAKE_BINARY_DIR}/photon.js"
+    "${CMAKE_BINARY_DIR}/photon.wasm"
+    "${CMAKE_BINARY_DIR}/photon.data"
+    DESTINATION ui COMPONENT web
+)
 
 photon_apply_warnings(photon-frontend)
 
@@ -293,21 +304,18 @@ else()
         )
         message(STATUS "photon-ui WebView2 -> ${PHOTON_WEBVIEW2_DIR}")
     endif()
-    if(PHOTON_SHIP_DIR)
-        set(_photon_ui_dir "${PHOTON_SHIP_DIR}")
-    else()
-        set(_photon_ui_dir "${CMAKE_BINARY_DIR}")
-    endif()
+    # In the build tree photon-ui reads assets from the checkout (PHOTON_ASSETS_DIR);
+    # an installed one reads the assets\ installed beside it.
     set_target_properties(photon-ui PROPERTIES
         OUTPUT_NAME photon-ui
-        RUNTIME_OUTPUT_DIRECTORY "${_photon_ui_dir}"
-    )
-    add_custom_command(TARGET photon-ui POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/assets"
-            "$<TARGET_FILE_DIR:photon-ui>/assets"
-        COMMENT "Copy Photon assets next to photon-ui"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
     )
     photon_apply_warnings(photon-ui)
-    message(STATUS "photon-ui -> ${_photon_ui_dir}/photon-ui${CMAKE_EXECUTABLE_SUFFIX}")
+    install(TARGETS photon-ui RUNTIME DESTINATION . COMPONENT desktop)
+    install(DIRECTORY "${CMAKE_SOURCE_DIR}/assets/fonts" "${CMAKE_SOURCE_DIR}/assets/models"
+        DESTINATION assets COMPONENT desktop)
+    install(FILES "${CMAKE_SOURCE_DIR}/assets/maps3d.html" "${CMAKE_SOURCE_DIR}/assets/maps3d.js"
+        DESTINATION assets COMPONENT desktop)
+    photon_install_symbols(photon-ui)
+    message(STATUS "photon-ui -> ${CMAKE_BINARY_DIR}/photon-ui${CMAKE_EXECUTABLE_SUFFIX}")
 endif()

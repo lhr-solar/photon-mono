@@ -64,7 +64,7 @@ class CarSideC(unittest.TestCase):
         self.compile([CANP / "canp.c", CANP / "test" / "sink.c"], self.tmp / "sink", ["-lpthread"])
 
     def test_canp_source_reaches_the_server(self):
-        require(exe("photon-server"))
+        require(exe("server", "photon-server"))
         if port_open(6100):
             self.skipTest("port 6100 is in use; the CANP source only dials 6100")
         source = self.tmp / "source"
@@ -72,7 +72,7 @@ class CarSideC(unittest.TestCase):
 
         data = self.tmp / "data"
         observer = free_port()
-        args = [exe("photon-server"), "-data-dir", data, "-password", PASSWORD, "-ui", "off", "-live-writer", "off", "-ingress", 6100, "-observer", observer]
+        args = [exe("server", "photon-server"), "-data-dir", data, "-password", PASSWORD, "-ui", "off", "-live-writer", "off", "-ingress", 6100, "-observer", observer]
         for flag in ("client", "video-ingress", "video-client", "video-udp"):
             args += ["-" + flag, free_port()]
         server = Proc("canp-server", args, cwd=self.tmp)

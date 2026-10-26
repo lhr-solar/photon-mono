@@ -2,8 +2,8 @@
 
 Standard library only, so CI and a fresh laptop need nothing beyond Python.
 
-PHOTON_BUILD_DIR   the build to test (default <repo>/build)
-PHOTON_E2E_LOGS    where process logs go (default a temp folder, printed at start)
+PHOTON_DIST_DIR    the bundles to test, one folder each (default <repo>/out/dist)
+PHOTON_E2E_LOGS    where process logs go (default a temp folder)
 PHOTON_E2E_STRICT  1 turns "this piece was not built" skips into failures, as CI wants
 """
 
@@ -27,7 +27,7 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-BUILD = Path(os.environ.get("PHOTON_BUILD_DIR") or REPO / "build").resolve()
+DIST = Path(os.environ.get("PHOTON_DIST_DIR") or REPO / "out" / "dist").resolve()
 EXAMPLE_DIR = REPO / "examples" / "brainerd-30s"
 EXAMPLE_LOG = EXAMPLE_DIR / "2026-07-23-03-30s.log"
 STRICT = os.environ.get("PHOTON_E2E_STRICT", "") not in ("", "0")
@@ -38,8 +38,13 @@ LOGS = Path(_logs) if _logs else Path(tempfile.mkdtemp(prefix="photon-e2e-logs-"
 LOGS.mkdir(parents=True, exist_ok=True)
 
 
-def exe(name: str) -> Path:
-    return BUILD / (name + (".exe" if WINDOWS else ""))
+def bundle(name: str) -> Path:
+    """A bundle photon build assembled: server, client, station, or tools."""
+    return DIST / name
+
+
+def exe(bundle_name: str, name: str) -> Path:
+    return bundle(bundle_name) / (name + (".exe" if WINDOWS else ""))
 
 
 def require(*paths: Path) -> None:
@@ -239,13 +244,9 @@ def http_get(url: str, password: str | None = None, timeout: float = 10.0) -> tu
             return err.code, err.read()
 
 
-def copy_ship(dest: Path, names: list[str], dirs: list[str]) -> Path:
-    """Copy the named build outputs into dest, so a test owns its exe-relative logs and data."""
-    dest.mkdir(parents=True, exist_ok=True)
-    for name in names:
-        shutil.copy2(BUILD / name, dest / name)
-    for d in dirs:
-        shutil.copytree(BUILD / d, dest / d, dirs_exist_ok=True)
+def copy_bundle(name: str, dest: Path) -> Path:
+    """Run a bundle from a copy, so the test owns its exe-relative logs and leaves out/dist alone."""
+    shutil.copytree(bundle(name), dest)
     return dest
 
 

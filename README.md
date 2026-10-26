@@ -6,7 +6,6 @@ Two programs. `photon-server` is the ingest server. `photon-next` is the UI and 
 photon setup [server] [client] [station] [tools] [--ui desktop|web|both] [--pcan] [--build]
 photon build [server] [client] [station] [tools] [--ui desktop|web|both] [--config Debug|Release]
 photon test  [go] [native] [e2e] [--config Debug|Release] [--strict]
-photon package DIR
 photon clean [--deps]
 
 photon server  [ingest PORT]
@@ -18,14 +17,14 @@ photon client  [FROM] [--ui desktop|web]
 
 | Word | Builds | Setup installs |
 | --- | --- | --- |
-| `server` | `photon-server`, `photon-sshd`, `photon-index`, `assets\` | CMake, Ninja, LLVM, VS C++ build tools, Go |
-| `client` | `photon-backend`, `assets\`, and the `--ui` (desktop when omitted) | CMake, Ninja, LLVM, VS C++ build tools, Git |
+| `server` | `photon-server`, `photon-sshd`, `photon-index` | CMake, Ninja, LLVM, VS C++ build tools, Go |
+| `client` | `photon-backend` and the `--ui` (desktop when omitted) | CMake, Ninja, LLVM, VS C++ build tools, Git |
 | `--ui desktop` | `photon-ui.exe` | |
-| `--ui web` | `ui\photon.html` and `ui\models\` | Python, emsdk 6.0.13 |
+| `--ui web` | the page, `ui\photon.html` and `ui\models\` | Python, emsdk 6.0.13 |
 | `station` | `server` and `client --ui web` | both |
 | `tools` | `photon-export`, `photon-observer` | CMake, Ninja, LLVM, VS C++ build tools, Go |
 
-Plain `photon build` and `photon setup` mean `server client`. A server build never fetches SDL, ImGui, or WebView2. `--pcan` adds the PEAK driver for `photon client pcan`. `setup --build` builds the same words when setup finishes.
+Plain `photon build` and `photon setup` mean `server client`. `--pcan` adds the PEAK driver for `photon client pcan`. `setup --build` builds the same words when setup finishes.
 
 ```text
 photon setup station --build      PC: ingest server plus the page it serves
@@ -33,23 +32,45 @@ photon setup client --build       laptop: desktop UI
 photon build client --ui web      laptop: browser UI
 ```
 
-Everything lands in `build\`; the server only looks next to that executable. Debug native builds use `photon-next\.artifacts`, Release uses `photon-next\.artifacts-release`. The web page always builds Release in `photon-next\.artifacts-web`. The DBC source is `photon-next\assets\dbc`. Each build checks that its outputs are in `build\` and fails if one is missing. `photon clean` removes `build\` and those build trees; `--deps` also removes the fetched libraries and emsdk in `photon-next\.external`. Neither touches `data\`.
+### Where a build goes
+
+A build compiles in `out\build` and then assembles runnable bundles in `out\dist`, one folder each. A bundle is complete on its own: copy the folder to another machine and run it from there. Each has a `README.txt` with its run line, commit, and build type.
+
+| Bundle | Holds | Run with |
+| --- | --- | --- |
+| `out\dist\server` | `photon-server`, `photon-sshd`, `photon-index`, `assets\dbc` | `photon server` |
+| `out\dist\station` | the server bundle, plus `photon-backend`, `assets\tracks`, and the page in `ui\` | `photon station` |
+| `out\dist\client` | `photon-backend`, `assets\dbc`, `assets\tracks`, and the UIs that were built: `photon-ui.exe` with `assets\fonts`, `models`, `maps3d.*`, and/or the page in `ui\` | `photon client` |
+| `out\dist\tools` | `photon-export`, `photon-observer` | by hand |
+| `out\dist\symbols` | `.pdb` files from the most recent build, for the `.exe` files that have them | |
+
+A bundle is installed into `out\dist\.staging\<bundle>`, checked for every file it needs, and only then swapped in for the old one, so a failed build never leaves a bundle that looks complete. A build stops before compiling if a program is running from a bundle it would replace.
+
+The C++ half comes from CMake presets in `photon-next\CMakePresets.json`:
+
+| Preset | Tree | Used for |
+| --- | --- | --- |
+| `headless-debug`, `headless-release` | `out\build\headless-<config>` | `server`, `tools`, and a client without the desktop UI; never fetches SDL, ImGui, or WebView2 |
+| `desktop-debug`, `desktop-release` | `out\build\desktop-<config>` | any build with `--ui desktop` (all native targets) |
+| `web-release` | `out\build\web-release` | the page; `photon-next\web\scripts\build.ps1` loads emsdk and runs it |
+
+Go programs build into `out\build\go`. Bundles come from CMake install components (`server`, `client`, `desktop`, `web`, `tools`, `symbols`) with `cmake --install <tree> --component <name>`, plus the Go programs. The same presets work from a terminal in `photon-next` (`cmake --preset desktop-debug`, `cmake --build --preset desktop-debug`, `ctest --preset desktop-debug`) and from editors that read CMake presets, such as VS Code's CMake Tools.
+
+`photon clean` removes `out\`, and the `build\` and `photon-next\.artifacts*` trees that older builds left; `--deps` also removes the fetched libraries and emsdk in `photon-next\.external`. Neither touches `data\`.
 
 ## Test
 
 | Word | Runs |
 | --- | --- |
 | `go` | `go vet` and the photon-server package tests: config, client gate, store recovery, RTP/RTCP, video store, locate, UDP fan-out, VPT, local UI |
-| `native` | `ctest` in the native tree (`photon-tests`, `photon-export-tests`) and the video decoder glue test under Node |
-| `e2e` | `tests\e2e` against `build\`: backend log replay, a whole station fed the example clip (segments, byte-exact fan-out, auth, observer, live TSDB, export, the page in headless Chrome or Edge, clean shutdown), and `photon-index` import with `photon-export` |
+| `native` | `cmake --build` and `ctest --preset` in each native tree built for `--config` (`photon-tests`, `photon-export-tests`), and the video decoder glue test under Node |
+| `e2e` | `tests\e2e` against `out\dist`: backend log replay from `client`, a whole `station` fed the example clip (segments, byte-exact fan-out, auth, observer, live TSDB, export, the page in headless Chrome or Edge, clean shutdown), and `photon-index` import with `photon-export` |
 
-Plain `photon test` runs all three. Build first; `native` uses the tree that `--config` names. The station test needs ports 8765 and 8080, so it skips beside a running station. `--strict` turns those skips, and any piece that was not built, into failures. `photon-server\cache` is unfinished and not run; `go test ./cache` in `photon-server` shows where it stands. `tests\e2e\test_canp.py` builds the car-side CANP source with gcc and runs it against `photon-server`, so it only runs on Linux.
-
-`photon package DIR` copies `build\` into `DIR\server`, `station`, `client-desktop`, `tools`, and `symbols`, each with a `README.txt` that says how to run it.
+Plain `photon test` runs all three. Build first. The station test needs ports 8765 and 8080, so it skips beside a running station. `--strict` turns those skips, and any bundle that was not built, into failures. `photon-server\cache` is unfinished and not run; `go test ./cache` in `photon-server` shows where it stands. `tests\e2e\test_canp.py` builds the car-side CANP source with gcc and runs it against `photon-server`, so it only runs on Linux.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push. Three jobs run side by side: the server tests on Windows, the server tests and the CANP interop test on Linux, and a Windows job that builds everything in Release, then runs `photon test native` and `photon test e2e --strict`. When all three pass, the run's page has `photon-station-<commit>`, `photon-server-<commit>`, `photon-client-desktop-<commit>`, `photon-tools-<commit>`, and `photon-symbols-<commit>` to download, kept for 90 days. A failed run uploads its test logs instead.
+`.github/workflows/ci.yml` runs on every push. Three jobs run side by side: the server tests on Windows, the server tests and the CANP interop test on Linux, and a Windows job that runs `photon build station client tools --ui both --config Release`, then `photon test native` and `photon test e2e --strict` against those bundles. When all three pass, the run's page has `photon-station-<commit>`, `photon-server-<commit>`, `photon-client-<commit>`, `photon-tools-<commit>`, and `photon-symbols-<commit>` to download: the `out\dist` folders, kept for 90 days. A failed run uploads its test logs instead.
 
 ## Run
 

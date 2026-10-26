@@ -50,9 +50,10 @@ jobs:
         run: |
           go vet ./...
           go test -count=1 ./server ./observer ./sshd ./cmd/...
-          go build -o ../build/photon-server ./server
+          go build -o "$RUNNER_TEMP/dist/server/photon-server" ./server
       - name: CANP source against photon-server
         env:
+          PHOTON_DIST_DIR: ${{ runner.temp }}/dist
           PHOTON_E2E_STRICT: "1"
           PHOTON_E2E_LOGS: ${{ runner.temp }}/e2e-logs
         run: python -m unittest discover -s tests/e2e -t tests/e2e -p test_canp.py -v
@@ -99,7 +100,8 @@ jobs:
           # Bump with EmsdkVersion in scripts/setup.ps1 and web/scripts/setup-emsdk.ps1.
           key: emsdk-6.0.13-${{ runner.os }}
       - name: Build
-        run: .\photon.cmd build server client tools --ui both --config Release
+        # Every bundle: server, client (desktop and web), station, tools, symbols.
+        run: .\photon.cmd build station client tools --ui both --config Release
       - name: C++ and decoder tests
         run: .\photon.cmd test native --config Release
       - name: End-to-end tests
@@ -112,13 +114,12 @@ jobs:
           name: logs-windows
           path: ${{ runner.temp }}\e2e-logs
           retention-days: 7
-      - name: Package
-        run: .\photon.cmd package dist
-      # Held here until the other jobs pass; publish turns it into the downloads.
+      # out\dist is the bundles; held here until the other jobs pass, then publish
+      # turns each one into a download.
       - uses: actions/upload-artifact@v4
         with:
           name: staging
-          path: dist
+          path: out/dist
           if-no-files-found: error
           retention-days: 1
 
@@ -148,8 +149,8 @@ jobs:
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: photon-client-desktop-${{ env.TAG }}
-          path: dist/client-desktop
+          name: photon-client-${{ env.TAG }}
+          path: dist/client
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:

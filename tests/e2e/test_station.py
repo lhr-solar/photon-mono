@@ -18,14 +18,14 @@ import unittest
 from pathlib import Path
 
 from support import (
-    BUILD,
     STRICT,
     Browser,
     PhotonClient,
     Proc,
+    bundle,
     client_auth,
     clip_batches,
-    copy_ship,
+    copy_bundle,
     exe,
     feed,
     find_browser,
@@ -72,7 +72,8 @@ class Station(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         names = ["photon-server", "photon-index", "photon-backend"]
-        require(*[exe(n) for n in names], BUILD / "assets" / "dbc", BUILD / "ui" / "photon.html")
+        station = bundle("station")
+        require(*[exe("station", n) for n in names], station / "assets" / "dbc", station / "ui" / "photon.html")
         for port in (UI_WS_PORT, UI_HTTP_PORT):
             if port_open(port):
                 message = f"port {port} is in use; stop the running station first"
@@ -81,10 +82,10 @@ class Station(unittest.TestCase):
                 raise unittest.SkipTest(message)
 
         cls.tmp = Path(tempfile.mkdtemp(prefix="photon-e2e-station-"))
-        cls.ship = copy_ship(cls.tmp / "ship", [exe(n).name for n in names], ["assets", "ui"])
+        cls.ship = copy_bundle("station", cls.tmp / "station")
         cls.data = cls.tmp / "data"
         cls.ports = {k: free_port() for k in ("ingress", "client", "observer", "video-ingress", "video-client", "video-udp")}
-        args = [cls.ship / exe("photon-server").name, "-data-dir", cls.data, "-password", PASSWORD]
+        args = [cls.ship / exe("station", "photon-server").name, "-data-dir", cls.data, "-password", PASSWORD]
         for flag, port in cls.ports.items():
             args += ["-" + flag, port]
         cls.server = Proc("station-server", args, cwd=cls.ship, env={"PHOTON_NO_BROWSER": "1"})
@@ -190,22 +191,24 @@ class Station(unittest.TestCase):
         session = self.tsdb_sessions()[0]
         stamps = sorted(ts for ts, _ in clip_batches(self.payloads))
         self.assertLess(abs(session["min_ms"] - stamps[0]), 1000)
+        # photon-index rewrites catalog.json on its own schedule, about every 30-40 s.
         wait_until(
             lambda: abs(self.tsdb_sessions()[0]["max_ms"] - stamps[-1]) < 2000,
-            30,
-            "the TSDB session to reach the end of the clip",
+            90,
+            "the TSDB catalog to reach the end of the clip",
+            step=0.5,
         )
         folder = self.data / "tsdb" / session["id"]
         self.assertTrue((folder / "signals.json").exists())
         self.assertTrue(list(folder.glob("l0/*.pcol")), "no L0 pages written")
 
     def test_export_reads_the_live_session(self):
-        require(exe("photon-export"))
+        require(exe("tools", "photon-export"))
         session = self.tsdb_sessions()[0]["id"]
         out = self.tmp / "live.parquet"
         export = Proc(
             "station-export",
-            [exe("photon-export"), "--store", self.data / "tsdb", "--session", session, "--out", out, "--all-signals"],
+            [exe("tools", "photon-export"), "--store", self.data / "tsdb", "--session", session, "--out", out, "--all-signals"],
         )
         self.assertEqual(export.wait(120), 0, export.tail())
         body = out.read_bytes()

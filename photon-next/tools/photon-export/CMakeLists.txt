@@ -13,6 +13,8 @@ if(WIN32)
     target_link_libraries(photon-export PRIVATE psapi)
 endif()
 photon_apply_warnings(photon-export)
+install(TARGETS photon-export RUNTIME DESTINATION . COMPONENT tools)
+photon_install_symbols(photon-export)
 
 if(BUILD_TESTING)
     add_executable(photon-export-tests test_export.cpp)
