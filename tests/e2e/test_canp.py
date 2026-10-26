@@ -74,7 +74,7 @@ class CarSideC(unittest.TestCase):
         observer = free_port()
         args = [exe("server", "photon-server"), "-data-dir", data, "-password", PASSWORD, "-ui", "off", "-live-writer", "off", "-ingress", 6100, "-observer", observer]
         for flag in ("client", "video-ingress", "video-client", "video-udp"):
-            args += ["-" + flag, free_port()]
+            args += ["-" + flag, free_port(udp=flag in ("video-ingress", "video-udp"))]
         server = Proc("canp-server", args, cwd=self.tmp)
 
         def ingested() -> int:

@@ -60,6 +60,15 @@ function(photon_apply_warnings target)
         $<$<CXX_COMPILER_ID:Clang,AppleClang,GNU>:-Wall -Wextra -Wpedantic>
         $<$<CXX_COMPILER_ID:MSVC>:/W4>
     )
+    if(WIN32)
+        # getenv, sscanf, and strncat are standard C; the CRT's *_s replacements
+        # are Microsoft-only and do not exist under Emscripten.
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    if(EMSCRIPTEN)
+        # EM_ASM passes its arguments as $0, $1, which -Wpedantic reads as identifiers.
+        target_compile_options(${target} PRIVATE -Wno-dollar-in-identifier-extension)
+    endif()
 endfunction()
 
 find_program(CLANG_FORMAT_EXE NAMES clang-format HINTS "C:/Program Files/LLVM/bin")

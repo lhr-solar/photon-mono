@@ -84,7 +84,12 @@ class Station(unittest.TestCase):
         cls.tmp = Path(tempfile.mkdtemp(prefix="photon-e2e-station-"))
         cls.ship = copy_bundle("station", cls.tmp / "station")
         cls.data = cls.tmp / "data"
-        cls.ports = {k: free_port() for k in ("ingress", "client", "observer", "video-ingress", "video-client", "video-udp")}
+        # Video ingress listens on UDP and TCP, the video fan-out on UDP.
+        udp = {"video-ingress", "video-udp"}
+        cls.ports = {
+            k: free_port(udp=k in udp)
+            for k in ("ingress", "client", "observer", "video-ingress", "video-client", "video-udp")
+        }
         args = [cls.ship / exe("station", "photon-server").name, "-data-dir", cls.data, "-password", PASSWORD]
         for flag, port in cls.ports.items():
             args += ["-" + flag, port]

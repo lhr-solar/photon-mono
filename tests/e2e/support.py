@@ -57,10 +57,29 @@ def require(*paths: Path) -> None:
         raise unittest.SkipTest(message)
 
 
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+def free_port(udp: bool = False) -> int:
+    """A port free for TCP on every interface, as photon-server binds, and for UDP when asked.
+
+    Windows reserves port ranges per protocol (Hyper-V, WSL), so a port free for TCP
+    can still refuse a UDP bind with "forbidden by its access permissions", and TCP
+    ports come out nearly in sequence, straight through a reserved UDP block. So let
+    UDP choose, which skips its own reservations, and check TCP on that number.
+    """
+    if not udp:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("0.0.0.0", 0))
+            return s.getsockname()[1]
+    for _ in range(50):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
+            u.bind(("0.0.0.0", 0))
+            port = u.getsockname()[1]
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("0.0.0.0", port))
+            return port
+        except OSError:
+            continue
+    raise AssertionError("no port free for both TCP and UDP")
 
 
 def port_open(port: int, host: str = "127.0.0.1") -> bool:

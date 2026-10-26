@@ -20,8 +20,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: photon-server/go.mod
           cache-dependency-path: photon-server/go.sum
@@ -37,12 +37,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: photon-server/go.mod
           cache-dependency-path: photon-server/go.sum
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: go vet and test
@@ -58,10 +58,12 @@ jobs:
           PHOTON_E2E_LOGS: ${{ runner.temp }}/e2e-logs
         run: python -m unittest discover -s tests/e2e -t tests/e2e -p test_canp.py -v
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-linux
           path: ${{ runner.temp }}/e2e-logs
+          # A failure before the tests leaves no logs, which is not worth a warning.
+          if-no-files-found: ignore
           retention-days: 7
 
   windows:
@@ -69,15 +71,15 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: photon-server/go.mod
           cache-dependency-path: photon-server/go.sum
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - name: Toolchain
@@ -94,7 +96,7 @@ jobs:
           ninja --version
           go version
       - name: emsdk
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: photon-next/.external/emsdk
           # Bump with EmsdkVersion in scripts/setup.ps1 and web/scripts/setup-emsdk.ps1.
@@ -109,14 +111,15 @@ jobs:
           PHOTON_E2E_LOGS: ${{ runner.temp }}\e2e-logs
         run: .\photon.cmd test e2e --strict
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-windows
           path: ${{ runner.temp }}\e2e-logs
+          if-no-files-found: ignore
           retention-days: 7
       # out\dist is the bundles; held here until the other jobs pass, then publish
       # turns each one into a download.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: staging
           path: out/dist
@@ -131,33 +134,33 @@ jobs:
       contents: read
       actions: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: staging
           path: dist
       - name: Name
         run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: photon-station-${{ env.TAG }}
           path: dist/station
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: photon-server-${{ env.TAG }}
           path: dist/server
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: photon-client-${{ env.TAG }}
           path: dist/client
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: photon-tools-${{ env.TAG }}
           path: dist/tools
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: photon-symbols-${{ env.TAG }}
           path: dist/symbols

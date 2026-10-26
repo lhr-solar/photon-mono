@@ -181,9 +181,8 @@ struct GlState {
 };
 
 #ifndef __EMSCRIPTEN__
+// WebGL2 has every entry point, so only the native loader is ever asked.
 bool extrasReady() { return photonGlExtrasReady(); }
-#else
-bool extrasReady() { return true; }
 #endif
 
 void saveState(GlState& s) {

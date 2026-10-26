@@ -49,7 +49,8 @@ std::string pagePublicHost() {
             var host = "";
             try {
                 host = (location.hostname || "").toLowerCase();
-                var m = host.match(/^(\d+\.\d+\.\d+\.\d+)\.sslip\.io$/);
+                // Bracket classes, not backslash escapes: this body passes through the C++ preprocessor.
+                var m = host.match(/^([0-9]+[.][0-9]+[.][0-9]+[.][0-9]+)[.]sslip[.]io$/);
                 if (m) {
                     host = m[1];
                 }

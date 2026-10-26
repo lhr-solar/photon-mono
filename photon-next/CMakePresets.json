@@ -56,8 +56,7 @@
       "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "PHOTON_FRONTEND": "ON",
-        "BUILD_TESTING": "OFF"
+        "PHOTON_FRONTEND": "ON"
       }
     }
   ],

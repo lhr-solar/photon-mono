@@ -41,7 +41,8 @@ message(STATUS "photon-frontend tinygltf -> ${PHOTON_TINYGLTF_DIR}")
 add_library(photon-tinygltf STATIC
     src/gl3d/tinygltf_impl.cpp
 )
-target_include_directories(photon-tinygltf PUBLIC ${PHOTON_TINYGLTF_DIR})
+# SYSTEM: the json.hpp tinygltf bundles trips clang's -Wdeprecated-literal-operator.
+target_include_directories(photon-tinygltf SYSTEM PUBLIC ${PHOTON_TINYGLTF_DIR})
 target_compile_definitions(photon-tinygltf PUBLIC
     TINYGLTF_NOEXCEPTION
     TINYGLTF_NO_STB_IMAGE_WRITE
@@ -113,12 +114,18 @@ if(NOT EMSCRIPTEN)
         set(SDL_STATIC ON CACHE BOOL "" FORCE)
         set(SDL_TEST OFF CACHE BOOL "" FORCE)
         set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+        # Its ccache probe re-declares cmake_minimum_required(3.4), which CMake warns about.
+        set(SDL_CCACHE OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(sdl2
             URL https://github.com/libsdl-org/SDL/releases/download/release-2.32.8/SDL2-2.32.8.tar.gz
             SOURCE_DIR ${PHOTON_EXTERNAL_DIR}/sdl2
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         )
         FetchContent_MakeAvailable(sdl2)
+        if(TARGET SDL2-static)
+            # Vendored C; each new clang finds something new in it that is not ours to fix.
+            target_compile_options(SDL2-static PRIVATE -w)
+        endif()
     endif()
     if(TARGET SDL2::SDL2-static)
         set(PHOTON_SDL2_TARGET SDL2::SDL2-static)
@@ -133,10 +140,14 @@ if(NOT EMSCRIPTEN)
 endif()
 
 add_library(photon-imgui STATIC ${PHOTON_IMGUI_SOURCES})
-target_include_directories(photon-imgui PUBLIC
+target_include_directories(photon-imgui SYSTEM PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
     ${implot_SOURCE_DIR}
+)
+# ImPlot v0.17 ORs ImGui 1.92's public and private button flags; upstream code, not ours.
+target_compile_options(photon-imgui PRIVATE
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-deprecated-enum-enum-conversion>
 )
 if(EMSCRIPTEN)
     target_compile_definitions(photon-imgui PUBLIC IMGUI_IMPL_OPENGL_ES3)
@@ -287,8 +298,13 @@ else()
         else()
             set(PHOTON_WEBVIEW2_LIB "${PHOTON_WEBVIEW2_DIR}/build/native/x86/WebView2LoaderStatic.lib")
         endif()
-        target_include_directories(photon-ui PRIVATE
+        # SYSTEM: WebView2.h declares an enum value clang finds out of range for int.
+        target_include_directories(photon-ui SYSTEM PRIVATE
             "${PHOTON_WEBVIEW2_DIR}/build/native/include"
+        )
+        # IID_PPV_ARGS is __uuidof, the COM idiom; -Wpedantic calls it an extension.
+        set_source_files_properties(src/native_maps.cpp src/native_video.cpp PROPERTIES
+            COMPILE_OPTIONS "-Wno-language-extension-token"
         )
         target_link_libraries(photon-ui PRIVATE
             opengl32
