@@ -60,6 +60,8 @@ Go programs build into `out\build\go`. Bundles come from CMake install component
 
 ## Test
 
+The tests live under `tests\`: `native` (the C++ tests CTest runs), `web` (the video decoder glue, under Node), `canp` (the car-side CANP sink and source), and `e2e`. The Go tests are the exception: Go only builds a package's `_test.go` files from that package's own folder, so they stay beside the code in `photon-server`.
+
 | Word | Runs |
 | --- | --- |
 | `go` | `go vet` and the photon-server package tests: config, client gate, store recovery, RTP/RTCP, video store, locate, UDP fan-out, VPT, local UI |

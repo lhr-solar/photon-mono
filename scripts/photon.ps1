@@ -507,7 +507,7 @@ function Start-Test {
             Invoke-Step 'ctest' 'ctest' $UiDir @('--preset', $preset)
         }
         if (Get-Command node -ErrorAction SilentlyContinue) {
-            Invoke-Step 'node' 'node' $null @((Join-Path $UiDir 'tests\test_video_webcodecs.cjs'))
+            Invoke-Step 'node' 'node' $null @((Join-Path $Root 'tests\web\test_video_webcodecs.cjs'))
         } else {
             Write-Output 'node: not on PATH, video decoder glue test not run'
         }

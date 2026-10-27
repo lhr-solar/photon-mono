@@ -1,6 +1,6 @@
 """The car-side C code against photon-server. Linux only: canp and the streamer use Linux headers.
 
-canp/test/source.c dials ingress on 6100 and sends two frames (0x7FF, 0x7FE) every 10 ms
+tests/canp/source.c dials ingress on 6100 and sends two frames (0x7FF, 0x7FE) every 10 ms
 until it is stopped, the same writer the car runs.
 """
 
@@ -32,6 +32,7 @@ from support import (
 
 SERVER_SRC = REPO / "photon-server"
 CANP = SERVER_SRC / "canp"
+CANP_TESTS = REPO / "tests" / "canp"
 PASSWORD = "e2e-canp"
 
 
@@ -61,14 +62,14 @@ class CarSideC(unittest.TestCase):
         self.compile([SERVER_SRC / "car" / "stream_can_gps_v3.c"], self.tmp / "stream.o", ["-c", "-I", str(CANP)])
 
     def test_canp_sink_compiles(self):
-        self.compile([CANP / "canp.c", CANP / "test" / "sink.c"], self.tmp / "sink", ["-lpthread"])
+        self.compile([CANP / "canp.c", CANP_TESTS / "sink.c"], self.tmp / "sink", ["-I", str(CANP), "-lpthread"])
 
     def test_canp_source_reaches_the_server(self):
         require(exe("server", "photon-server"))
         if port_open(6100):
             self.skipTest("port 6100 is in use; the CANP source only dials 6100")
         source = self.tmp / "source"
-        self.compile([CANP / "canp.c", CANP / "test" / "source.c"], source, ["-lm"])
+        self.compile([CANP / "canp.c", CANP_TESTS / "source.c"], source, ["-I", str(CANP), "-lm"])
 
         data = self.tmp / "data"
         observer = free_port()

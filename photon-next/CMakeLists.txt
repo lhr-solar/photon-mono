@@ -71,6 +71,9 @@ function(photon_apply_warnings target)
     endif()
 endfunction()
 
+# The C++ tests live with the rest of the repo's tests, in tests/native at the root.
+get_filename_component(PHOTON_TESTS_DIR "${CMAKE_SOURCE_DIR}/../tests/native" ABSOLUTE)
+
 find_program(CLANG_FORMAT_EXE NAMES clang-format HINTS "C:/Program Files/LLVM/bin")
 if(CLANG_FORMAT_EXE)
     file(GLOB_RECURSE PHOTON_FORMAT_FILES
@@ -79,8 +82,8 @@ if(CLANG_FORMAT_EXE)
         "${CMAKE_SOURCE_DIR}/photon/*.h"
     )
     file(GLOB PHOTON_FORMAT_TEST_FILES
-        "${CMAKE_SOURCE_DIR}/tests/*.cpp"
-        "${CMAKE_SOURCE_DIR}/tests/*.hpp"
+        "${PHOTON_TESTS_DIR}/*.cpp"
+        "${PHOTON_TESTS_DIR}/*.hpp"
     )
     file(GLOB PHOTON_FORMAT_EXPORT_FILES
         "${CMAKE_SOURCE_DIR}/tools/photon-export/*.cpp"
@@ -121,7 +124,7 @@ if(PHOTON_FRONTEND)
     add_subdirectory(photon)
     add_subdirectory(photon/ui)
 else()
-    # Before tools/photon-export, which registers its own test.
+    # Defines BUILD_TESTING, which adds tests/native below.
     include(CTest)
     # photon-index reads the DBC; photon-backend reads the DBCs and the track catalog.
     install(DIRECTORY assets/dbc DESTINATION assets COMPONENT server)
@@ -133,6 +136,7 @@ else()
         add_subdirectory(photon/ui)
     endif()
     if(BUILD_TESTING)
-        add_subdirectory(tests)
+        # Outside this source tree, so it names its build folder: tests/, as before.
+        add_subdirectory("${PHOTON_TESTS_DIR}" tests)
     endif()
 endif()

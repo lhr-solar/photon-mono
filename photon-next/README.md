@@ -37,7 +37,7 @@ PCAN / DAQ TCP / log replay
 | `photon/ui` | ImGui client (`photon-ui` / `photon.html`) |
 | `web/` | shell + Emscripten build/serve scripts |
 | `tools/` | `photon-export`, QA, log analysis |
-| `tests/` | CTest (`photon-tests`) |
+| `../tests/native/` | CTest (`photon-tests`, `photon-export-tests`); all the repo's tests are under `../tests/` |
 | `assets/` | DBC, fonts, models, tracks |
 
 ## Build
