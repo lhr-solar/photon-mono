@@ -66,8 +66,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # The native programs everywhere else, and the Go server built on each. The
-  # Windows x64 job below stays the one that assembles bundles and runs e2e.
+  # photon setup, build, and test native everywhere else, and the Go server built
+  # on each. The Windows x64 job below stays the one that runs e2e and publishes.
   native:
     name: Build and test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -106,32 +106,28 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - name: Toolchain (Linux)
-        if: runner.os == 'Linux'
-        # The system SDL2 brings the X11 and Wayland headers a source build would need.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libsdl2-dev
+      - name: Setup (Linux and macOS)
+        # The same photon setup a person runs: brew on macOS, apt here, SDL2 for the desktop UI.
+        if: runner.os != 'Windows'
+        run: ./photon setup server client tools
       - name: Toolchain (Windows)
+        # The runners have no winget, so photon setup cannot run here.
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          python -m pip install --disable-pip-version-check ninja "cmake>=3.25"
           if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) { choco install llvm -y --no-progress }
           "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-      - name: Toolchain
-        run: python -m pip install --disable-pip-version-check ninja "cmake>=3.25"
       - name: Versions
         run: |
           clang --version
           cmake --version
           ninja --version
           go version
-      - name: Configure
-        working-directory: photon-next
-        run: cmake --preset desktop-release ${{ matrix.cmake-args }}
       - name: Build
-        working-directory: photon-next
-        run: cmake --build --preset desktop-release
+        env:
+          PHOTON_CMAKE_ARGS: ${{ matrix.cmake-args }}
+        run: ${{ runner.os == 'Windows' && 'python scripts/photon' || './photon' }} build server client tools --config Release
       - name: Architecture
         # A wrong-arch binary still builds and runs under emulation; catch it here.
         working-directory: out/build/desktop-release
@@ -142,8 +138,7 @@ jobs:
             file "$exe" | grep -qi '${{ matrix.arch }}'
           done
       - name: C++ tests
-        working-directory: photon-next
-        run: ctest --preset desktop-release
+        run: ${{ runner.os == 'Windows' && 'python scripts/photon' || './photon' }} test native --config Release
       - name: go vet and build
         working-directory: photon-server
         run: |
@@ -183,7 +178,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: photon-next/.external/emsdk
-          # Bump with EmsdkVersion in scripts/setup.ps1 and web/scripts/setup-emsdk.ps1.
+          # Bump with EMSDK_VERSION in scripts/photon/web.py.
           key: emsdk-6.0.13-${{ runner.os }}
       - name: Build
         # Every bundle: server, client (desktop and web), station, tools, symbols.

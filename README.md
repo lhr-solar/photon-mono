@@ -13,18 +13,28 @@ photon station [ingest PORT]
 photon client  [FROM] [--ui desktop|web]
 ```
 
+`photon` works the same on Windows, macOS, and Linux. On Windows it is `photon.cmd` (type `photon` or `.\photon` in the repo root); on macOS and Linux it is `./photon`. Both run the Python CLI in `scripts/photon`, which needs Python 3.9 or newer: macOS has it with the Xcode Command Line Tools, Linux distributions ship it, and on Windows `photon setup` installs it with winget if it is missing.
+
 ## Setup and build
 
 | Word | Builds | Setup installs |
 | --- | --- | --- |
-| `server` | `photon-server`, `photon-sshd`, `photon-index` | CMake, Ninja, LLVM, VS C++ build tools, Go |
-| `client` | `photon-backend` and the `--ui` (desktop when omitted) | CMake, Ninja, LLVM, VS C++ build tools, Git |
-| `--ui desktop` | `photon-ui.exe` | |
-| `--ui web` | the page, `ui\photon.html` and `ui\models\` | Python, emsdk 6.0.13 |
+| `server` | `photon-server`, `photon-sshd`, `photon-index` | CMake, Ninja, clang, Go |
+| `client` | `photon-backend` and the `--ui` (desktop when omitted) | CMake, Ninja, clang, Git |
+| `--ui desktop` | `photon-ui` | SDL2 (Linux only; elsewhere the build fetches it) |
+| `--ui web` | the page, `ui\photon.html` and `ui\models\` | emsdk 6.0.13 |
 | `station` | `server` and `client --ui web` | both |
-| `tools` | `photon-export`, `photon-observer` | CMake, Ninja, LLVM, VS C++ build tools, Go |
+| `tools` | `photon-export`, `photon-observer` | CMake, Ninja, clang, Go |
 
-Plain `photon build` and `photon setup` mean `server client`. `--pcan` adds the PEAK driver for `photon client pcan`. `setup --build` builds the same words when setup finishes.
+Where setup gets them:
+
+| OS | From |
+| --- | --- |
+| Windows | winget: LLVM for clang, plus the Visual Studio C++ build tools and Windows SDK it links against |
+| macOS | the Xcode Command Line Tools (Apple's clang and git), and Homebrew for the rest |
+| Linux | apt, dnf, pacman, or zypper, whichever is there, through `sudo`; clang 17+ and Go 1.21+ (which fetches the Go version `go.mod` asks for) |
+
+Plain `photon build` and `photon setup` mean `server client`. `--pcan` adds the PEAK driver for `photon client pcan`, on Windows only (PCAN is Windows-only for now). `setup --build` builds the same words when setup finishes. The desktop UI on macOS and Linux has no OSM 3D map overlay or video decode yet; both are Windows-only.
 
 ```text
 photon setup station --build      PC: ingest server plus the page it serves
@@ -40,9 +50,9 @@ A build compiles in `out\build` and then assembles runnable bundles in `out\dist
 | --- | --- | --- |
 | `out\dist\server` | `photon-server`, `photon-sshd`, `photon-index`, `assets\dbc` | `photon server` |
 | `out\dist\station` | the server bundle, plus `photon-backend`, `assets\tracks`, and the page in `ui\` | `photon station` |
-| `out\dist\client` | `photon-backend`, `assets\dbc`, `assets\tracks`, and the UIs that were built: `photon-ui.exe` with `assets\fonts`, `models`, `maps3d.*`, and/or the page in `ui\` | `photon client` |
+| `out\dist\client` | `photon-backend`, `assets\dbc`, `assets\tracks`, and the UIs that were built: `photon-ui` with `assets\fonts`, `models`, `maps3d.*`, and/or the page in `ui\` | `photon client` |
 | `out\dist\tools` | `photon-export`, `photon-observer` | by hand |
-| `out\dist\symbols` | `.pdb` files from the most recent build, for the `.exe` files that have them | |
+| `out\dist\symbols` | Windows only: `.pdb` files from the most recent build, for the `.exe` files that have them | |
 
 A bundle is installed into `out\dist\.staging\<bundle>`, checked for every file it needs, and only then swapped in for the old one, so a failed build never leaves a bundle that looks complete. A build stops before compiling if a program is running from a bundle it would replace.
 
@@ -52,7 +62,7 @@ The C++ half comes from CMake presets in `photon-next\CMakePresets.json`:
 | --- | --- | --- |
 | `headless-debug`, `headless-release` | `out\build\headless-<config>` | `server`, `tools`, and a client without the desktop UI; never fetches SDL, ImGui, or WebView2 |
 | `desktop-debug`, `desktop-release` | `out\build\desktop-<config>` | any build with `--ui desktop` (all native targets) |
-| `web-release` | `out\build\web-release` | the page; `photon-next\web\scripts\build.ps1` loads emsdk and runs it |
+| `web-release` | `out\build\web-release` | the page; `photon build` loads emsdk, runs it, and stamps the page (`scripts/photon/web.py`) |
 
 Go programs build into `out\build\go`. Bundles come from CMake install components (`server`, `client`, `desktop`, `web`, `tools`, `symbols`) with `cmake --install <tree> --component <name>`, plus the Go programs. The same presets work from a terminal in `photon-next` (`cmake --preset desktop-debug`, `cmake --build --preset desktop-debug`, `ctest --preset desktop-debug`) and from editors that read CMake presets, such as VS Code's CMake Tools.
 
@@ -72,7 +82,7 @@ Plain `photon test` runs all three. Build first. The station test needs ports 87
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push. Three jobs run side by side: the server tests on Windows, the server tests and the CANP interop test on Linux, and a Windows job that runs `photon build station client tools --ui both --config Release`, then `photon test native` and `photon test e2e --strict` against those bundles. When all three pass, the run's page has `photon-station-<commit>`, `photon-server-<commit>`, `photon-client-<commit>`, `photon-tools-<commit>`, and `photon-symbols-<commit>` to download: the `out\dist` folders, kept for 90 days. A failed run uploads its test logs instead.
+`.github/workflows/ci.yml` runs on every push. The jobs run side by side: the server tests on Windows; the server tests and the CANP interop test on Linux; a Windows x64 job that runs `photon build station client tools --ui both --config Release`, then `photon test native` and `photon test e2e --strict` against those bundles; and one job each for Linux x64 and arm64, macOS arm64 and x64, and Windows arm64, which run `photon setup` (Linux and macOS), `photon build server client tools --config Release`, and `photon test native`. When the two server-test jobs and the Windows x64 job pass, the run's page has `photon-station-<commit>`, `photon-server-<commit>`, `photon-client-<commit>`, `photon-tools-<commit>`, and `photon-symbols-<commit>` to download: the `out\dist` folders, kept for 90 days. A failed run uploads its test logs instead.
 
 ## Run
 
@@ -97,7 +107,7 @@ photon client oracle --ui web          the public pipe, in the browser
 photon client examples\brainerd-30s    replay the sample clip
 ```
 
-`PHOTON_PASSWORD` defaults to `laptop`. `PHOTON_DATA_DIR` defaults to `data\` in this repo. Flags after the use case are passed through to `photon-server` or `photon-backend`. Add `-DryRun` to any command to print what it would run.
+`PHOTON_PASSWORD` defaults to `laptop`. `PHOTON_DATA_DIR` defaults to `data\` in this repo. Flags after the use case are passed through to `photon-server` or `photon-backend`. Add `--dry-run` to any command to print what it would run.
 
 `Photon/` stays its own repo. That tree is the native desktop client and the embedded sharepoint.
 

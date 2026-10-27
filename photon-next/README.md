@@ -55,7 +55,7 @@ cmake --build --preset desktop-debug
 | `desktop-debug`, `desktop-release` | all of that plus `photon-ui` | `..\out\build\desktop-<config>` |
 | `web-release` | the WASM page | `..\out\build\web-release` |
 
-The WASM page needs emsdk loaded first, so build it with `.\web\scripts\build.ps1` (it installs emsdk once through `.\web\scripts\setup-emsdk.ps1`).
+The WASM page needs emsdk loaded first, so build it from the repo root with `photon build client --ui web` (`photon setup client --ui web` installs emsdk once).
 
 In a tree, binaries are at `photon\daemon\photon-backend.exe`, `photon\daemon\photon-index.exe`, `photon-ui.exe`, and `photon.html`. Run from a tree, they read `assets\` from this checkout. Install components (`server`, `client`, `desktop`, `web`, `tools`, `symbols`) copy each program with the assets it reads, for running anywhere: `cmake --install ..\out\build\desktop-debug --component client --prefix <dir>`.
 

@@ -41,21 +41,21 @@ cmake --install ..\out\build\desktop-debug --component client --prefix C:\photon
 
 Pinned third-party (FetchContent into `.external/`): emsdk **6.0.13**, Dear ImGui `v1.92.9-docking`, ImPlot `v0.17`, Emscripten `--use-port=sdl2` + WebGL2/GLES3.
 
-Install emsdk once: `.\web\scripts\setup-emsdk.ps1` installs and activates 6.0.13 (or clone `emscripten-core/emsdk` into `.external/emsdk` and `emsdk install 6.0.13; emsdk activate 6.0.13`).
+Install emsdk once from the repo root: `photon setup client --ui web` installs and activates 6.0.13 into `.external/emsdk` (or clone `emscripten-core/emsdk` there and `emsdk install 6.0.13; emsdk activate 6.0.13`). Then, also from the repo root:
 
-```powershell
-.\web\scripts\build.ps1
+```text
+photon build client --ui web
 ```
 
-Manual equivalent (the preset finds the Emscripten toolchain through `EMSDK`, which `emsdk_env.ps1` sets):
+Manual equivalent (the preset finds the Emscripten toolchain through `EMSDK`, which `emsdk_env` sets):
 
-```powershell
-. .\.external\emsdk\emsdk_env.ps1
+```text
+. .external/emsdk/emsdk_env.sh          (PowerShell: . .\.external\emsdk\emsdk_env.ps1)
 cmake --preset web-release
 cmake --build --preset web-release
 ```
 
-`build.ps1` also stamps one cache token into the html and js and checks the JS glue against the wasm, so prefer it. Outputs: `..\out\build\web-release\photon.{html,js,wasm,data}` and `models\`. In the monorepo, `photon build client --ui web` runs `build.ps1` and installs the `web` component into the client bundle's `ui\`.
+`photon build` also stamps one cache token into the html and js and checks the JS glue against the wasm (`scripts/photon/web.py`), so prefer it. Outputs: `../out/build/web-release/photon.{html,js,wasm,data}` and `models/`, and the `web` component installed into the client bundle's `ui/`.
 
 Serve: `.\web\scripts\serve.ps1`, open `http://127.0.0.1:8080/photon.html` (never `file://`). Headless protocol check: `python .\web\scripts\smoke_ws.py`.
 

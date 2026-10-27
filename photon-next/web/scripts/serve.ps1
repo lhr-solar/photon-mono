@@ -6,7 +6,7 @@ $Port = 8080
 if ($args.Count -ge 1) { $Port = [int]$args[0] }
 
 if (-not (Test-Path (Join-Path $Web "photon.html"))) {
-    throw "photon.html not found in $Web. Run web/scripts/build.ps1 first."
+    throw "photon.html not found in $Web. Run: photon build client --ui web"
 }
 
 Write-Host "Serving $Web on http://127.0.0.1:$Port/photon.html"

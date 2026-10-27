@@ -118,7 +118,7 @@ if(PHOTON_FRONTEND)
     if(NOT EMSCRIPTEN)
         message(FATAL_ERROR
             "PHOTON_FRONTEND=ON requires the Emscripten toolchain.\n"
-            "Use web/scripts/build.ps1, or load emsdk_env and run:\n"
+            "Use photon build client --ui web from the repo root, or load emsdk_env and run:\n"
             "  cmake --preset web-release")
     endif()
     add_subdirectory(photon)

@@ -51,7 +51,7 @@
     {
       "name": "web-release",
       "displayName": "Web Release",
-      "description": "The WASM page; run web/scripts/build.ps1, which loads emsdk and post-processes the page",
+      "description": "The WASM page; photon build client --ui web loads emsdk, runs this, and post-processes the page",
       "inherits": "base",
       "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
       "cacheVariables": {

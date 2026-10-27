@@ -234,7 +234,7 @@ else()
     message(STATUS "photon-frontend skipping GLB copy (missing files under ${PHOTON_MODELS_DIR})")
 endif()
 
-# web/scripts/build.ps1 stamps a cache token into the html and js after the link,
+# photon build (scripts/photon/web.py) stamps a cache token into the html and js after the link,
 # so install after it, not straight after cmake --build.
 install(FILES
     "${CMAKE_BINARY_DIR}/photon.html"
