@@ -80,6 +80,15 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 	if err := WriteClientAuth(clientConn, "testpw"); err != nil {
 		t.Fatalf("client auth: %v", err)
 	}
+	// A client starts at the next message, so one stored before the server has
+	// registered it never reaches it. Wait for the registration, not the dial.
+	registered := time.Now().Add(5 * time.Second)
+	for clients.Count() == 0 {
+		if time.Now().After(registered) {
+			t.Fatalf("downstream client was not registered within 5s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	// 5. Connect an ingress sender and send test packets
 	ingressConn, err := net.Dial("tcp", ingressListener.Addr().String())
@@ -95,6 +104,8 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 
 	// 6. Read received packet on downstream client
 	recvBuf := make([]byte, len(testPayload))
+	// Fail here, not at the 10-minute test timeout, if the payload never arrives.
+	_ = clientConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	if _, err := io.ReadFull(clientConn, recvBuf); err != nil {
 		t.Fatalf("failed to read payload on downstream client: %v", err)
 	}

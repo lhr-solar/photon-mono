@@ -1662,7 +1662,9 @@ bool Store::tick(std::uint64_t nowMs, std::string* error) {
     }
     std::uint64_t interval = liveOpts_.checkpointMs;
     if (liveOpts_.indexRewriteBudgetBps > 0) {
-        const auto needed = indexBytes * 1000ull / liveOpts_.indexRewriteBudgetBps;
+        // Not auto: uint64_t * 1000ull is unsigned long long, a different type from
+        // uint64_t (unsigned long) on Linux, and std::max needs the two to match.
+        const std::uint64_t needed = indexBytes * 1000ull / liveOpts_.indexRewriteBudgetBps;
         interval = std::max(interval, needed);
     }
     if (nowMs - lastCheckpointMs_ < interval) {

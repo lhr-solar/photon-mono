@@ -90,7 +90,8 @@ jobs:
             arch: x86_64
           - name: Windows arm64
             os: windows-11-arm
-            arch: aarch64
+            # file says ARM64 for PE files, aarch64 only for ELF.
+            arch: arm64
             # Whatever clang the runner has, emit ARM64, not x64 under emulation.
             cmake-args: -DCMAKE_C_COMPILER_TARGET=aarch64-pc-windows-msvc -DCMAKE_CXX_COMPILER_TARGET=aarch64-pc-windows-msvc
     defaults:
