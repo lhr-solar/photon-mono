@@ -3,6 +3,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -101,6 +102,10 @@ Guard::Guard() {
 #if defined(_WIN32)
     WSADATA data{};
     WSAStartup(MAKEWORD(2, 2), &data);
+#else
+    // A send to a peer that hung up raises SIGPIPE, which would end the process;
+    // ignored, send returns EPIPE and the caller drops that client.
+    std::signal(SIGPIPE, SIG_IGN);
 #endif
 }
 

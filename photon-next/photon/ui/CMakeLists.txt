@@ -155,8 +155,13 @@ if(EMSCRIPTEN)
     target_link_options(photon-imgui PUBLIC "SHELL:--use-port=sdl2")
 else()
     target_link_libraries(photon-imgui PUBLIC ${PHOTON_SDL2_TARGET})
-    # clang + MSVC ABI: SDL_endian.h redefines the _m_prefetch builtin.
-    target_compile_definitions(photon-imgui PUBLIC __PRFCHWINTRIN_H)
+    if(WIN32)
+        # clang + MSVC ABI: SDL_endian.h redefines the _m_prefetch builtin.
+        target_compile_definitions(photon-imgui PUBLIC __PRFCHWINTRIN_H)
+    else()
+        # imgui_impl_opengl3's loader dlopens libGL.
+        target_link_libraries(photon-imgui PUBLIC ${CMAKE_DL_LIBS})
+    endif()
 endif()
 
 if(EMSCRIPTEN)
@@ -247,9 +252,13 @@ else()
         ${PHOTON_UI_SOURCES}
         src/platform.cpp
         src/gl_loader.cpp
-        src/native_maps.cpp
-        src/native_video.cpp
     )
+    if(WIN32)
+        target_sources(photon-ui PRIVATE src/native_maps.cpp src/native_video.cpp)
+    else()
+        # WebView2 and Media Foundation have no counterpart here yet.
+        target_sources(photon-ui PRIVATE src/native_stubs.cpp)
+    endif()
     target_include_directories(photon-ui PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
@@ -293,7 +302,10 @@ else()
             file(MAKE_DIRECTORY "${PHOTON_WEBVIEW2_DIR}")
             file(ARCHIVE_EXTRACT INPUT "${PHOTON_WEBVIEW2_NUPKG}" DESTINATION "${PHOTON_WEBVIEW2_DIR}")
         endif()
-        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        # What the compiler targets, not the host: an x64 clang can build ARM64 and back.
+        if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
+            set(PHOTON_WEBVIEW2_LIB "${PHOTON_WEBVIEW2_DIR}/build/native/arm64/WebView2LoaderStatic.lib")
+        elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
             set(PHOTON_WEBVIEW2_LIB "${PHOTON_WEBVIEW2_DIR}/build/native/x64/WebView2LoaderStatic.lib")
         else()
             set(PHOTON_WEBVIEW2_LIB "${PHOTON_WEBVIEW2_DIR}/build/native/x86/WebView2LoaderStatic.lib")

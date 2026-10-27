@@ -66,8 +66,91 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # The native programs everywhere else, and the Go server built on each. The
+  # Windows x64 job below stays the one that assembles bundles and runs e2e.
+  native:
+    name: Build and test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-24.04
+            arch: x86-64
+          - name: Linux arm64
+            os: ubuntu-24.04-arm
+            arch: aarch64
+          - name: macOS arm64
+            os: macos-15
+            arch: arm64
+          - name: macOS x64
+            os: macos-15-intel
+            arch: x86_64
+          - name: Windows arm64
+            os: windows-11-arm
+            arch: aarch64
+            # Whatever clang the runner has, emit ARM64, not x64 under emulation.
+            cmake-args: -DCMAKE_C_COMPILER_TARGET=aarch64-pc-windows-msvc -DCMAKE_CXX_COMPILER_TARGET=aarch64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: photon-server/go.mod
+          cache-dependency-path: photon-server/go.sum
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Toolchain (Linux)
+        if: runner.os == 'Linux'
+        # The system SDL2 brings the X11 and Wayland headers a source build would need.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libsdl2-dev
+      - name: Toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) { choco install llvm -y --no-progress }
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Toolchain
+        run: python -m pip install --disable-pip-version-check ninja "cmake>=3.25"
+      - name: Versions
+        run: |
+          clang --version
+          cmake --version
+          ninja --version
+          go version
+      - name: Configure
+        working-directory: photon-next
+        run: cmake --preset desktop-release ${{ matrix.cmake-args }}
+      - name: Build
+        working-directory: photon-next
+        run: cmake --build --preset desktop-release
+      - name: Architecture
+        # A wrong-arch binary still builds and runs under emulation; catch it here.
+        working-directory: out/build/desktop-release
+        run: |
+          for exe in photon-ui photon/daemon/photon-backend photon/daemon/photon-index; do
+            [ -f "$exe.exe" ] && exe="$exe.exe"
+            file "$exe"
+            file "$exe" | grep -qi '${{ matrix.arch }}'
+          done
+      - name: C++ tests
+        working-directory: photon-next
+        run: ctest --preset desktop-release
+      - name: go vet and build
+        working-directory: photon-server
+        run: |
+          go vet ./...
+          go build ./...
+
   windows:
-    name: Build and test (Windows)
+    name: Build and test (Windows x64)
     runs-on: windows-latest
     timeout-minutes: 90
     steps:

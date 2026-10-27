@@ -6,6 +6,7 @@
 #include "photon/tsdb.hpp"
 
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -64,6 +65,8 @@ struct WinsockGuard {
     }
 #else
     bool ok = true;
+    // A send to a reader that hung up would otherwise end photon-index with SIGPIPE.
+    WinsockGuard() { std::signal(SIGPIPE, SIG_IGN); }
 #endif
 };
 

@@ -18,5 +18,7 @@ target_link_libraries(photon-core INTERFACE
     photon_net
 )
 if(NOT EMSCRIPTEN)
-    target_link_libraries(photon-core INTERFACE photon_hw)
+    # Not under Emscripten: -pthread there would need SharedArrayBuffer on the page.
+    find_package(Threads REQUIRED)
+    target_link_libraries(photon-core INTERFACE photon_hw Threads::Threads)
 endif()

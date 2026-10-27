@@ -10,6 +10,7 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -19,6 +20,7 @@
 #include <windows.h>
 #include <dbghelp.h>
 #include <objbase.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -33,7 +35,7 @@ void loop() { gApp.frame(); }
 }  // namespace
 #endif
 
-#ifndef __EMSCRIPTEN__
+#ifdef _WIN32
 void photonSymbolize(void* const* frames, USHORT n) {
     HANDLE proc = GetCurrentProcess();
     // Deferred loads only — do not talk to a symbol server from a crash path.
@@ -89,7 +91,9 @@ LONG WINAPI photonVectored(EXCEPTION_POINTERS* info) {
     }
     return photonCrashFilter(info);
 }
+#endif
 
+#ifndef __EMSCRIPTEN__
 void printUsage() {
     std::fprintf(stderr,
                  "photon-ui: native ImGui frontend (same sources as the WASM UI)\n"
@@ -181,9 +185,11 @@ int main(int argc, char** argv) {
     return 0;
 #else
     SDL_SetMainReady();
+#ifdef _WIN32
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     AddVectoredExceptionHandler(1, photonVectored);
     SetUnhandledExceptionFilter(photonCrashFilter);
+#endif
     photon::ui::NativePageOptions opt;
     if (!parseArgs(argc, argv, opt)) {
         return 2;
@@ -209,7 +215,9 @@ int main(int argc, char** argv) {
     std::fprintf(stdout, "photon-ui shutting down\n");
     std::fflush(stdout);
     app.shutdown();
+#ifdef _WIN32
     CoUninitialize();
+#endif
     std::fprintf(stdout, "photon-ui shutdown ok\n");
     std::fflush(stdout);
     return 0;
