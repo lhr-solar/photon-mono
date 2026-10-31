@@ -3,6 +3,7 @@ add_executable(photon-tests
     test_cli.cpp
     test_analysis_compute.cpp
     test_interp.cpp
+    test_frame_clock.cpp
     test_mux.cpp
     test_dbc.cpp
     test_log_sessions.cpp
@@ -45,6 +46,10 @@ endif()
 
 file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/assets" PHOTON_ASSETS_DIR_NORM)
 target_compile_definitions(photon-tests PRIVATE PHOTON_ASSETS_DIR="${PHOTON_ASSETS_DIR_NORM}")
+# The car clips under examples/ at the repo root.
+get_filename_component(PHOTON_EXAMPLES_DIR_ABS "${CMAKE_SOURCE_DIR}/../examples" ABSOLUTE)
+file(TO_CMAKE_PATH "${PHOTON_EXAMPLES_DIR_ABS}" PHOTON_EXAMPLES_DIR_NORM)
+target_compile_definitions(photon-tests PRIVATE PHOTON_EXAMPLES_DIR="${PHOTON_EXAMPLES_DIR_NORM}")
 
 photon_apply_warnings(photon-tests)
 

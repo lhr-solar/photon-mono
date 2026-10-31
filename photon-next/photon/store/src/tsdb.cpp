@@ -1,6 +1,7 @@
 #include "photon/tsdb.hpp"
 
 #include "photon/endian.hpp"
+#include "photon/frame_clock.hpp"
 #include "photon/json.hpp"
 #include "photon/sha1.hpp"
 #include "photon/vsd1.hpp"
@@ -2575,6 +2576,7 @@ IndexStats indexLogs(const std::filesystem::path& logs, const std::filesystem::p
     bool failed = false;
     std::uint64_t frames = 0;
     std::uint64_t lastMs = 0;
+    frame_clock::FrameClock clock;
     std::set<std::string> usedIds;
     auto openSession = [&](std::uint64_t firstMs) -> bool {
         SessionManifest man;
@@ -2680,11 +2682,13 @@ IndexStats indexLogs(const std::filesystem::path& logs, const std::filesystem::p
             }
             ++frames;
             lastMs = batch.timestamp;
+            std::uint64_t frameMs[canp::kMaxBatch];
+            clock.stamp(batch, frameMs);
             for (std::uint16_t p = 0; p < batch.count; ++p) {
-                const auto samples = dbc::decodeFrameRaw(db, batch.packets[p].canId, batch.packets[p].data,
-                                                         batch.packets[p].dlc);
+                const auto& pkt = batch.packets[p];
+                const auto samples = dbc::decodeFrameRaw(db, pkt.canId, pkt.data, pkt.dlc);
                 for (const auto& s : samples) {
-                    store.append(s.signalId, batch.timestamp, s.raw);
+                    store.append(s.signalId, frameMs[p], s.raw);
                 }
             }
             return true;
@@ -2726,13 +2730,16 @@ bool collectDecodeTriples(const std::filesystem::path& logs, const dbc::Database
     ids.clear();
     times.clear();
     raws.clear();
+    frame_clock::FrameClock clock;
     return walkVsd1(logs, error, [&](const canp::Batch& batch, std::uint64_t) -> bool {
+        std::uint64_t frameMs[canp::kMaxBatch];
+        clock.stamp(batch, frameMs);
         for (std::uint16_t p = 0; p < batch.count; ++p) {
-            const auto samples =
-                dbc::decodeFrameRaw(db, batch.packets[p].canId, batch.packets[p].data, batch.packets[p].dlc);
+            const auto& pkt = batch.packets[p];
+            const auto samples = dbc::decodeFrameRaw(db, pkt.canId, pkt.data, pkt.dlc);
             for (const auto& s : samples) {
                 ids.push_back(s.signalId);
-                times.push_back(batch.timestamp);
+                times.push_back(frameMs[p]);
                 raws.push_back(s.raw);
             }
         }
@@ -2752,6 +2759,7 @@ struct ValidateState {
     std::uint64_t minMs = 0;
     std::uint64_t maxMs = 0;
     std::uint64_t windowStart = 0;
+    std::uint64_t lastBatchMs = 0;
     std::uint64_t checked = 0;
     std::vector<std::uint32_t> ids;
     std::vector<std::uint64_t> times;
@@ -2856,7 +2864,11 @@ bool validateSessions(std::span<const Store* const> stores, const std::filesyste
 
     bool ok = true;
     std::string localError;
+    // Every batch goes through the clock, checked or not, so its times match indexLogs.
+    frame_clock::FrameClock clock;
+    std::uint64_t frameMs[canp::kMaxBatch] = {};
     if (!walkVsd1(logs, error, [&](const canp::Batch& batch, std::uint64_t) -> bool {
+            clock.stamp(batch, frameMs);
             // Ranges are disjoint, so at most one session owns this batch.
             const auto it = std::upper_bound(states.begin(), states.end(), batch.timestamp,
                                              [](std::uint64_t t, const ValidateState& s) { return t < s.minMs; });
@@ -2867,22 +2879,26 @@ bool validateSessions(std::span<const Store* const> stores, const std::filesyste
             if (batch.timestamp < st.minMs || batch.timestamp > st.maxMs) {
                 return true;
             }
-            // Close the window before this batch so no sample straddles two
-            // windows. Snapping rather than stepping keeps a long idle gap from
-            // spinning through empty windows.
-            if (batch.timestamp >= st.windowStart + kValidateWindowMs && batch.timestamp > 0) {
-                if (!compareValidateWindow(st, st.windowStart, batch.timestamp - 1, localError)) {
+            // Close the window at the previous batch so no sample straddles two
+            // windows: FrameClock puts every sample of a batch after the batch
+            // before it, and a batch at the same time as the last one stays in
+            // the open window. Snapping rather than stepping keeps a long idle
+            // gap from spinning through empty windows.
+            if (batch.timestamp >= st.windowStart + kValidateWindowMs && batch.timestamp > st.lastBatchMs &&
+                st.lastBatchMs >= st.windowStart) {
+                if (!compareValidateWindow(st, st.windowStart, st.lastBatchMs, localError)) {
                     ok = false;
                     return false;
                 }
-                st.windowStart = batch.timestamp;
+                st.windowStart = st.lastBatchMs + 1;
             }
+            st.lastBatchMs = batch.timestamp;
             for (std::uint16_t p = 0; p < batch.count; ++p) {
-                const auto samples =
-                    dbc::decodeFrameRaw(db, batch.packets[p].canId, batch.packets[p].data, batch.packets[p].dlc);
+                const auto& pkt = batch.packets[p];
+                const auto samples = dbc::decodeFrameRaw(db, pkt.canId, pkt.data, pkt.dlc);
                 for (const auto& s : samples) {
                     st.ids.push_back(s.signalId);
-                    st.times.push_back(batch.timestamp);
+                    st.times.push_back(frameMs[p]);
                     st.raws.push_back(s.raw);
                 }
             }

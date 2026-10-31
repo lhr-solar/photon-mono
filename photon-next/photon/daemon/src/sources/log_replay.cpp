@@ -220,11 +220,13 @@ void LogReplaySource::emitRange(ReplayView& view, vsd1::ReplayCursor::EmitRange 
         if (!batch) {
             continue;
         }
+        std::uint64_t frameMs[canp::kMaxBatch];
+        view.clock.stamp(*batch, frameMs);
         for (std::uint16_t p = 0; p < batch->count; ++p) {
             proto::CanMonitorItem item{};
             item.canId = batch->packets[p].canId;
             item.dlc = batch->packets[p].dlc > 8 ? 8 : batch->packets[p].dlc;
-            item.timestampMs = batch->timestamp;
+            item.timestampMs = frameMs[p];
             std::memcpy(item.data, batch->packets[p].data, 8);
             view.pendingCan.push_back(item);
             view.decode.ingest(item);
@@ -254,11 +256,13 @@ void LogReplaySource::emitRange(vsd1::ReplayCursor::EmitRange range) {
             std::fprintf(stdout, "[photon-backend] log_replay first emit batch=%zu packets=%u\n", i,
                          static_cast<unsigned>(batch->count));
         }
+        std::uint64_t frameMs[canp::kMaxBatch];
+        clock_.stamp(*batch, frameMs);
         for (std::uint16_t p = 0; p < batch->count; ++p) {
             proto::CanMonitorItem item{};
             item.canId = batch->packets[p].canId;
             item.dlc = batch->packets[p].dlc > 8 ? 8 : batch->packets[p].dlc;
-            item.timestampMs = batch->timestamp;
+            item.timestampMs = frameMs[p];
             std::memcpy(item.data, batch->packets[p].data, 8);
             pendingCan_.push_back(item);
             if (decode_) {

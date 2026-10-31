@@ -4,6 +4,7 @@
 #include "photon/control.hpp"
 #include "photon/dbc.hpp"
 #include "photon/decode_buffer.hpp"
+#include "photon/frame_clock.hpp"
 #include "photon/net.hpp"
 #include "photon/pcan.hpp"
 #include "photon/protocol.hpp"
@@ -29,6 +30,7 @@ namespace photon {
 struct ReplayView {
     vsd1::ReplayCursor cursor;
     DecodeBuffer decode;
+    frame_clock::FrameClock clock;
     std::vector<proto::CanMonitorItem> pendingCan;
     std::uint64_t lastTickMs = 0;
     bool bound = false;
@@ -151,6 +153,7 @@ private:
     std::string password_;
     net::Socket sock_;
     canp::StreamParser parser_;
+    frame_clock::FrameClock clock_;
     std::vector<proto::CanMonitorItem> pendingCan_;
     std::uint64_t lastConnectAttemptMs_ = 0;
     std::uint64_t minTimeMs_ = 0;
@@ -199,6 +202,7 @@ private:
     DecodeBuffer* decode_ = nullptr;
     vsd1::Archive archive_;
     vsd1::ReplayCursor cursor_;
+    frame_clock::FrameClock clock_;
     std::vector<proto::CanMonitorItem> pendingCan_;
     std::uint64_t lastTickMs_ = 0;
     bool running_ = false;

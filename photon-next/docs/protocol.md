@@ -69,6 +69,10 @@ Mirrored from `photon-server/canp/canp.h` + `canp.c` (version 3). Wire is **big-
 
 The Go observer also understands v2 (21-byte packets). This daemon follows the C reader and accepts **v3 only**. Fan-out on `:6500` carries raw ingress CANP payloads (not the on-disk VSD1 store framing).
 
+### Frame times
+
+`timestamp` is when the car sent the batch, about every 20 ms or at 64 frames. The car leaves every `dt` at zero, so the batch time is the only time on the wire. Readers give each frame that batch time, except the IMU messages (`IMU_Accel_*`, `IMU_Gyro_*`, `IMU_B_Accel`). Those carry the sensor's own counter in bytes 0-1 (big-endian), which ticks every 10 ms with about four accel samples or one gyro sample per tick. `photon/decode` (`frame_clock.hpp`) rebuilds one time per IMU sample from that counter and keeps it after the previous batch and no later than this one. Without it, the ~9 accel samples of a batch share one time and plot as a vertical stack. `photon-backend` (live and replay) and `photon-index` (live and import) all use it, so live, replay, and history agree.
+
 ## Track Sim
 
 Solver lives in `photon/synth` (`photon/tracksim.hpp`); no I/O in the library. The backend lists `assets/tracks/*.json` and runs solves on a worker thread. Control messages are JSON-plane additive (no new binary `msgType`):

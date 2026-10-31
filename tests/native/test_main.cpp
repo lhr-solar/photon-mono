@@ -14,6 +14,7 @@
 
 void runTrackSimTests();
 void runInterpTests();
+void runFrameClockTests();
 void runMuxTests();
 void runDbcTests();
 void runLogSessionsTests();
@@ -607,6 +608,7 @@ int main() {
     testWsAcceptKey();
     runTrackSimTests();
     runInterpTests();
+    runFrameClockTests();
     runMuxTests();
     runDbcTests();
     runLogSessionsTests();

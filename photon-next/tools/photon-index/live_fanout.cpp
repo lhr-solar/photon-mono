@@ -3,6 +3,7 @@
 #include "photon/canp.hpp"
 #include "photon/client_auth.hpp"
 #include "photon/dbc.hpp"
+#include "photon/frame_clock.hpp"
 #include "photon/tsdb.hpp"
 
 #include <chrono>
@@ -143,6 +144,7 @@ int runLiveFanout(const LiveFanoutOptions& opt) {
     std::uint64_t lastMs = 0;
     std::uint64_t frames = 0;
     photon::canp::StreamParser parser;
+    photon::frame_clock::FrameClock clock;
 
     auto seal = [&]() {
         if (!writer || sessionId.empty()) {
@@ -222,6 +224,7 @@ int runLiveFanout(const LiveFanoutOptions& opt) {
             }
         }
         parser.clear();
+        clock.reset();
         std::uint8_t buf[32 * 1024];
         bool connected = true;
         while (connected && !stopped(opt) && (opt.maxFrames == 0 || frames < opt.maxFrames)) {
@@ -236,6 +239,8 @@ int runLiveFanout(const LiveFanoutOptions& opt) {
             }
             parser.feed(std::span<const std::uint8_t>(buf, static_cast<std::size_t>(n)));
             while (auto batch = parser.take()) {
+                std::uint64_t frameMs[photon::canp::kMaxBatch];
+                clock.stamp(*batch, frameMs);
                 for (std::uint16_t i = 0; i < batch->count; ++i) {
                     const auto& pkt = batch->packets[i];
                     const std::uint64_t t = batch->timestamp;
@@ -246,7 +251,7 @@ int runLiveFanout(const LiveFanoutOptions& opt) {
                         closeSock(sock);
                         return 1;
                     }
-                    writer->onFrame(pkt.canId, pkt.dlc, pkt.data, t);
+                    writer->onFrame(pkt.canId, pkt.dlc, pkt.data, frameMs[i]);
                     if (t >= lastMs) {
                         lastMs = t;
                     }

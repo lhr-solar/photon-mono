@@ -16,6 +16,7 @@ void DaqTcpSource::start() {
     totalBatches_ = 0;
     pendingCan_.clear();
     parser_.clear();
+    clock_.reset();
     sock_.close();
 }
 
@@ -87,6 +88,7 @@ void DaqTcpSource::readAvailable() {
             std::fprintf(stdout, "[photon-backend] daq_tcp disconnected\n");
             sock_.close();
             parser_.clear();
+            clock_.reset();
             return;
         }
         if (n == 0) {
@@ -100,12 +102,14 @@ void DaqTcpSource::readAvailable() {
             }
             maxTimeMs_ = batch->timestamp;
             ++totalBatches_;
+            std::uint64_t frameMs[canp::kMaxBatch];
+            clock_.stamp(*batch, frameMs);
             for (std::uint16_t i = 0; i < batch->count; ++i) {
                 const auto& p = batch->packets[i];
                 proto::CanMonitorItem item{};
                 item.canId = p.canId;
                 item.dlc = p.dlc > 8 ? 8 : p.dlc;
-                item.timestampMs = batch->timestamp;
+                item.timestampMs = frameMs[i];
                 std::memcpy(item.data, p.data, 8);
                 pendingCan_.push_back(item);
                 if (decode_) {
