@@ -1,3 +1,15 @@
+> Go migration cleanup (2026-10-13): the C++ session daemon and Go legacy
+> process launchers have been removed. Go serves live data, history and replay
+> directly. Native helpers and offline migration readers remain.
+> See [Go server walkthrough](../../photon-server/readme.md).
+>
+> Current implementation note (2026-10-10): source modules now live in
+> `photon-next/src/<module>` with headers beside implementations. The UI has
+> eight top-level screens; Dynamics is composed under Mechanical, Connection is
+> a titlebar popover, and standalone Analysis/3D/Network screens are removed.
+> The historical audit and remaining architectural proposals below describe
+> the earlier layout unless explicitly updated.
+
 # photon-next cleanup plan: systems layout modeled on Photon `main`
 
 **Date:** 2026-09-19
@@ -57,7 +69,7 @@ This plan reshapes photon-next into the same shape while keeping the split that 
 
 | Symptom | Where |
 | --- | --- |
-| UI includes daemon headers | `frontend/…/client.hpp` → `photon/websocket.hpp`; `client.cpp`, `main.cpp` → `photon/net.hpp`; `video_decoder.cpp` → `photon/video_framing.hpp` |
+| UI includes daemon headers | `frontend/…/client.hpp` → `net/websocket.hpp`; `client.cpp`, `main.cpp` → `net/net.hpp`; `video_decoder.cpp` → `wire/video_framing.hpp` |
 | UI CMake compiles daemon sources | `frontend/CMakeLists.txt` builds `photon-ws` from `${CMAKE_SOURCE_DIR}/backend/src/{net,websocket}.cpp` |
 | Tests compile sources instead of linking libraries | `tests/CMakeLists.txt` lists 15 `backend/src/*.cpp` + `frontend/src/*.cpp` files directly |
 | Hardware driver in "core" | `core/…/pcan.hpp` (dynamic `PCANBasic.dll`) |
@@ -224,9 +236,9 @@ Each phase ends green: native configure+build, `ctest`, WASM build, `photon-ui -
 Move-only library split: **DONE** `9f62824`. Remaining: cmake modules, embed_assets, tests link-only, `photon-ws` leftover cleanup if any.
 
 1. Create `cmake/{warnings,deps,emscripten,embed_assets}.cmake`; root `CMakeLists.txt` becomes project options + `add_subdirectory(assets)` + `add_subdirectory(photon)` + tests, mirroring Photon's root.
-2. Move `backend/src/{net,websocket}.cpp` + `core/src/{ws_handshake,sha1,base64}.cpp` + `client_auth` → `photon/net/` as `photon_net`. Split `websocket.cpp` into `ws/server.cpp` (accept, upgrade, per-connection state) and `ws/client.cpp` (what `frontend/src/client.cpp` uses on native). Frontend links `photon_net`; the `photon-ws` hack in `frontend/CMakeLists.txt` goes away.
-3. Move `backend/include/photon/video_framing.hpp` → `photon/wire/` (it is wire format, both sides use it).
-4. Move `core/…/pcan.*` → `photon/hw/`.
+2. Move `backend/src/{net,websocket}.cpp` + `core/src/{ws_handshake,sha1,base64}.cpp` + `client_auth` → `src/net/` as `photon_net`. Split `websocket.cpp` into `ws/server.cpp` (accept, upgrade, per-connection state) and `ws/client.cpp` (what `frontend/src/client.cpp` uses on native). Frontend links `photon_net`; the `photon-ws` hack in `frontend/CMakeLists.txt` goes away.
+3. Move `backend/include/wire/video_framing.hpp` → `src/wire/` (it is wire format, both sides use it).
+4. Move `core/…/pcan.*` → `src/hw/`.
 5. Embed DBC + tracks via `embed_assets.cmake` (Photon does this for dbc/kernels/models). Bundled DBC lookup in `session.cpp` (`assets/dbc/*.dbc` on disk) gains an embedded fallback; `--assets-dir` stays for overrides.
 6. `tests/CMakeLists.txt` links libraries only. Any test that still needs a daemon/UI `.cpp` is a sign that code belongs in `synth` or `store` — move it (this is how `analysis_*`, `tile_cache`, `tile_store` end up in `synth`).
 

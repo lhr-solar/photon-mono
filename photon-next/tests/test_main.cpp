@@ -1,8 +1,8 @@
-#include "photon/canp.hpp"
-#include "photon/control.hpp"
-#include "photon/protocol.hpp"
-#include "photon/video_udp.hpp"
-#include "photon/ws_handshake.hpp"
+void runChartGridTests();
+#include "wire/canp.hpp"
+#include "wire/control.hpp"
+#include "wire/protocol.hpp"
+#include "net/ws_handshake.hpp"
 #include "test_harness.hpp"
 
 #include <cstdio>
@@ -12,7 +12,6 @@
 #include <string>
 #include <vector>
 
-void runTrackSimTests();
 void runInterpTests();
 void runMuxTests();
 void runDbcTests();
@@ -26,12 +25,7 @@ void runTsdbLiveTests();
 void runTileCacheTests();
 void runAnalysisRuntimeTests();
 void runTilePersistTests();
-void runSessionHistoryTests();
-void runReplayViewTests();
-void runLogSwitchTests();
-void runCliTests();
 void runLiveFanoutTests();
-void runAnalysisComputeTests();
 void runAnalysisWorkbookTests();
 void runAnalysisOverlayTests();
 void runPlotAxisTests();
@@ -202,6 +196,11 @@ void testVideoFrameRoundTrip() {
     CHECK(decodedFrame.has_value());
     CHECK(decodedFrame->header.msgType == 0x04);
     CHECK(decodedFrame->header.sequence == 7);
+    const auto tagged = photon::proto::encodeFrame(photon::proto::MsgType::VideoSeekPacket, 99, wrapped);
+    const auto packet = photon::proto::decodeFrame(tagged);
+    CHECK(packet && packet->header.msgType == 0x08);
+    const auto seek = photon::proto::decodeFrame(packet->payload);
+    CHECK(seek && seek->header.sequence == 7 && seek->header.msgType == 0x04);
 
     CHECK(!photon::proto::decodeVideoFrame(std::span<const std::uint8_t>(payload.data(), 11)).has_value());
 }
@@ -558,34 +557,6 @@ void testCanpRoundTrip() {
     CHECK(streamed->seq == 7);
 }
 
-void testVideoUdpAssemble() {
-    photon::video::ServerFrame frame;
-    frame.timestampMs = 99;
-    frame.flags = photon::video::kFlagKeyframe;
-    frame.payload.assign(2500, 0x65);
-    // Server fragments at 1200 B; emulate two packets then the tail.
-    photon::video::UdpPacket a;
-    a.frameSeq = 3;
-    a.fragIndex = 0;
-    a.fragCount = 3;
-    a.timestampMs = 99;
-    a.flags = photon::video::kFlagKeyframe;
-    a.payload.assign(frame.payload.begin(), frame.payload.begin() + 1200);
-    photon::video::UdpPacket b = a;
-    b.fragIndex = 1;
-    b.payload.assign(frame.payload.begin() + 1200, frame.payload.begin() + 2400);
-    photon::video::UdpPacket c = a;
-    c.fragIndex = 2;
-    c.payload.assign(frame.payload.begin() + 2400, frame.payload.end());
-    photon::video::UdpAssembler asmblr;
-    CHECK(!asmblr.add(a).has_value());
-    CHECK(!asmblr.add(b).has_value());
-    auto got = asmblr.add(c);
-    CHECK(got.has_value());
-    CHECK(got->timestampMs == 99);
-    CHECK(got->payload.size() == 2500);
-}
-
 void testWsAcceptKey() {
     // RFC 6455 example key / accept pair.
     const std::string accept = photon::ws::acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
@@ -601,11 +572,9 @@ int main() {
     testLatestCanPerId();
     testTimelineRoundTrip();
     testVideoFrameRoundTrip();
-    testVideoUdpAssemble();
     testControlJsonRoundTrip();
     testCanpRoundTrip();
     testWsAcceptKey();
-    runTrackSimTests();
     runInterpTests();
     runMuxTests();
     runDbcTests();
@@ -619,15 +588,11 @@ int main() {
     runTileCacheTests();
     runAnalysisRuntimeTests();
     runTilePersistTests();
-    runSessionHistoryTests();
-    runReplayViewTests();
-    runLogSwitchTests();
-    runCliTests();
     runLiveFanoutTests();
-    runAnalysisComputeTests();
     runAnalysisWorkbookTests();
     runAnalysisOverlayTests();
     runPlotAxisTests();
+    runChartGridTests();
 
     std::fprintf(stdout, "photon-tests: %d passed, %d failed\n", gPassed, gFailed);
     return gFailed == 0 ? 0 : 1;

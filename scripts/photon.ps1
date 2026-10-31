@@ -13,15 +13,14 @@ $UiDir = Join-Path $Root 'photon-next'
 
 function Show-Use {
     Write-Output @'
-Photon is two programs. Run the one you need, and name the use case.
+Go owns recordings and replay. Photon Next is the display client.
 
   photon build
-      Build the server and the UI into build\. The server finds
-      photon-backend, photon-index, photon-ui, and assets beside itself.
+      Build the Go server, UI, PCAN adapter,
+      and one assets tree into build\.
 
   photon server
-      Ingest only. The DAQ dials the CAN ingress on port 6100.
-      The video store and the fan-out stay up. The UI stays down.
+      Ingest on 6100 and serve the authenticated UI and /ws on 8080.
 
   photon server ingest PORT
       Same server. The DAQ dials PORT instead of 6100.
@@ -29,29 +28,26 @@ Photon is two programs. Run the one you need, and name the use case.
 
   photon ui local
       UI on this machine, reading the server here.
-      CAN 127.0.0.1:6500, video TCP :6700, video UDP :6800.
+      Connect directly to ws://127.0.0.1:8080/ws.
 
   photon ui daq HOST[:PORT]
-      UI ingesting CANP from that fan-out. The port defaults to 6500.
-      Video uses the same host, TCP :6700 and UDP :6800.
-      The public Oracle fan-out is port 6110:
-        photon ui daq 150.136.85.207:6110
+      Connect directly to that Go server's HTTP/WebSocket port (8080).
 
   photon ui oracle
-      UI on the public Oracle pipe.
-      CAN 150.136.85.207:6110, video TCP :6700, video UDP 10.66.0.1:6800.
+      Open the public website in your browser.
 
   photon ui pcan
-      UI reading a USB PCAN on this machine.
+      Start a local Go server and the small USB PCAN adapter.
+      A local InfluxDB instance and server token are required for plots.
 
-  photon ui log PATH
-      UI replaying a VSD1 log or an on_track folder.
+  photon ui log RECORDING_ID
+      Open an existing recording from the running local Go server.
 
   photon station
       Server and UI on this machine. The UI reads this server's fan-out.
       photon station ingest PORT moves the DAQ's ingress port the same way.
 
-Flags after the use case are passed through (--password, --video-port, -ingress, ...).
+Flags after the use case are passed to the Go server or display client.
 PHOTON_PASSWORD defaults to laptop. PHOTON_DATA_DIR defaults to <repo>\data.
 '@
 }
@@ -102,10 +98,6 @@ function Find-Ship {
     return $null
 }
 
-function Find-Backend {
-    return Find-Ship 'photon-backend.exe'
-}
-
 function Find-NativeUi {
     return Find-Ship 'photon-ui.exe'
 }
@@ -126,6 +118,17 @@ function Show-Command {
     }
     $rendered = @($File) + @($CmdArgs)
     Write-Output ('  ' + ($rendered -join ' '))
+}
+
+# Start-Process joins argument arrays; quote each Windows argument explicitly.
+function Join-ProcessArgs {
+    param([string[]]$Values)
+    $quoted = foreach ($value in $Values) {
+        $escaped = [regex]::Replace($value, '(\\*)"', '$1$1\"')
+        $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+        '"' + $escaped + '"'
+    }
+    return ($quoted -join ' ')
 }
 
 function Start-Logged {
@@ -163,12 +166,11 @@ function Start-Build {
         '-D', 'CMAKE_CXX_COMPILER=clang++',
         '-D', ("PHOTON_SHIP_DIR=" + ($ship -replace '\\', '/'))
     )
-    $buildArgs = @('--build', $cache, '--target', 'photon-backend', 'photon-index', 'photon-ui')
+    $buildArgs = @('--build', $cache, '--target', 'photon-ui', 'photon-pcan-adapter', 'photon-tsdb-export')
     if ($DryRun) {
         Show-Command 'cmake' 'cmake' $null $cmakeArgs
         Show-Command 'cmake' 'cmake' $null $buildArgs
         Show-Command 'go' 'go build -o' $ServerDir @((Join-Path $ship 'photon-server.exe'), './server')
-        Show-Command 'go' 'go build -o' $ServerDir @((Join-Path $ship 'photon-sshd.exe'), './cmd/photon-sshd')
         return
     }
     & cmake @cmakeArgs
@@ -179,11 +181,10 @@ function Start-Build {
     try {
         & go build -o (Join-Path $ship 'photon-server.exe') ./server
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        & go build -o (Join-Path $ship 'photon-sshd.exe') ./cmd/photon-sshd
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     } finally {
         Pop-Location
     }
+    Copy-Item -LiteralPath (Join-Path $UiDir 'assets') -Destination $ship -Recurse -Force
     $page = Join-Path $UiDir '.artifacts-web\photon.html'
     if (Test-Path -LiteralPath $page) {
         $uiOut = Join-Path $ship 'ui'
@@ -222,14 +223,6 @@ function Start-Server {
     if ($ingress) {
         $serverArgs += @('-ingress', $ingress)
     }
-    if ($WithUi) {
-        if (-not (Find-Backend) -and -not $DryRun) {
-            Write-Output 'build\photon-backend.exe is missing. Run: photon build'
-            exit 1
-        }
-    } else {
-        $serverArgs += @('-ui', 'off')
-    }
     if ($Rest) {
         $serverArgs += $Rest
     }
@@ -249,111 +242,67 @@ function Start-Server {
         Write-Output 'build\photon-server.exe is missing. Run: photon build'
         exit 1
     }
-    Start-Logged $exe $ship $serverArgs
+    $stationUi = $null
+    if ($WithUi -and -not $DryRun) {
+        $env:PHOTON_PASSWORD = $password
+        if ($native = Find-NativeUi) { $stationUi = Start-Process -FilePath $native -ArgumentList @('--ws','ws://127.0.0.1:8080/ws') -WorkingDirectory $ship -PassThru }
+    }
+    try { Start-Logged $exe $ship $serverArgs } finally {
+        if ($stationUi -and -not $stationUi.HasExited) { Stop-Process -Id $stationUi.Id -ErrorAction SilentlyContinue }
+    }
 }
 
 function Start-Ui {
-    param(
-        [string]$Source,
-        [string]$DaqHost,
-        [int]$DaqPort,
-        [string]$VideoHost,
-        [int]$VideoPort,
-        [string]$VideoUdpHost,
-        [int]$VideoUdpPort,
-        [string]$LogPath
-    )
-    $backend = Find-Backend
-    if (-not $backend) {
-        if (-not $DryRun) {
-            Write-Output 'build\photon-backend.exe is missing. Run: photon build'
-            exit 1
+    param([string]$Source, [string]$DaqHost='127.0.0.1', [int]$DaqPort=8080,
+          [string]$VideoHost, [int]$VideoPort, [string]$VideoUdpHost, [int]$VideoUdpPort,
+          [string]$LogPath, [switch]$Browser)
+    $ship=Join-Path $Root 'build'
+    $password=Get-Password
+    $env:PHOTON_PASSWORD=$password
+    $serverProc=$null
+    $adapterProc=$null
+    $recordingId=$null
+    if ($Source -eq 'log_replay') {
+        if ($LogPath -notmatch '^[a-fA-F0-9]{32}$') { throw 'Use a recording ID from the Go recording catalog' }
+        $recordingId=$LogPath
+    }
+    $ownedLocal=$Source -eq 'pcan'
+    if ($ownedLocal) {
+        $server=Join-Path $ship 'photon-server.exe'
+        $serverArgs=@('-host','127.0.0.1','-data-dir',(Get-DataDir))
+        if ($DryRun) { Show-Command 'local Go server' $server $ship $serverArgs }
+        else {
+            if (-not (Test-Path -LiteralPath $server)) { throw 'Run photon build first' }
+            $serverProc=Start-Process -FilePath $server -WorkingDirectory $ship -ArgumentList (Join-ProcessArgs $serverArgs) -WindowStyle Hidden -PassThru
         }
-        $backend = Join-Path $Root 'build\photon-backend.exe'
+        $DaqHost='127.0.0.1'; $DaqPort=8080
     }
-    $password = Get-Password
-    $assets = Join-Path $Root 'build\assets'
-    if (-not (Test-Path -LiteralPath $assets)) {
-        $assets = Join-Path $UiDir 'assets'
-    }
-    $backendArgs = @(
-        '--no-live-tail',
-        '--source', $Source,
-        '--ws-port', '8765',
-        '--password', $password,
-        '--assets-dir', $assets
-    )
-    if ($Source -eq 'daq_tcp') {
-        $backendArgs += @(
-            '--daq-host', $DaqHost,
-            '--daq-port', "$DaqPort",
-            '--video-host', $VideoHost,
-            '--video-port', "$VideoPort",
-            '--video-udp-port', "$VideoUdpPort",
-            '--video-udp-host', $VideoUdpHost
-        )
-    } elseif ($Source -eq 'log_replay') {
-        $backendArgs += @('--log-path', $LogPath)
-    }
-    if ($Rest) {
-        $backendArgs += $Rest
-    }
-
-    $native = Find-NativeUi
-    $page = Find-Page
-    $pageProc = $null
-    $uiProc = $null
-    Write-Output ("password " + $password)
-    if ($Source -eq 'daq_tcp') {
-        Write-Output ("daq " + $DaqHost + ":" + $DaqPort + "  video " + $VideoHost + ":" + $VideoPort + "  udp " + $VideoUdpHost + ":" + $VideoUdpPort)
-    }
-    if ($DryRun) {
-        Show-Command 'backend' $backend $null $backendArgs
-        if ($native) {
-            Show-Command 'ui' $native $null @()
-        } elseif ($page) {
-            $pageDir = Split-Path $page -Parent
-            Show-Command 'page' 'python -m http.server 8080 --bind 127.0.0.1 --directory' $null @($pageDir)
-        } else {
-            Write-Output 'ui: not built (run photon build, and photon-next\web\scripts\build.ps1 for the page)'
-        }
-        return
-    }
-
-    if ($native) {
-        $uiProc = Start-Process -FilePath $native -WorkingDirectory (Split-Path $native -Parent) -PassThru
-        Write-Output ("ui " + $native)
-    } elseif ($page) {
-        $pageDir = Split-Path $page -Parent
-        $py = $null
-        foreach ($name in @('py', 'python')) {
-            if (Get-Command $name -ErrorAction SilentlyContinue) {
-                $py = $name
-                break
-            }
-        }
-        if ($py) {
-            $pyArgs = @('-m', 'http.server', '8080', '--bind', '127.0.0.1', '--directory', $pageDir)
-            if ($py -eq 'py') {
-                $pyArgs = @('-3') + $pyArgs
-            }
-            $pageProc = Start-Process -FilePath $py -ArgumentList $pyArgs -WindowStyle Minimized -PassThru
-            Write-Output 'page http://127.0.0.1:8080/photon.html'
-        } else {
-            Write-Output ("page files are in " + $pageDir + " and Python is not on PATH")
-        }
-    } else {
-        Write-Output 'ui binary and photon.html were not built; the daemon will still listen on ws://127.0.0.1:8765'
-    }
-
     try {
-        & $backend @backendArgs
-    } finally {
-        if ($uiProc -and -not $uiProc.HasExited) {
-            Stop-Process -Id $uiProc.Id -Force -ErrorAction SilentlyContinue
+        if ($Source -eq 'pcan') {
+            $adapter=Join-Path $ship 'photon-pcan-adapter.exe'
+            if ($DryRun) { Show-Command 'PCAN adapter' $adapter $ship @('--http-port','8080') }
+            else { $adapterProc=Start-Process -FilePath $adapter -WorkingDirectory $ship -ArgumentList @('--http-port','8080') -WindowStyle Hidden -PassThru }
         }
-        if ($pageProc -and -not $pageProc.HasExited) {
-            Stop-Process -Id $pageProc.Id -Force -ErrorAction SilentlyContinue
+        $url='ws://' + $DaqHost + ':' + $DaqPort + '/ws'
+        $native=Find-NativeUi
+        $nativeArgs=@('--ws',$url)
+        if ($Source -eq 'pcan') { $nativeArgs+='--pcan' }
+        if ($recordingId) { $nativeArgs+=@('--recording',$recordingId) }
+        if ($Rest) { $nativeArgs+=$Rest }
+        if ($Browser) {
+            $pageUrl='https://150.136.85.207.sslip.io/photon.html'
+            if ($DryRun) { Write-Output ('browser: '+$pageUrl) } else { Start-Process $pageUrl }
+        } elseif ($native) {
+            Start-Logged $native $ship $nativeArgs
+        } elseif ($DryRun) {
+            Show-Command 'ui' (Join-Path $ship 'photon-ui.exe') $ship $nativeArgs
+        } else {
+            Write-Output ('Open http://' + $DaqHost + ':' + $DaqPort + '/photon.html')
+            if ($ownedLocal) { throw 'Build photon-ui before using the local PCAN/log launcher' }
+        }
+    } finally {
+        foreach ($helper in @($adapterProc,$serverProc)) {
+            if ($helper -and -not $helper.HasExited) { Stop-Process -Id $helper.Id -ErrorAction SilentlyContinue }
         }
     }
 }
@@ -393,10 +342,10 @@ switch ($command) {
         }
         switch ($use) {
             'local' {
-                Start-Ui -Source 'daq_tcp' -DaqHost '127.0.0.1' -DaqPort 6500 -VideoHost '127.0.0.1' -VideoPort 6700 -VideoUdpHost '127.0.0.1' -VideoUdpPort 6800
+                Start-Ui -Source 'daq_tcp' -DaqHost '127.0.0.1' -DaqPort 8080
             }
             'oracle' {
-                Start-Ui -Source 'daq_tcp' -DaqHost '150.136.85.207' -DaqPort 6110 -VideoHost '150.136.85.207' -VideoPort 6700 -VideoUdpHost '10.66.0.1' -VideoUdpPort 6800
+                Start-Ui -Source 'daq_tcp' -Browser
             }
             'daq' {
                 $target = Take-Target
@@ -404,7 +353,7 @@ switch ($command) {
                     Write-Output 'photon ui daq needs HOST or HOST:PORT'
                     exit 2
                 }
-                $hp = Split-HostPort $target 6500
+                $hp = Split-HostPort $target 8080
                 Start-Ui -Source 'daq_tcp' -DaqHost $hp.Host -DaqPort $hp.Port -VideoHost $hp.Host -VideoPort 6700 -VideoUdpHost $hp.Host -VideoUdpPort 6800
             }
             'pcan' {
@@ -413,7 +362,7 @@ switch ($command) {
             'log' {
                 $path = Take-Target
                 if (-not $path) {
-                    Write-Output 'photon ui log needs a VSD1 log or on_track folder'
+                    Write-Output 'photon ui log needs a recording ID from the Go catalog'
                     exit 2
                 }
                 Start-Ui -Source 'log_replay' -LogPath $path

@@ -1,5 +1,5 @@
-#include "photon/tsdb.hpp"
-#include "photon_ui/analysis_workbook.hpp"
+#include "store/tsdb.hpp"
+#include "ui/analysis_workbook.hpp"
 #include "test_harness.hpp"
 
 #include <filesystem>

@@ -94,6 +94,10 @@ func (s *VideoStore) Locate(streamID uint8, atMs uint64, prefetch int) VideoLoca
 		if next < 0 || rows[next].StartMs > atMs+videoLocateHoldMs {
 			return out
 		}
+		// The picture we were holding ended outside the hold. The nearby
+		// keyframe is the resume, not a reason to keep the stale clip.
+		idx = next
+		entry = rows[idx]
 	}
 	out.Found = true
 	out.Entry = entry
@@ -121,6 +125,7 @@ func (s *VideoStore) Locate(streamID uint8, atMs uint64, prefetch int) VideoLoca
 		out.PPS = s.configForEntryLocked(e, nalTypePPS)
 		out.ClockProv = s.entries[e].clockProv
 		out.ResidualMs = int64(s.entries[e].timestampMs) - int64(s.entries[e].receiveMs)
+		out.ClockOffsetMs = clientClockOffset(out.ClockOffsetMs, out.ResidualMs)
 	} else {
 		out.SPS = cloneBytes(s.sps)
 		out.PPS = cloneBytes(s.pps)

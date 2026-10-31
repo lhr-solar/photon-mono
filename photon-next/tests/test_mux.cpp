@@ -1,4 +1,4 @@
-#include "photon_ui/mux.hpp"
+#include "ui/mux.hpp"
 #include "test_harness.hpp"
 
 #include <cmath>
@@ -6,6 +6,18 @@
 
 void runMuxTests() {
     using photon::ui::applyMuxSeries;
+
+    {
+        // Reconstructing an earlier/empty cursor must not retain later taps.
+        std::vector<float> out(32, 3.9f);
+        std::vector<double> stamps(32, 9000.0);
+        const double t[] = {1000.0}, idx[] = {2.0}, value[] = {3.1};
+        applyMuxSeries(t, idx, 1, t, value, 1, out, &stamps, 32, true);
+        CHECK(near(out[2], 3.1, 1e-5));
+        CHECK(out[7] == 0.0f && stamps[7] == 0.0);
+        applyMuxSeries(nullptr, nullptr, 0, nullptr, nullptr, 0, out, &stamps, 32, true);
+        CHECK(out[2] == 0.0f && stamps[2] == 0.0);
+    }
 
     {
         // One CANP batch: 32 taps, one millisecond.

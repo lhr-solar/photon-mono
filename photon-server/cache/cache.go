@@ -1,10 +1,12 @@
 // Package cache is the one-second plot tally.
 // Samples stay raw integers. Mean is sum/count at read time.
-// appendLoop still writes segment files and does not call this package.
+// appendLoop folds decoded ingress frames in here; tallyWriter drains it.
 // Prove a change with: go test ./cache
 // The copied clip is examples/brainerd-30s. A loopback database named photon_dev
 // is the place to try a write. The live database name photon stays on the MacBook.
 package cache
+
+import "math/big"
 
 // SignalID identifies a signal within the session's DBC.
 type SignalID struct {
@@ -18,6 +20,7 @@ type SignalID struct {
 type SignalDef struct {
 	ID        SignalID
 	Message   string
+	DLC       uint8
 	ValueType int
 
 	StartBit     uint16
@@ -25,9 +28,11 @@ type SignalDef struct {
 	LittleEndian bool
 	Signed       bool
 
-	Factor float64
-	Offset float64
-	Unit   string
+	Factor   float64
+	Offset   float64
+	Unit     string
+	Number   uint32
+	Min, Max float64
 }
 
 // SampleKey identifies one aggregate.
@@ -44,9 +49,27 @@ type Sample struct {
 	Sum   int64
 	Count int64
 
-	AgeMS  int64
-	HasAge bool
-	Dirty  bool // Changed since last queued live snapshot
+	AgeMS              int64
+	HasAge             bool
+	Dirty              bool // Changed since last queued live snapshot
+	WideSum            big.Int
+	ExactMin, ExactMax big.Int
+}
+
+type FloatSample struct {
+	Min, Max, Sum float64
+	Count         int64
+	AgeMS         int64
+	HasAge        bool
+}
+type Value struct {
+	Def               SignalDef
+	Raw               int64
+	Bits              uint64
+	Numeric, Physical float64
+	Tap               int32
+	Age               int64
+	HasAge            bool
 }
 
 // SessionCache owns the definitions and aggregates for one recording.
@@ -57,6 +80,7 @@ type SessionCache struct {
 
 	Definitions map[SignalID]SignalDef
 	Samples     map[SampleKey]*Sample
+	Floats      map[SampleKey]*FloatSample
 	byCANID     map[uint32][]SignalDef
 }
 
@@ -65,21 +89,37 @@ func New() *SessionCache {
 	return &SessionCache{
 		Definitions: make(map[SignalID]SignalDef),
 		Samples:     make(map[SampleKey]*Sample),
+		Floats:      make(map[SampleKey]*FloatSample),
 	}
 }
 
-func (s *SessionCache) Len() int { return 0 }
+func (s *SessionCache) Len() int { return len(s.Samples) + len(s.Floats) }
 
 // Add updates one raw tally. raw is the integer from the frame.
 func (s *SessionCache) Add(signal string, sec, raw int64, tap int, hasTap bool, age int64, hasAge bool) {
-
+	id := SignalID{Name: signal}
+	for k, d := range s.Definitions {
+		if d.Message+"."+k.Name == signal {
+			id = k
+			break
+		}
+	}
+	t := int32(-1)
+	if hasTap {
+		t = int32(tap)
+	}
+	s.add(SampleKey{id, t, sec}, raw, age, hasAge)
 }
 
 // OpenLines returns the open tallies and leaves them in place.
-func (s *SessionCache) OpenLines(session string) []string { return nil }
+func (s *SessionCache) OpenLines(session string) []string { return s.lines(session, nil) }
 
 // TakeClosed returns tallies older than keepSec and drops those buckets.
-func (s *SessionCache) TakeClosed(session string, keepSec int64) []string { return nil }
+func (s *SessionCache) TakeClosed(session string, keepSec int64) []string {
+	lines := s.ClosedLines(session, keepSec)
+	s.DropClosed(keepSec)
+	return lines
+}
 
 // Frame is one decoded CAN frame. TimeMs is the frame clock in milliseconds.
 type Frame struct {
@@ -87,15 +127,14 @@ type Frame struct {
 	CANID  uint32
 	DLC    int
 	Data   [8]byte
+	Bus    string
+	Flags  uint8
+	DT     [8]uint16
 }
-
-func SHA1Hex(b []byte) string { return "" }
-
-func SignalDefLines(db *SessionCache, sha string, start int64) []string { return nil }
 
 // Fold adds one frame. An index signal is the tap, not its own row.
 // An age signal updates age and is not its own row.
-// IEEE float and double signals are skipped.
+// IEEE float and double signals use the separate float tally map.
 func (s *SessionCache) Fold(fr Frame) (added, skippedFloat int) {
-	return 0, 0
+	return s.fold(fr)
 }

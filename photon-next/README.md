@@ -1,44 +1,80 @@
 # photon-next
 
-photon-next is the client stack: a native daemon (`photon-backend`) owns sources, DBC decode, and local storage; a Dear ImGui/ImPlot UI (WASM page or native `photon-ui`) talks to that daemon over a localhost WebSocket. The existing native client (`Photon`) is not modified. The Go ingest server (`photon-server`) owns Saturday storage and starts `photon-index --live-fanout` on the PC.
-
-On the **PC**, photon-server starts this UI itself (`photon-backend` + `http://127.0.0.1:8080/photon.html`) aimed at loopback fan-out. The **laptop** runs its own `photon-backend` for a different source (`--daq-host <pc>` or `--source pcan`). Both clients pass `--no-live-tail`. Wire format is protocol v1: [docs/protocol.md](docs/protocol.md).
+Photon Next is the Dear ImGui/ImPlot display client, built as a browser page or native desktop executable. It connects directly to the Go server at `/ws` (HTTP port 8080). Go owns CAN ingest, raw recordings, DBC decoding, Influx history, replay cursors, and video delivery. Video decoding remains in the client.
 
 ## Architecture
 
-```
-PCAN / DAQ TCP / log replay
-                │
-                ▼
-     photon-backend (photon/daemon)
-       sockets, CANP, sources,
-       TX arm stub, protocol v1
-                │  WebSocket 127.0.0.1:8765
-                ▼
-     ImGui UI  photon/ui
-       WASM:   .artifacts-web/photon.html
-       native: .artifacts/photon-ui.exe
+```text
+DAQ TCP / local USB PCAN adapter
+                |
+                v
+     photon-server (Go)
+       raw CAN + timestamp index
+       DBC registry + Influx history
+       independent browser replay
+                | WebSocket /ws
+                v
+     ImGui UI src/ui
+       WASM: photon.html
+       native: photon-ui
 ```
 
-`photon-server` is the ingest server on the PC. Oracle is a pipe to it. Laptop clients connect to the PC fan-out (`:6500` CANP, `:6700` video). `photon-index --live-fanout` writes `data/tsdb` on the PC.
+Local USB capture uses `photon-pcan-adapter` with a local Go server and local InfluxDB. The previous session daemon has been removed. See [Go server](../photon-server/readme.md) for uploads, imports, and configuration.
 
 ## Layout
 
+Headers and implementations sit together in `src/<module>/`. Includes name the
+module, for example `#include "store/tsdb.hpp"`. Keep subfolders for related
+features such as UI screens, 3D rendering, and daemon sources.
+
 | Path | Role |
 | --- | --- |
-| `photon/base` | JSON, endian |
-| `photon/wire` | protocol v1, control plane, CANP, video framing |
-| `photon/decode` | DBC parse/decode, interp |
-| `photon/store` | TSDB, VSD1, video index, log sessions |
-| `photon/net` | sockets, WebSocket, client auth |
-| `photon/hw` | PCAN (native only) |
-| `photon/synth` | track-sim solver, analysis |
-| `photon/daemon` | `photon-backend`, `photon-index` |
-| `photon/ui` | ImGui client (`photon-ui` / `photon.html`) |
+| `src/base` | JSON, endian |
+| `src/wire` | protocol v1, control plane, CANP, video framing |
+| `src/decode` | Legacy migration/test decoder; excluded from client links |
+| `src/store` | Offline migration/test readers; excluded from client links |
+| `src/net` | sockets, WebSocket, client auth |
+| `src/hw` | PCAN implementation linked only by the adapter/tests |
+| `src/ui` | ImGui client (`photon-ui` / `photon.html`) |
 | `web/` | shell + Emscripten build/serve scripts |
 | `tools/` | `photon-export`, QA, log analysis |
 | `tests/` | CTest (`photon-tests`) |
-| `assets/` | DBC, fonts, models, tracks |
+| `assets/` | DBC, fonts, models |
+
+## Workspace and charts
+
+How the mechanical team should use the page is a GitBook in [docs/gitbook](docs/gitbook/README.md). Git Sync should use the project directory `photon-next/docs/gitbook`.
+
+The top-level screens are Pit (default), Dashboard, Plots, Mechanical, PDU,
+Live View and CAN. Dynamics is a tab in Mechanical. Live View
+contains the 3D and camera panes. Connection settings are available from the
+connection status in the titlebar; drive days and runs live in Logs. Shared
+consoles retain their source and DBC restrictions. Older `--screen` / URL screen
+IDs redirect: `dynamics` to Mechanical/Dynamics, `scene3d` to Live View,
+`analysis` to Plots, and `network` to the Connection popover.
+
+Plots keeps saved view tabs visible and puts its controls in **Plot tools**.
+Chart layouts in Plots, Mechanical/Dynamics, and PDU use the same
+editor. Unlock the layout, drag a chart header, or resize its lower-right corner.
+The panel follows the pointer continuously; its outline shows the snapped
+24-column / 24-pixel grid. Overlapping charts move down. Escape cancels the
+whole gesture, Undo restores the preceding layout, and Reset restores a useful
+starting arrangement. Layouts save locally on release. Videos, 3D panes, and
+value cards remain fixed. Charts are at least 288 pixels tall and use a
+single-column scrolling arrangement when their saved widths would become too
+small. This narrow presentation does not replace the desktop layout.
+
+In Plots, dragging a chart body pans the shared time window without seeking or
+moving the playhead. Clicking sets the playhead without recentering. Horizontal
+wheel pans, vertical wheel zooms time, Alt-wheel zooms values, and Shift-drag
+selects a range. Automatic Y axes retain their current range during a pan and
+expand for new peaks; they refit when the gesture ends. Manual Y limits remain
+in effect. History requests during a pan are coalesced to at most ten updates
+per second per visible chart. Custom view exports use schema version 2; version
+1 imports preserve their geometry by converting the old grid units.
+
+This is a local Photon UI workflow. It does not require a Nominal API key.
+The separate Photon Server Nominal streaming integration remains independent.
 
 ## Build
 
@@ -55,23 +91,25 @@ WASM page (emsdk once via `.\web\scripts\setup-emsdk.ps1`):
 .\web\scripts\build.ps1
 ```
 
-Binaries land at `.artifacts/photon/daemon/photon-backend.exe`, `.artifacts/photon-ui.exe`, and `.artifacts-web/photon.html`. Do not mix the native `.artifacts` tree with the WASM configure.
+Binaries land at `.artifacts/photon-ui.exe` and `.artifacts-web/photon.html`. Native server helpers are in `.artifacts/server-workers`. Do not mix native and WASM build directories.
 
 ## Run
 
-The PC console is started by photon-server. On a laptop (or any other source: `--source pcan`):
-
-```powershell
-.\.artifacts\photon\daemon\photon-backend.exe --no-live-tail --daq-host <pc-ip>
-.\web\scripts\serve.ps1
-```
-
-Open **http://127.0.0.1:8080/photon.html**. Do not open `photon.html` as `file://`. Same UI as a desktop exe: `.artifacts\photon-ui.exe --ws ws://127.0.0.1:8765`.
-
-`photon-backend -h` lists the remaining flags (ws port, source, password). You should not need them; the defaults are the deployed topology.
+From the repository root, run `photon server`, then `photon ui local`. The browser page is served by Go at **http://127.0.0.1:8080/photon.html**. Native clients connect to `ws://127.0.0.1:8080/ws`. Use `photon ui pcan` for local USB capture with Go and InfluxDB.
 
 ## Tests
 
 ```powershell
 ctest --test-dir .artifacts --output-on-failure
 ```
+
+Native visual QA can render a hidden window into a BMP without desktop input:
+
+```powershell
+$env:PHOTON_UI_STORE = "$PWD/.artifacts/qa-store"
+.\.artifacts\photon-ui.exe --screen mechanical --capture .artifacts/mechanical.bmp --width 1440 --height 900 --frames 60
+```
+
+The interaction test also reports CPU frame time for a 24-panel board with
+2,048 samples per chart and normal viewport clipping. This measurement excludes
+GPU work, video decoding, and history I/O; it is not an end-to-end 60 FPS claim.

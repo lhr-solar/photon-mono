@@ -1,5 +1,7 @@
 # Build and run reference
 
+The default runtime is Go on port 8080 and a display client connected directly to `/ws`. See [Go recording and replay](../../photon-server/readme.md) for current launch commands, uploads, and imports. The C++ session backend has been removed. Native helpers perform USB capture and offline imports.
+
 ## Native (Windows, clang + Ninja + CMake 3.25+)
 
 ```powershell
@@ -10,9 +12,9 @@ ctest --test-dir .artifacts --output-on-failure
 
 | Binary | Path |
 | --- | --- |
-| `photon-backend` | `.artifacts/photon/daemon/photon-backend.exe` |
-| `photon-index` | `.artifacts/photon/daemon/photon-index.exe` |
 | `photon-ui` | `.artifacts/photon-ui.exe` |
+| `photon-pcan-adapter` | `.artifacts/server-workers/photon-pcan-adapter.exe` |
+| `photon-tsdb-export` | `.artifacts/server-workers/photon-tsdb-export.exe` |
 | `photon-export` | `.artifacts/tools/photon-export/photon-export.exe` |
 | `photon-tests` | `.artifacts/tests/photon-tests.exe` |
 
@@ -40,29 +42,14 @@ Outputs: `.artifacts-web/photon.{html,js,wasm,data}`. Do not mix `.artifacts-web
 
 Serve: `.\web\scripts\serve.ps1`, open `http://127.0.0.1:8080/photon.html` (never `file://`). Headless protocol check: `python .\web\scripts\smoke_ws.py`.
 
-## photon-backend flags
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--ws-port` | `8765` | WebSocket listen port (always bound to `127.0.0.1`) |
-| `--daq-host` | `127.0.0.1` | Default CANP fan-out host for `select_source daq_tcp` |
-| `--daq-port` | `6500` | Default CANP fan-out port |
-| `--source` | `daq_tcp` | `daq_tcp` (photon-server), `log_replay`, or `pcan` |
-| `--no-live-tail` | off | Do not write a TSDB (PC `photon-index` owns the store) |
-| `--password` | `PHOTON_PASSWORD` | Shared secret for photon-server fan-out / video / observer |
-
 ## photon-ui (native desktop client)
 
 Same ImGui sources as the WASM page. Flags: `--ws URL`, `--password P`, `--shared`/`--private`, `--screen ID`, `--quit-after-ms N` (smoke-test hook: prints `timed quit` + `shutdown ok`).
 
-## photon-index
-
-Historical: `--logs DIR --out DIR` indexes VSD1 into a TSDB session. Live PC ingest: `--live-fanout HOST:PORT --out DIR` writes `data/tsdb` from photon-server CANP fan-out. Also `--bench` / `--retention`; see `--help`.
-
 ## photon-export
 
-Reads a TSDB session, writes Parquet: `--store DIR --session ID --out FILE --signals LIST` (or `--all-signals`). Library `photon-export-lib` is also linked by the daemon CSV path and tests.
+Reads a TSDB session, writes Parquet: `--store DIR --session ID --out FILE --signals LIST` (or `--all-signals`). Library `photon-export-lib` is used by offline tools and tests.
 
 ## Screens
 
-Pit (default) · Dashboard · Plots · Dynamics · Live View (WebCodecs/MF H.264) · 3D (glTF car) · Track Sim · CAN · Network · Analysis. Navigation is a top tab bar; titlebar right holds connection dot, source, timeline, Live/Pause.
+Pit (default), Dashboard, Plots, Mechanical, PDU, Live View and CAN. Dynamics is inside Mechanical; Connection is in the titlebar.
