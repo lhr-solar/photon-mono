@@ -4,11 +4,14 @@ rem macOS and Linux use the photon shell script beside this file.
 setlocal
 set "PHOTON_PY="
 rem The WindowsApps python.exe is a Microsoft Store redirect, not an interpreter.
+rem An older python on PATH is skipped, the same as the photon shell script does.
 for /f "delims=" %%P in ('where python 2^>nul') do if not defined PHOTON_PY (
-    echo %%P| findstr /i /c:"\WindowsApps\" >nul || set "PHOTON_PY="%%P""
+    echo %%P| findstr /i /c:"\WindowsApps\" >nul || (
+        "%%P" -c "import sys; sys.exit(sys.version_info < (3, 9))" >nul 2>nul && set "PHOTON_PY="%%P""
+    )
 )
 if not defined PHOTON_PY (
-    where py >nul 2>nul && set "PHOTON_PY=py -3"
+    py -3 -c "import sys; sys.exit(sys.version_info < (3, 9))" >nul 2>nul && set "PHOTON_PY=py -3"
 )
 rem A fresh machine: photon setup installs Python first, since everything else runs on it.
 if not defined PHOTON_PY if /i "%~1"=="setup" (
