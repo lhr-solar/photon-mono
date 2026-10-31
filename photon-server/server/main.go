@@ -147,9 +147,8 @@ func main() {
 	defer localUI.Stop()
 
 	clients := NewClientTracker()
-	// One CANP batch per buffer. 64 x 1 MiB holds ~1.3 s of parser stall at the
-	// car's 20 ms flushes, ~16 s once it sends 256 ms batches.
-	pool := newBatchPool(64, 1<<20)
+	
+	pool := newBatchPool(128, 1<<18)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
