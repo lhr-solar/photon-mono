@@ -1,0 +1,76 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/../out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "native",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "headless-debug",
+      "displayName": "Headless Debug",
+      "description": "photon-backend, photon-index, photon-export, and tests; no desktop UI libraries",
+      "inherits": "native",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "PHOTON_NATIVE_UI": "OFF" }
+    },
+    {
+      "name": "headless-release",
+      "displayName": "Headless Release",
+      "description": "photon-backend, photon-index, photon-export, and tests; no desktop UI libraries",
+      "inherits": "native",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "PHOTON_NATIVE_UI": "OFF" }
+    },
+    {
+      "name": "desktop-debug",
+      "displayName": "Desktop Debug",
+      "description": "Everything native, including photon-ui (fetches SDL2, ImGui, ImPlot, WebView2)",
+      "inherits": "native",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "PHOTON_NATIVE_UI": "ON" }
+    },
+    {
+      "name": "desktop-release",
+      "displayName": "Desktop Release",
+      "description": "Everything native, including photon-ui (fetches SDL2, ImGui, ImPlot, WebView2)",
+      "inherits": "native",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "PHOTON_NATIVE_UI": "ON" }
+    },
+    {
+      "name": "web-release",
+      "displayName": "Web Release",
+      "description": "The WASM page; photon build client --ui web loads emsdk, runs this, and post-processes the page",
+      "inherits": "base",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "PHOTON_FRONTEND": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "headless-debug", "configurePreset": "headless-debug" },
+    { "name": "headless-release", "configurePreset": "headless-release" },
+    { "name": "desktop-debug", "configurePreset": "desktop-debug" },
+    { "name": "desktop-release", "configurePreset": "desktop-release" },
+    { "name": "web-release", "configurePreset": "web-release" }
+  ],
+  "testPresets": [
+    { "name": "headless-debug", "configurePreset": "headless-debug", "output": { "outputOnFailure": true } },
+    { "name": "headless-release", "configurePreset": "headless-release", "output": { "outputOnFailure": true } },
+    { "name": "desktop-debug", "configurePreset": "desktop-debug", "output": { "outputOnFailure": true } },
+    { "name": "desktop-release", "configurePreset": "desktop-release", "output": { "outputOnFailure": true } }
+  ]
+}

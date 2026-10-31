@@ -1,0 +1,5 @@
+# The launchers run as written: sh needs LF even in a Windows checkout (WSL, a
+# shared drive), and cmd reads CRLF.
+photon text eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf

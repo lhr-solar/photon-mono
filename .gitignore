@@ -1,5 +1,6 @@
 # Build trees and binaries at any level
 /build/
+/out/
 .artifacts/
 .artifacts-*/
 .external/
@@ -10,6 +11,9 @@
 *.o
 *.pdb
 *.ilk
+# What tests/canp/run_*_test.sh build
+/tests/canp/sink_test
+/tests/canp/source_test
 
 # Runtime data next to the server binary, not photon-next/tools/data
 /data/

@@ -1,0 +1,254 @@
+name: CI
+
+# Every push builds everything and runs every test. When all of it passes, the
+# bundles for that commit are attached to the run as downloadable artifacts.
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A newer push to a branch replaces its older run; every commit on main keeps its builds.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  server:
+    name: Server tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: photon-server/go.mod
+          cache-dependency-path: photon-server/go.sum
+      - name: go vet and test
+        run: .\photon.cmd test go
+      - name: Unfinished cache package (does not block)
+        continue-on-error: true
+        working-directory: photon-server
+        run: go test -count=1 ./cache
+
+  linux:
+    name: Server and car C code (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: photon-server/go.mod
+          cache-dependency-path: photon-server/go.sum
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: go vet and test
+        working-directory: photon-server
+        run: |
+          go vet ./...
+          go test -count=1 ./server ./observer ./sshd ./cmd/...
+          go build -o "$RUNNER_TEMP/dist/server/photon-server" ./server
+      - name: CANP source against photon-server
+        env:
+          PHOTON_DIST_DIR: ${{ runner.temp }}/dist
+          PHOTON_E2E_STRICT: "1"
+          PHOTON_E2E_LOGS: ${{ runner.temp }}/e2e-logs
+        run: python -m unittest discover -s tests/e2e -t tests/e2e -p test_canp.py -v
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-linux
+          path: ${{ runner.temp }}/e2e-logs
+          # A failure before the tests leaves no logs, which is not worth a warning.
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # photon setup, build, and test native everywhere else, and the Go server built
+  # on each. The Windows x64 job below stays the one that runs e2e and publishes.
+  native:
+    name: Build and test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-24.04
+            arch: x86-64
+          - name: Linux arm64
+            os: ubuntu-24.04-arm
+            arch: aarch64
+          - name: macOS arm64
+            os: macos-15
+            arch: arm64
+          - name: macOS x64
+            os: macos-15-intel
+            arch: x86_64
+          - name: Windows arm64
+            os: windows-11-arm
+            # file says ARM64 for PE files, aarch64 only for ELF.
+            arch: arm64
+            # Whatever clang the runner has, emit ARM64, not x64 under emulation.
+            cmake-args: -DCMAKE_C_COMPILER_TARGET=aarch64-pc-windows-msvc -DCMAKE_CXX_COMPILER_TARGET=aarch64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: photon-server/go.mod
+          cache-dependency-path: photon-server/go.sum
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Setup (Linux and macOS)
+        # The same photon setup a person runs: brew on macOS, apt here, SDL2 for the desktop UI.
+        if: runner.os != 'Windows'
+        run: ./photon setup server client tools
+      - name: Toolchain (Windows)
+        # The runners have no winget, so photon setup cannot run here.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check ninja "cmake>=3.25"
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) { choco install llvm -y --no-progress }
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Versions
+        run: |
+          clang --version
+          cmake --version
+          ninja --version
+          go version
+      - name: Build
+        env:
+          PHOTON_CMAKE_ARGS: ${{ matrix.cmake-args }}
+        run: ${{ runner.os == 'Windows' && 'python scripts/photon' || './photon' }} build server client tools --config Release
+      - name: Architecture
+        # A wrong-arch binary still builds and runs under emulation; catch it here.
+        working-directory: out/build/desktop-release
+        run: |
+          for exe in photon-ui photon/daemon/photon-backend photon/daemon/photon-index; do
+            [ -f "$exe.exe" ] && exe="$exe.exe"
+            file "$exe"
+            file "$exe" | grep -qi '${{ matrix.arch }}'
+          done
+      - name: C++ tests
+        run: ${{ runner.os == 'Windows' && 'python scripts/photon' || './photon' }} test native --config Release
+      - name: go vet and build
+        working-directory: photon-server
+        run: |
+          go vet ./...
+          go build ./...
+
+  windows:
+    name: Build and test (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: photon-server/go.mod
+          cache-dependency-path: photon-server/go.sum
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: |
+          python -m pip install --disable-pip-version-check ninja
+          # The runner image ships LLVM; install it if this image does not.
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) { choco install llvm -y --no-progress }
+          # Put clang ahead of anything else named clang.
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Versions
+        run: |
+          clang --version
+          cmake --version
+          ninja --version
+          go version
+      - name: emsdk
+        uses: actions/cache@v6
+        with:
+          path: photon-next/.external/emsdk
+          # Bump with EMSDK_VERSION in scripts/photon/web.py.
+          key: emsdk-6.0.13-${{ runner.os }}
+      - name: Build
+        # Every bundle: server, client (desktop and web), station, tools, symbols.
+        run: .\photon.cmd build station client tools --ui both --config Release
+      - name: C++ and decoder tests
+        run: .\photon.cmd test native --config Release
+      - name: End-to-end tests
+        env:
+          PHOTON_E2E_LOGS: ${{ runner.temp }}\e2e-logs
+        run: .\photon.cmd test e2e --strict
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-windows
+          path: ${{ runner.temp }}\e2e-logs
+          if-no-files-found: ignore
+          retention-days: 7
+      # out\dist is the bundles; held here until the other jobs pass, then publish
+      # turns each one into a download.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: staging
+          path: out/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish builds
+    needs: [server, linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: staging
+          path: dist
+      - name: Name
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: photon-station-${{ env.TAG }}
+          path: dist/station
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: photon-server-${{ env.TAG }}
+          path: dist/server
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: photon-client-${{ env.TAG }}
+          path: dist/client
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: photon-tools-${{ env.TAG }}
+          path: dist/tools
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: photon-symbols-${{ env.TAG }}
+          path: dist/symbols
+          if-no-files-found: error
+      - name: Drop the staging copy
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --jq '.artifacts[] | select(.name == "staging") | .id' |
+            xargs -r -I{} gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/{}"

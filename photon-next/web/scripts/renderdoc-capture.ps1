@@ -3,7 +3,8 @@
 
 $ErrorActionPreference = "Continue"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-$Web = Join-Path $Root ".artifacts-web"
+# The web-release preset's binaryDir (CMakePresets.json).
+$Web = Join-Path $Root "..\out\build\web-release"
 $Html = Join-Path $Web "photon.html"
 $Captures = Join-Path $Web "captures"
 $Profile = Join-Path $Web "chrome-rdc"
@@ -13,7 +14,7 @@ $Ui = "C:\Program Files\RenderDoc\qrenderdoc.exe"
 $Port = 8080
 $Url = "http://127.0.0.1:$Port/photon.html?screen=scene3d"
 
-if (-not (Test-Path $Html)) { throw "photon.html missing. Run web/scripts/build.ps1" }
+if (-not (Test-Path $Html)) { throw "photon.html missing. Run: photon build client --ui web" }
 if (-not (Test-Path $Chrome)) { throw "Chrome not found at $Chrome" }
 if (-not (Test-Path $Cmd)) { throw "RenderDoc not found at $Cmd" }
 

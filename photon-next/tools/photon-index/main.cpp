@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-#if defined(_WIN32)
+#if defined(_WIN32) && (defined(_M_X64) || defined(_M_IX86))
 #include <intrin.h>
 #endif
 
@@ -91,7 +91,8 @@ bool refuseDebugBench(bool allowDebug) {
 
 void printCpuBrand() {
     char brand[49] = {};
-#if defined(_WIN32)
+    // cpuid is x86 only; Windows on ARM prints (unavailable).
+#if defined(_WIN32) && (defined(_M_X64) || defined(_M_IX86))
     int info[4] = {};
     __cpuid(info, 0x80000000);
     if (static_cast<unsigned>(info[0]) >= 0x80000004u) {

@@ -9,8 +9,6 @@ go/main
 tui/tui
 observer/tui
 server/main
-canp/test/source_test
-canp/test/sink_test
 
 # Windows / Go build outputs
 *.exe

@@ -31,19 +31,9 @@ photon_apply_warnings(photon_daemon)
 
 add_executable(photon-backend main.cpp)
 target_link_libraries(photon-backend PRIVATE photon_daemon)
-if(PHOTON_SHIP_DIR)
-    set_target_properties(photon-backend PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${PHOTON_SHIP_DIR}"
-    )
-endif()
-
-add_custom_command(TARGET photon-backend POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_SOURCE_DIR}/assets"
-        "$<TARGET_FILE_DIR:photon-backend>/assets"
-)
-
 photon_apply_warnings(photon-backend)
+install(TARGETS photon-backend RUNTIME DESTINATION . COMPONENT client)
+photon_install_symbols(photon-backend)
 
 add_executable(photon-index
     ${CMAKE_SOURCE_DIR}/tools/photon-index/main.cpp
@@ -57,9 +47,6 @@ endif()
 if(CMAKE_BUILD_TYPE)
     target_compile_definitions(photon-index PRIVATE PHOTON_BUILD_TYPE=${CMAKE_BUILD_TYPE})
 endif()
-if(PHOTON_SHIP_DIR)
-    set_target_properties(photon-index PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${PHOTON_SHIP_DIR}"
-    )
-endif()
 photon_apply_warnings(photon-index)
+install(TARGETS photon-index RUNTIME DESTINATION . COMPONENT server)
+photon_install_symbols(photon-index)

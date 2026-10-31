@@ -113,13 +113,11 @@ def wait_port(host: str, port: int, timeout: float) -> None:
 
 
 def default_backend() -> Path:
-    root = Path(__file__).resolve().parents[2]
-    candidates = [
-        root / ".artifacts" / "backend" / "photon-backend.exe",
-        root / ".artifacts" / "backend" / "photon-backend",
-        root / ".artifacts" / "photon-backend.exe",
-        root / ".artifacts" / "photon-backend",
-    ]
+    # The client bundle from photon build, then a preset build tree.
+    out = Path(__file__).resolve().parents[3] / "out"
+    candidates = [out / "dist" / "client" / "photon-backend.exe"]
+    for preset in ("desktop-debug", "headless-debug", "desktop-release", "headless-release"):
+        candidates.append(out / "build" / preset / "photon" / "daemon" / "photon-backend.exe")
     for candidate in candidates:
         if candidate.exists():
             return candidate

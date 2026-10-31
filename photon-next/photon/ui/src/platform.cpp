@@ -2,6 +2,8 @@
 
 #include "photon/base64.hpp"
 
+#include <SDL.h>
+
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -60,11 +62,26 @@ std::string assetRoot() {
             return env;
         }
     }
+    static const std::string root = [] {
+        std::error_code ec;
 #ifdef PHOTON_ASSETS_DIR
-    return PHOTON_ASSETS_DIR;
-#else
-    return "assets";
+        // The checkout this exe was built from, so asset edits show without a relink.
+        if (std::filesystem::is_directory(PHOTON_ASSETS_DIR, ec)) {
+            return std::string(PHOTON_ASSETS_DIR);
+        }
 #endif
+        // A copied bundle carries assets\ beside photon-ui.exe.
+        if (char* base = SDL_GetBasePath()) {
+            const std::filesystem::path beside =
+                std::filesystem::path(reinterpret_cast<const char8_t*>(base)) / "assets";
+            SDL_free(base);
+            if (std::filesystem::is_directory(beside, ec)) {
+                return beside.string();
+            }
+        }
+        return std::string("assets");
+    }();
+    return root;
 }
 
 std::string assetPath(std::string_view relative) {

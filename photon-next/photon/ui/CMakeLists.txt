@@ -41,7 +41,8 @@ message(STATUS "photon-frontend tinygltf -> ${PHOTON_TINYGLTF_DIR}")
 add_library(photon-tinygltf STATIC
     src/gl3d/tinygltf_impl.cpp
 )
-target_include_directories(photon-tinygltf PUBLIC ${PHOTON_TINYGLTF_DIR})
+# SYSTEM: the json.hpp tinygltf bundles trips clang's -Wdeprecated-literal-operator.
+target_include_directories(photon-tinygltf SYSTEM PUBLIC ${PHOTON_TINYGLTF_DIR})
 target_compile_definitions(photon-tinygltf PUBLIC
     TINYGLTF_NOEXCEPTION
     TINYGLTF_NO_STB_IMAGE_WRITE
@@ -113,12 +114,18 @@ if(NOT EMSCRIPTEN)
         set(SDL_STATIC ON CACHE BOOL "" FORCE)
         set(SDL_TEST OFF CACHE BOOL "" FORCE)
         set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+        # Its ccache probe re-declares cmake_minimum_required(3.4), which CMake warns about.
+        set(SDL_CCACHE OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(sdl2
             URL https://github.com/libsdl-org/SDL/releases/download/release-2.32.8/SDL2-2.32.8.tar.gz
             SOURCE_DIR ${PHOTON_EXTERNAL_DIR}/sdl2
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         )
         FetchContent_MakeAvailable(sdl2)
+        if(TARGET SDL2-static)
+            # Vendored C; each new clang finds something new in it that is not ours to fix.
+            target_compile_options(SDL2-static PRIVATE -w)
+        endif()
     endif()
     if(TARGET SDL2::SDL2-static)
         set(PHOTON_SDL2_TARGET SDL2::SDL2-static)
@@ -133,10 +140,14 @@ if(NOT EMSCRIPTEN)
 endif()
 
 add_library(photon-imgui STATIC ${PHOTON_IMGUI_SOURCES})
-target_include_directories(photon-imgui PUBLIC
+target_include_directories(photon-imgui SYSTEM PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
     ${implot_SOURCE_DIR}
+)
+# ImPlot v0.17 ORs ImGui 1.92's public and private button flags; upstream code, not ours.
+target_compile_options(photon-imgui PRIVATE
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-deprecated-enum-enum-conversion>
 )
 if(EMSCRIPTEN)
     target_compile_definitions(photon-imgui PUBLIC IMGUI_IMPL_OPENGL_ES3)
@@ -144,8 +155,13 @@ if(EMSCRIPTEN)
     target_link_options(photon-imgui PUBLIC "SHELL:--use-port=sdl2")
 else()
     target_link_libraries(photon-imgui PUBLIC ${PHOTON_SDL2_TARGET})
-    # clang + MSVC ABI: SDL_endian.h redefines the _m_prefetch builtin.
-    target_compile_definitions(photon-imgui PUBLIC __PRFCHWINTRIN_H)
+    if(WIN32)
+        # clang + MSVC ABI: SDL_endian.h redefines the _m_prefetch builtin.
+        target_compile_definitions(photon-imgui PUBLIC __PRFCHWINTRIN_H)
+    else()
+        # imgui_impl_opengl3's loader dlopens libGL.
+        target_link_libraries(photon-imgui PUBLIC ${CMAKE_DL_LIBS})
+    endif()
 endif()
 
 if(EMSCRIPTEN)
@@ -213,9 +229,20 @@ if(PHOTON_WEB_GLBS_EXIST)
             "${PHOTON_WEB_MODELS_DIR}/"
         COMMENT "Copy recovered GLBs to ${PHOTON_WEB_MODELS_DIR} (runtime fetch, not MEMFS)"
     )
+    install(FILES ${PHOTON_WEB_GLBS} DESTINATION ui/models COMPONENT web)
 else()
     message(STATUS "photon-frontend skipping GLB copy (missing files under ${PHOTON_MODELS_DIR})")
 endif()
+
+# photon build (scripts/photon/web.py) stamps a cache token into the html and js after the link,
+# so install after it, not straight after cmake --build.
+install(FILES
+    "${CMAKE_BINARY_DIR}/photon.html"
+    "${CMAKE_BINARY_DIR}/photon.js"
+    "${CMAKE_BINARY_DIR}/photon.wasm"
+    "${CMAKE_BINARY_DIR}/photon.data"
+    DESTINATION ui COMPONENT web
+)
 
 photon_apply_warnings(photon-frontend)
 
@@ -225,9 +252,13 @@ else()
         ${PHOTON_UI_SOURCES}
         src/platform.cpp
         src/gl_loader.cpp
-        src/native_maps.cpp
-        src/native_video.cpp
     )
+    if(WIN32)
+        target_sources(photon-ui PRIVATE src/native_maps.cpp src/native_video.cpp)
+    else()
+        # WebView2 and Media Foundation have no counterpart here yet.
+        target_sources(photon-ui PRIVATE src/native_stubs.cpp)
+    endif()
     target_include_directories(photon-ui PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
@@ -271,13 +302,21 @@ else()
             file(MAKE_DIRECTORY "${PHOTON_WEBVIEW2_DIR}")
             file(ARCHIVE_EXTRACT INPUT "${PHOTON_WEBVIEW2_NUPKG}" DESTINATION "${PHOTON_WEBVIEW2_DIR}")
         endif()
-        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        # What the compiler targets, not the host: an x64 clang can build ARM64 and back.
+        if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
+            set(PHOTON_WEBVIEW2_LIB "${PHOTON_WEBVIEW2_DIR}/build/native/arm64/WebView2LoaderStatic.lib")
+        elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
             set(PHOTON_WEBVIEW2_LIB "${PHOTON_WEBVIEW2_DIR}/build/native/x64/WebView2LoaderStatic.lib")
         else()
             set(PHOTON_WEBVIEW2_LIB "${PHOTON_WEBVIEW2_DIR}/build/native/x86/WebView2LoaderStatic.lib")
         endif()
-        target_include_directories(photon-ui PRIVATE
+        # SYSTEM: WebView2.h declares an enum value clang finds out of range for int.
+        target_include_directories(photon-ui SYSTEM PRIVATE
             "${PHOTON_WEBVIEW2_DIR}/build/native/include"
+        )
+        # IID_PPV_ARGS is __uuidof, the COM idiom; -Wpedantic calls it an extension.
+        set_source_files_properties(src/native_maps.cpp src/native_video.cpp PROPERTIES
+            COMPILE_OPTIONS "-Wno-language-extension-token"
         )
         target_link_libraries(photon-ui PRIVATE
             opengl32
@@ -293,21 +332,18 @@ else()
         )
         message(STATUS "photon-ui WebView2 -> ${PHOTON_WEBVIEW2_DIR}")
     endif()
-    if(PHOTON_SHIP_DIR)
-        set(_photon_ui_dir "${PHOTON_SHIP_DIR}")
-    else()
-        set(_photon_ui_dir "${CMAKE_BINARY_DIR}")
-    endif()
+    # In the build tree photon-ui reads assets from the checkout (PHOTON_ASSETS_DIR);
+    # an installed one reads the assets\ installed beside it.
     set_target_properties(photon-ui PROPERTIES
         OUTPUT_NAME photon-ui
-        RUNTIME_OUTPUT_DIRECTORY "${_photon_ui_dir}"
-    )
-    add_custom_command(TARGET photon-ui POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/assets"
-            "$<TARGET_FILE_DIR:photon-ui>/assets"
-        COMMENT "Copy Photon assets next to photon-ui"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
     )
     photon_apply_warnings(photon-ui)
-    message(STATUS "photon-ui -> ${_photon_ui_dir}/photon-ui${CMAKE_EXECUTABLE_SUFFIX}")
+    install(TARGETS photon-ui RUNTIME DESTINATION . COMPONENT desktop)
+    install(DIRECTORY "${CMAKE_SOURCE_DIR}/assets/fonts" "${CMAKE_SOURCE_DIR}/assets/models"
+        DESTINATION assets COMPONENT desktop)
+    install(FILES "${CMAKE_SOURCE_DIR}/assets/maps3d.html" "${CMAKE_SOURCE_DIR}/assets/maps3d.js"
+        DESTINATION assets COMPONENT desktop)
+    photon_install_symbols(photon-ui)
+    message(STATUS "photon-ui -> ${CMAKE_BINARY_DIR}/photon-ui${CMAKE_EXECUTABLE_SUFFIX}")
 endif()

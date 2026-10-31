@@ -1,10 +1,10 @@
 // Exercise the actual EM_JS decoder glue with WebCodecs' key-after-flush rule.
-// Run: node tests/test_video_webcodecs.cjs
+// Run: node tests/web/test_video_webcodecs.cjs
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../photon/ui/src/video_decoder.cpp'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../../photon-next/photon/ui/src/video_decoder.cpp'), 'utf8');
 function glue(name, args) {
     const start = source.indexOf('EM_JS(void, ' + name + ',');
     assert.ok(start >= 0, name + ' missing');

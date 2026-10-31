@@ -212,13 +212,13 @@ void runPlotAxisTests() {
         using photon::ui::ClockParts;
         using photon::ui::formatLocalClock;
         char buf[48]{};
-        CHECK(formatLocalClock(0ull, buf, sizeof(buf)) > 0);
+        CHECK(formatLocalClock(std::uint64_t{0}, buf, sizeof(buf)) > 0);
         CHECK(std::strcmp(buf, "--:--:--") == 0);
-        formatLocalClock(3661000ull, buf, sizeof(buf));
+        formatLocalClock(std::uint64_t{3661000}, buf, sizeof(buf));
         CHECK(std::strcmp(buf, "1:01:01") == 0);
-        formatLocalClock(3661123ull, buf, sizeof(buf), ClockParts::TimeMs);
+        formatLocalClock(std::uint64_t{3661123}, buf, sizeof(buf), ClockParts::TimeMs);
         CHECK(std::strcmp(buf, "1:01:01.123") == 0);
-        formatLocalClock(1757088000000ull, buf, sizeof(buf), ClockParts::DateTime);
+        formatLocalClock(std::uint64_t{1757088000000}, buf, sizeof(buf), ClockParts::DateTime);
         const bool ampm = std::strstr(buf, " AM") != nullptr || std::strstr(buf, " PM") != nullptr;
         CHECK(ampm);
         CHECK(std::strstr(buf, ",") != nullptr);

@@ -1,0 +1,16 @@
+#!/bin/sh
+# photon on macOS and Linux: run the Python CLI in scripts/photon with Python 3.9+.
+# Windows uses photon.cmd beside this file.
+here=$(cd "$(dirname "$0")" && pwd)
+for py in python3 python; do
+    if command -v "$py" >/dev/null 2>&1 &&
+        "$py" -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+        exec "$py" "$here/scripts/photon" "$@"
+    fi
+done
+echo "photon needs Python 3.9 or newer." >&2
+case "$(uname -s)" in
+    Darwin) echo "Install it with: xcode-select --install   (or: brew install python)" >&2 ;;
+    *) echo "Install it with your package manager, for example: sudo apt install python3" >&2 ;;
+esac
+exit 1

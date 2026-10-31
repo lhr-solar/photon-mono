@@ -49,3 +49,9 @@ target_compile_definitions(photon-tests PRIVATE PHOTON_ASSETS_DIR="${PHOTON_ASSE
 photon_apply_warnings(photon-tests)
 
 add_test(NAME photon-protocol COMMAND photon-tests)
+
+add_executable(photon-export-tests test_export.cpp)
+target_link_libraries(photon-export-tests PRIVATE photon-export-lib)
+target_include_directories(photon-export-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+photon_apply_warnings(photon-export-tests)
+add_test(NAME photon-export COMMAND photon-export-tests)

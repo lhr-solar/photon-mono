@@ -1011,7 +1011,6 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay, bool hostMap
     const bool wantMaps = gMaps.on && (overlay || hostMaps);
     static float sLayout[4]{-1.0f, -1.0f, -1.0f, -1.0f};
     static int sCar = -1;
-    static bool sShown = false;
     static bool sStarted = false;
     static double sStartLat = 1e9;
     static double sStartLon = 1e9;
@@ -1053,7 +1052,6 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay, bool hostMap
             photon_maps3d_start(useLat, useLon, kCarUrls[car]);
         }
     } else {
-        sShown = false;
         sCar = -1;
         sStarted = false;
         sStartLat = 1e9;
@@ -1075,7 +1073,6 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay, bool hostMap
                                static_cast<double>(gMaps.scale), static_cast<double>(gMaps.range),
                                gMaps.viewMode == 1 ? 0.0 : static_cast<double>(gMaps.tilt), gMaps.follow ? 1 : 0);
             photon_maps3d_show(1);
-            sShown = true;
         }
     } else {
         if (!wantMaps) {

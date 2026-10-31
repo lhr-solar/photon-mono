@@ -1,4 +1,4 @@
-"""Dev server for .artifacts-web.
+"""Dev server for the web-release build tree (../out/build/web-release).
 
 photon.html / photon.js / photon.wasm / photon.data stay no-store so a rebuild
 is never served from a stale browser cache. GLB models under /models/ are
@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-WEB_ROOT = Path(__file__).resolve().parents[2] / ".artifacts-web"
+WEB_ROOT = Path(__file__).resolve().parents[3] / "out" / "build" / "web-release"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 
 

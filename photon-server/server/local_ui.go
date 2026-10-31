@@ -346,6 +346,10 @@ func uiExportProxy() http.Handler {
 }
 
 func openBrowser(url string) {
+	// Tests and CI start a station with no one at the screen.
+	if os.Getenv("PHOTON_NO_BROWSER") != "" {
+		return
+	}
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)

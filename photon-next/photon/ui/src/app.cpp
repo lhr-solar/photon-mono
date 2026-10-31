@@ -15,7 +15,8 @@
 #include "implot.h"
 
 #include <SDL.h>
-#ifndef __EMSCRIPTEN__
+// Windows only: on Linux it pulls in Xlib, whose None/Bool/Status macros break our enums.
+#ifdef _WIN32
 #include <SDL_syswm.h>
 #endif
 #ifdef __EMSCRIPTEN__
@@ -165,7 +166,12 @@ bool App::init() {
         return false;
     }
 
+#ifdef __APPLE__
+    // macOS only hands out a 3.2+ core context when it is asked for forward-compatible.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
+#endif
 #ifdef __EMSCRIPTEN__
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -223,11 +229,14 @@ bool App::init() {
     if (!photonGlLoadExtras()) {
         std::fprintf(stderr, "photon-ui: GL extras missing — 3D view will fail\n");
     }
+#ifdef _WIN32
+    // info.win exists only in an SDL built with its Windows video driver.
     SDL_SysWMinfo wminfo{};
     SDL_VERSION(&wminfo.version);
     if (SDL_GetWindowWMInfo(window_, &wminfo) && wminfo.subsystem == SDL_SYSWM_WINDOWS) {
         nativeHostAttach(wminfo.info.win.window);
     }
+#endif
 #endif
 
     screens_.push_back(std::make_unique<PitScreen>());
