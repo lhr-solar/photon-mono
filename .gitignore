@@ -22,6 +22,9 @@ photon-server/data/
 !examples/**/*.log
 __pycache__/
 
+# Local secrets
+.env
+
 # Host SSH material
 authorized_keys
 ssh_host_ed25519

@@ -35,10 +35,11 @@ def main(words) -> None:
         run = dict.fromkeys(run, True)
 
     if run["go"]:
-        run_step("go", ["go", "vet", "./..."], cwd=SERVER_DIR)
+        go_tests = ROOT / "tests" / "go" / "run.py"
+        run_step("go", [sys.executable, go_tests, "vet", "./..."], cwd=SERVER_DIR)
         # cache is the unfinished one-second tally; its tests are its spec until it is written.
-        run_step("go", ["go", "test", "-count=1", "./server", "./observer", "./sshd", "./cmd/..."], cwd=SERVER_DIR)
-        print("go: server/cache not run (unfinished; go test ./cache in photon-server)")
+        run_step("go", [sys.executable, go_tests, "test", "-count=1", "./server", "./observer", "./sshd", "./cmd/..."], cwd=SERVER_DIR)
+        print("go: server/cache not run (unfinished; python tests/go/run.py test ./cache)")
 
     if run["native"]:
         presets = [native_preset(desktop, config) for desktop in (True, False)]

@@ -70,7 +70,7 @@ Go programs build into `out\build\go`. Bundles come from CMake install component
 
 ## Test
 
-The tests live under `tests\`: `native` (the C++ tests CTest runs), `web` (the video decoder glue, under Node), `canp` (the car-side CANP sink and source), and `e2e`. The Go tests are the exception: Go only builds a package's `_test.go` files from that package's own folder, so they stay beside the code in `photon-server`.
+The tests live under `tests\`: `native` (the C++ tests CTest runs), `web` (the video decoder glue, under Node), `canp` (the car-side CANP sink and source), `e2e`, and `go` (the photon-server package tests, grouped by package). `photon test go` uses `tests/go/run.py` to create a temporary Go overlay: Go compiles the tests as part of their original packages without putting test files beside production sources. Production builds use the source tree directly.
 
 | Word | Runs |
 | --- | --- |
@@ -78,7 +78,9 @@ The tests live under `tests\`: `native` (the C++ tests CTest runs), `web` (the v
 | `native` | `cmake --build` and `ctest --preset` in each native tree built for `--config` (`photon-tests`, `photon-export-tests`), and the video decoder glue test under Node |
 | `e2e` | `tests\e2e` against `out\dist`: backend log replay from `client`, a whole `station` fed the example clip (segments, byte-exact fan-out, auth, observer, live TSDB, export, the page in headless Chrome or Edge, clean shutdown), and `photon-index` import with `photon-export` |
 
-Plain `photon test` runs all three. Build first. The station test needs ports 8765 and 8080, so it skips beside a running station. `--strict` turns those skips, and any bundle that was not built, into failures. `photon-server\cache` is unfinished and not run; `go test ./cache` in `photon-server` shows where it stands. `tests\e2e\test_canp.py` builds the car-side CANP source with gcc and runs it against `photon-server`, so it only runs on Linux.
+Plain `photon test` runs all three. Build first. The station test needs ports 8765 and 8080, so it skips beside a running station. `--strict` turns those skips, and any bundle that was not built, into failures. `photon-server\cache` is unfinished and not run; `python tests/go/run.py test ./cache` from the repository root shows where it stands. `tests\e2e\test_canp.py` builds the car-side CANP source with gcc and runs it against `photon-server`, so it only runs on Linux.
+
+For focused Go checks, run `python tests/go/run.py test -run TestDefaultConfig ./server` from the repository root. The runner accepts `test`, `vet`, or `list` followed by ordinary Go flags and package names, resolved from `photon-server`. Bare `go test` does not load the relocated tests; use the runner or `photon test go`.
 
 ## CI
 

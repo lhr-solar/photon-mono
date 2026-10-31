@@ -1,7 +1,7 @@
 // Package cache is the one-second plot tally.
 // Samples stay raw integers. Mean is sum/count at read time.
 // appendLoop still writes segment files and does not call this package.
-// Prove a change with: go test ./cache
+// From the repository root, prove a change with: python tests/go/run.py test ./cache
 // The copied clip is examples/brainerd-30s. A loopback database named photon_dev
 // is the place to try a write. The live database name photon stays on the MacBook.
 package cache

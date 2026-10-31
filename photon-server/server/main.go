@@ -283,7 +283,8 @@ func main() {
 }
 
 // Segment files stay. Plot rows are the one-second tally in package cache.
-// That package is not called from here. go test ./cache is the proof.
+// That package is not called from here. From the repository root, the proof is:
+// python tests/go/run.py test ./cache
 func appendLoop(store *StreamStore, ingress <-chan []byte, sessionCache *cache.SessionCache) {
 	for payload := range ingress {
 		if store.StoragePressureHigh() {

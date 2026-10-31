@@ -86,5 +86,7 @@ On startup the server recovers existing segments, rebuilds missing video indexes
 ## Tests
 
 ```bash
-go test ./...
+python ../tests/go/run.py test ./server ./observer ./sshd ./cmd/...
 ```
+
+The test files live in `tests/go/` at the repository root, grouped by package. The runner uses a temporary Go overlay so tests retain access to package internals without changing the production source tree. From the repository root, `photon test go` runs vet and these tests. Bare `go test` does not load the relocated tests. To include the unfinished cache package, run `python ../tests/go/run.py test ./...` (its failures are currently expected).

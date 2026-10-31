@@ -29,8 +29,7 @@ jobs:
         run: .\photon.cmd test go
       - name: Unfinished cache package (does not block)
         continue-on-error: true
-        working-directory: photon-server
-        run: go test -count=1 ./cache
+        run: python tests/go/run.py test -count=1 ./cache
 
   linux:
     name: Server and car C code (Linux)
@@ -48,8 +47,8 @@ jobs:
       - name: go vet and test
         working-directory: photon-server
         run: |
-          go vet ./...
-          go test -count=1 ./server ./observer ./sshd ./cmd/...
+          python ../tests/go/run.py vet ./...
+          python ../tests/go/run.py test -count=1 ./server ./observer ./sshd ./cmd/...
           go build -o "$RUNNER_TEMP/dist/server/photon-server" ./server
       - name: CANP source against photon-server
         env:
