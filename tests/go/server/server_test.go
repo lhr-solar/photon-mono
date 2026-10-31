@@ -3,11 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net"
 	"os"
-	"server/cache"
 	"sync"
 	"testing"
 	"time"
@@ -36,12 +36,12 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 	}
 	defer ingressListener.Close()
 
-	ingressChan := make(chan []byte, 100)
+	pool := newBatchPool(4, 1<<16)
 	var ingressWg sync.WaitGroup
-	go listenForIngress(ctx, ingressListener, ingressChan, &ingressWg)
+	go listenForIngress(ctx, ingressListener, &ingressWg, pool)
 
 	// Append loop
-	go appendLoop(store, ingressChan, cache.New())
+	go appendLoop(store, pool)
 
 	// 2. Start Client fan-out listener on random available port
 	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -69,7 +69,7 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 	}
 	defer videoStore.Close()
 
-	go listenForObservers(ctx, observerListener, time.Now(), store, clients, ingressChan, videoStore, gate, &observerWg)
+	go listenForObservers(ctx, observerListener, time.Now(), store, clients, pool, videoStore, gate, &observerWg)
 
 	// 4. Connect a downstream client
 	clientConn, err := net.Dial("tcp", clientListener.Addr().String())
@@ -97,7 +97,13 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 	}
 	defer ingressConn.Close()
 
-	testPayload := []byte("CAN_PAYLOAD_TEST_DATA_1234")
+	// Ingress reads whole CANP batches, so send one: a header for one frame,
+	// then the 29-byte frame record.
+	testPayload := make([]byte, canpHeaderSize+canpFrameSize)
+	binary.BigEndian.PutUint32(testPayload[0:4], canpMagic)
+	binary.BigEndian.PutUint16(testPayload[4:6], canpVersion)
+	binary.BigEndian.PutUint16(testPayload[6:8], 1)
+	copy(testPayload[canpHeaderSize:], "CAN_PAYLOAD_TEST_DATA_1234")
 	if _, err := ingressConn.Write(testPayload); err != nil {
 		t.Fatalf("failed to write ingress packet: %v", err)
 	}

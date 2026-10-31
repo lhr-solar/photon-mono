@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"server/cache"
 	"sync"
 	"syscall"
 	"time"
@@ -34,10 +33,6 @@ func main() {
 		log.Fatalf("[photon-server] Failed to open stream store: %v", err)
 	}
 	defer store.Close()
-
-	SessionCache := cache.New()
-	cache.LoadDBC("")
-
 
 	stats := store.Stats()
 	log.Printf("[photon-server] Store initialized: %d segments recovered (oldest ID: %d, latest ID: %d, disk bytes: %d)",
@@ -152,7 +147,9 @@ func main() {
 	defer localUI.Stop()
 
 	clients := NewClientTracker()
-	ingress := make(chan []byte, 1024)
+	// One CANP batch per buffer. 64 x 1 MiB holds ~1.3 s of parser stall at the
+	// car's 20 ms flushes, ~16 s once it sends 256 ms batches.
+	pool := newBatchPool(64, 1<<20)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -163,7 +160,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		appendLoop(store, ingress, SessionCache)
+		appendLoop(store, pool)
 	}()
 
 	// Ingress listener & connection tracking
@@ -171,7 +168,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		listenForIngress(ctx, ingressListener, ingress, &ingressConnWg)
+		listenForIngress(ctx, ingressListener, &ingressConnWg, pool)
 	}()
 
 	// Client fan-out listener & connection tracking
@@ -187,7 +184,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		listenForObservers(ctx, observerListener, startedAt, store, clients, ingress, videoStore, gate, &observerConnWg)
+		listenForObservers(ctx, observerListener, startedAt, store, clients, pool, videoStore, gate, &observerConnWg)
 	}()
 
 	// Video RTP/H.264 ingress (UDP local/WG + TCP Oracle pipe)
@@ -257,7 +254,7 @@ func main() {
 
 	// Wait for existing ingress readers to finish reading and close ingress channel
 	ingressConnWg.Wait()
-	close(ingress)
+	close(pool.ready)
 
 	// Close stores so any waiting client readers unblock immediately and video indexes flush
 	_ = store.Close()
@@ -282,11 +279,8 @@ func main() {
 	}
 }
 
-// Segment files stay. Plot rows are the one-second tally in package cache.
-// That package is not called from here. From the repository root, the proof is:
-// python tests/go/run.py test ./cache
-func appendLoop(store *StreamStore, ingress <-chan []byte, sessionCache *cache.SessionCache) {
-	for payload := range ingress {
+func appendLoop(store *StreamStore, pool *batchPool) {
+	for batch := range pool.ready {
 		if store.StoragePressureHigh() {
 			started := time.Now()
 			queueStats.blockStartedNS.Store(started.UnixNano())
@@ -296,9 +290,10 @@ func appendLoop(store *StreamStore, ingress <-chan []byte, sessionCache *cache.S
 			queueStats.blockStartedNS.Store(0)
 			queueStats.blockedNS.Add(time.Since(started).Nanoseconds())
 		}
-		if _, err := store.Append(payload); err != nil {
+		if _, err := store.Append(batch); err != nil {
 			// Append error during store closure or write failure
 		}
+		pool.put(batch)
 		
 	}
 }
@@ -306,8 +301,8 @@ func appendLoop(store *StreamStore, ingress <-chan []byte, sessionCache *cache.S
 func listenForIngress(
 	ctx context.Context,
 	listener net.Listener,
-	ingress chan<- []byte,
-	connWg *sync.WaitGroup,
+	connWg *sync.WaitGroup, 
+	pool *batchPool,
 ) {
 	ingressStats.listening.Store(true)
 	defer ingressStats.listening.Store(false)
@@ -329,13 +324,13 @@ func listenForIngress(
 		connWg.Add(1)
 		go func(c net.Conn) {
 			defer connWg.Done()
-			readIngressConnection(ctx, c, ingress)
+			readIngressConnection(ctx, c, pool)
 		}(conn)
 	}
 }
 
-func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []byte) {
-	const readBuffer = 32 * 1024 // This reader owns the connection and its active-connection count.
+func readIngressConnection(ctx context.Context, conn net.Conn, pool *batchPool) {
+	// This reader owns the connection and its active-connection count.
 	defer conn.Close()
 	defer ingressStats.active.Add(-1)
 
@@ -351,28 +346,22 @@ func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- []
 		}
 	}()
 
-	buf := make([]byte, readBuffer)
+	var hdr [canpHeaderSize]byte
 	for {
-		n, err := conn.Read(buf)
+		batch, err := readBatch(ctx, conn, hdr[:], pool)
 		if err != nil {
-			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && ctx.Err() == nil {
 				ingressStats.readFailures.Add(1)
+				log.Printf("[photon-server] ingress %s: %v; closing", conn.RemoteAddr(), err)
 			}
 			return
 		}
-		ingressStats.bytes.Add(uint64(n))
+		ingressStats.bytes.Add(uint64(len(batch)))
 		ingressStats.reads.Add(1)
 		ingressStats.lastReceiveMS.Store(time.Now().UnixMilli())
-		payload := make([]byte, n)
-		// Read reuses buf, so give the append loop its own copy of these bytes.
-		copy(payload, buf[:n])
-		// All ingress connections feed the same channel and append loop.
-		ingress <- payload
-
-		
-		// decode frame and pass back to parent funciton
-
-		observeQueueDepth(len(ingress))
+		// The parser owns batch from here and puts it back when done.
+		pool.submit(batch)
+		observeQueueDepth(len(pool.ready))
 	}
 }
 

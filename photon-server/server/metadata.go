@@ -130,7 +130,7 @@ func listenForObservers(
 	startedAt time.Time,
 	store *StreamStore,
 	clients *ClientTracker,
-	ingress <-chan []byte,
+	pool *batchPool,
 	video *VideoStore,
 	gate *ClientGate,
 	connWg *sync.WaitGroup,
@@ -153,7 +153,7 @@ func listenForObservers(
 				return
 			}
 			defer gate.Release(c)
-			writeServerMetadata(ctx, c, startedAt, store, clients, ingress, video)
+			writeServerMetadata(ctx, c, startedAt, store, clients, pool, video)
 		}(conn)
 	}
 }
@@ -164,7 +164,7 @@ func writeServerMetadata(
 	startedAt time.Time,
 	store *StreamStore,
 	clients *ClientTracker,
-	ingress <-chan []byte,
+	pool *batchPool,
 	video *VideoStore,
 ) {
 	defer conn.Close()
@@ -214,8 +214,8 @@ func writeServerMetadata(
 			},
 			Clients: clients.Snapshot(storage.Stats.LatestID),
 			Queue: QueueMetadata{
-				Depth:     len(ingress),
-				Capacity:  cap(ingress),
+				Depth:     len(pool.ready),
+				Capacity:  cap(pool.ready),
 				PeakDepth: queueStats.peakDepth.Load(),
 				BlockedMS: blockedNS / int64(time.Millisecond),
 			},
