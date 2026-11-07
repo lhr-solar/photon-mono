@@ -15,7 +15,7 @@ func TestBucketFoldsOneSecond(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("lines=%d", len(lines))
 	}
-	want := "sample,session=dev,signal=IMU_Accel_FR.Accel_X min=1000i,max=2000i,sum=3000i,count=2i 100000"
+	want := "sample,session=dev,signal=IMU_Accel_FR.Accel_X min=1000i,max=2000i,sum=3000i,count=2i 100000000000"
 	if lines[0] != want {
 		t.Fatalf("got %s", lines[0])
 	}
@@ -45,13 +45,13 @@ func TestClosedSecondDrops(t *testing.T) {
 	session.Add("IMU_Accel_FR.Accel_X", 100, 1000, 0, false, 0, false)
 	session.Add("IMU_Accel_FR.Accel_X", 101, 5, 0, false, 0, false)
 	closed := session.TakeClosed("dev", 101)
-	if len(closed) != 1 || !strings.Contains(closed[0], " 100000") {
+	if len(closed) != 1 || !strings.Contains(closed[0], " 100000000000") {
 		t.Fatalf("closed=%v", closed)
 	}
 	if session.Len() != 1 {
 		t.Fatalf("open second dropped, len=%d", session.Len())
 	}
-	if lines := session.OpenLines("dev"); len(lines) != 1 || !strings.Contains(lines[0], " 101000") {
+	if lines := session.OpenLines("dev"); len(lines) != 1 || !strings.Contains(lines[0], " 101000000000") {
 		t.Fatalf("open=%v", lines)
 	}
 }
