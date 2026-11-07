@@ -23,6 +23,7 @@ from support import (
     PhotonClient,
     Proc,
     bundle,
+    canp_whole_batches,
     client_auth,
     clip_batches,
     copy_bundle,
@@ -96,6 +97,8 @@ class Station(unittest.TestCase):
         cls.server = Proc("station-server", args, cwd=cls.ship, env={"PHOTON_NO_BROWSER": "1"})
         cls.payloads = vsd1_payloads()
         cls.fed = b"".join(cls.payloads)
+        # The clip holds batches cut short at the DAQ; ingress keeps only their whole frames.
+        cls.kept = canp_whole_batches(cls.fed)
         cls.probe = cls.ui = None
         try:
             cls.server.wait_for_output("Ready to process streams", 30)
@@ -118,7 +121,7 @@ class Station(unittest.TestCase):
             while feeder.is_alive():
                 cls.ui.pump(0.1)
             cls.ui.wait(lambda: cls.ui.telemetry, 20, "live telemetry through the station")
-            wait_until(lambda: len(cls.probe.data) >= len(cls.fed), 20, "the fan-out to relay the whole clip")
+            wait_until(lambda: len(cls.probe.data) >= len(cls.kept), 20, "the fan-out to relay the whole clip")
             wait_until(cls.tsdb_sessions, 60, "photon-index to catalog a TSDB session")
         except BaseException:
             cls.shutdown()
@@ -171,14 +174,16 @@ class Station(unittest.TestCase):
 
     def test_ingest_stores_the_clip(self):
         stored = sum(p.stat().st_size for p in (self.data / "segments").glob("*.log"))
-        self.assertGreaterEqual(stored, len(self.fed))
+        self.assertGreaterEqual(stored, len(self.kept))
 
     def test_fanout_relays_the_clip_byte_for_byte(self):
-        self.assertEqual(bytes(self.probe.data[: len(self.fed)]), self.fed)
+        self.assertEqual(bytes(self.probe.data[: len(self.kept)]), self.kept)
 
     def test_observer_reports_ingest_and_clients(self):
         stats = self.observer()
-        self.assertEqual(stats["ingress"]["bytes"], len(self.fed))
+        self.assertEqual(stats["ingress"]["bytes"], len(self.kept))
+        # Every byte fed is either in a kept batch or counted as skipped.
+        self.assertEqual(stats["ingress"]["bytes"] + stats["ingress"]["skipped_bytes"], len(self.fed))
         self.assertTrue(stats["clients"]["listening"])
         # photon-index, the local backend, and the probe.
         self.assertGreaterEqual(stats["clients"]["active"], 3)

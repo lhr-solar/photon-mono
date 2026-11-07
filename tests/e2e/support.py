@@ -229,6 +229,62 @@ def canp_batches(stream: bytes) -> list[tuple[int, list[int]]]:
     return out
 
 
+def canp_whole_batches(stream: bytes, max_batch: int = 4 << 10) -> bytes:
+    """The bytes photon-server ingress keeps from a CANP stream, mirroring canpReader.
+
+    A bad header skips to the next magic. A batch cut short, by a new header inside
+    it or the stream ending, keeps its whole frames with the header count fixed, and
+    reading resumes at the new header. A batch bigger than max_batch (the server's
+    pool buffer size) is split into batches that fit, each with a copy of its header.
+    """
+    s, out, off = bytearray(stream), bytearray(), 0
+    while off + CANP_HEADER <= len(s):
+        magic, version, count = struct.unpack_from(">IHH", s, off)
+        n = CANP_HEADER + count * CANP_PACKET
+        if magic != 0x43414E31 or version != 3 or count == 0:
+            off = s.find(b"CAN1", off + 1)
+            if off < 0:
+                break
+            continue
+        want = min(n, max_batch)
+        batch = bytes(s[off : off + want])
+        cut = _cut_short_at(batch)
+        if cut:
+            batch = batch[:cut]
+        if len(batch) == n:
+            out += batch
+            off += n
+            continue
+        frames = max(0, (len(batch) - CANP_HEADER) // CANP_PACKET)
+        if not cut and len(batch) == want:
+            # Bigger than a buffer: keep what fits, and put a header for the rest in front of it.
+            out += _with_count(batch, frames)
+            off += frames * CANP_PACKET
+            s[off : off + CANP_HEADER] = _with_count(batch[:CANP_HEADER], count - frames)
+            continue
+        if frames:
+            out += _with_count(batch, frames)
+        off += len(batch)
+        if not cut:
+            break  # the stream ended partway through this batch
+    return bytes(out)
+
+
+def _with_count(batch: bytes, frames: int) -> bytes:
+    """batch's header with its count set to frames, and up to that many of its frames."""
+    return batch[:6] + struct.pack(">H", frames) + batch[8 : CANP_HEADER + frames * CANP_PACKET]
+
+
+def _cut_short_at(batch: bytes) -> int:
+    k = batch.find(b"CAN1", 1)
+    while k >= 0:
+        h = batch[k : k + CANP_HEADER]
+        if (len(h) < 6 or h[4:6] == b"\x00\x03") and (len(h) < 8 or h[6:8] != b"\x00\x00"):
+            return k
+        k = batch.find(b"CAN1", k + 1)
+    return 0
+
+
 def clip_batches(payloads: list[bytes] | None = None) -> list[tuple[int, list[int]]]:
     """The batches photon-backend indexes from a log: each VSD1 frame parsed on its own."""
     return [b for p in (payloads if payloads is not None else vsd1_payloads()) for b in canp_batches(p)]

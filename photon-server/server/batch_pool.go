@@ -5,12 +5,16 @@ import "context"
 type batchPool struct {
 	free  chan []byte // empty buffers the reader can take
 	ready chan []byte // filled batches waiting for the parser, oldest first
+	size  int         // bytes in each buffer
 }
 
 func newBatchPool(count, size int) *batchPool {
+	if size < canpHeaderSize+canpFrameSize {
+		panic("batch pool buffers must hold a CANP header and one frame")
+	}
 	f := make(chan []byte, count)
 	r := make(chan []byte, count)
-	p := &batchPool{free: f, ready: r}
+	p := &batchPool{free: f, ready: r, size: size}
 
 	for i := 0; i < count; i++ {
 		p.free <- make([]byte, size)

@@ -15,11 +15,14 @@ var ingressStats struct {
 	listening      atomic.Bool
 	active         atomic.Int64
 	total          atomic.Uint64
-	bytes          atomic.Uint64
-	reads          atomic.Uint64
+	bytes          atomic.Uint64 // bytes of whole batches submitted to the parser
+	reads          atomic.Uint64 // reads off ingress connections that returned data
+	batches        atomic.Uint64 // batches submitted to the parser
 	lastReceiveMS  atomic.Int64
 	readFailures   atomic.Uint64
 	acceptFailures atomic.Uint64
+	skippedBytes   atomic.Uint64 
+	cutBatches     atomic.Uint64 // batches cut short by a new header or a disconnect; their whole frames are kept
 }
 
 var metadataNowMS atomic.Int64
@@ -45,9 +48,12 @@ type IngressMetadata struct {
 	Total          uint64 `json:"total"`
 	Bytes          uint64 `json:"bytes"`
 	Reads          uint64 `json:"reads"`
+	Batches        uint64 `json:"batches"`
 	LastReceiveMS  int64  `json:"last_receive_ms"`
 	ReadFailures   uint64 `json:"read_failures"`
 	AcceptFailures uint64 `json:"accept_failures"`
+	SkippedBytes   uint64 `json:"skipped_bytes"`
+	CutBatches     uint64 `json:"cut_batches"`
 }
 
 type ServerMetadata struct {
@@ -208,9 +214,12 @@ func writeServerMetadata(
 				Total:          ingressStats.total.Load(),
 				Bytes:          ingressStats.bytes.Load(),
 				Reads:          ingressStats.reads.Load(),
+				Batches:        ingressStats.batches.Load(),
 				LastReceiveMS:  ingressStats.lastReceiveMS.Load(),
 				ReadFailures:   ingressStats.readFailures.Load(),
 				AcceptFailures: ingressStats.acceptFailures.Load(),
+				SkippedBytes:   ingressStats.skippedBytes.Load(),
+				CutBatches:     ingressStats.cutBatches.Load(),
 			},
 			Clients: clients.Snapshot(storage.Stats.LatestID),
 			Queue: QueueMetadata{

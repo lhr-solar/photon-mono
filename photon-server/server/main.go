@@ -148,7 +148,7 @@ func main() {
 
 	clients := NewClientTracker()
 	
-	pool := newBatchPool(128, 1<<18)
+	pool := newBatchPool(128, 4<<10)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -345,22 +345,11 @@ func readIngressConnection(ctx context.Context, conn net.Conn, pool *batchPool) 
 		}
 	}()
 
-	var hdr [canpHeaderSize]byte
-	for {
-		batch, err := readBatch(ctx, conn, hdr[:], pool)
-		if err != nil {
-			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && ctx.Err() == nil {
-				ingressStats.readFailures.Add(1)
-				log.Printf("[photon-server] ingress %s: %v; closing", conn.RemoteAddr(), err)
-			}
-			return
-		}
-		ingressStats.bytes.Add(uint64(len(batch)))
-		ingressStats.reads.Add(1)
-		ingressStats.lastReceiveMS.Store(time.Now().UnixMilli())
-		// The parser owns batch from here and puts it back when done.
-		pool.submit(batch)
-		observeQueueDepth(len(pool.ready))
+	// The reader submits batches to the parser itself, and returns when the connection ends.
+	err := newCanpReader(conn, pool).run(ctx)
+	if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && ctx.Err() == nil {
+		ingressStats.readFailures.Add(1)
+		log.Printf("[photon-server] ingress %s: %v; closing", conn.RemoteAddr(), err)
 	}
 }
 
