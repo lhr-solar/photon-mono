@@ -150,6 +150,10 @@ func main() {
 	
 	pool := newBatchPool(128, 4<<10)
 
+	decoder := startCANDecoder(cfg.CAN)
+	// The observer can change these while the server runs.
+	canConfig := newCANSettings(cfg.CAN, decoder)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -159,7 +163,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		appendLoop(store, pool)
+		appendLoop(store, pool, decoder, canConfig.swap)
 	}()
 
 	// Ingress listener & connection tracking
@@ -183,7 +187,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		listenForObservers(ctx, observerListener, startedAt, store, clients, pool, videoStore, gate, &observerConnWg)
+		listenForObservers(ctx, observerListener, startedAt, store, clients, pool, videoStore, canConfig, gate, &observerConnWg)
 	}()
 
 	// Video RTP/H.264 ingress (UDP local/WG + TCP Oracle pipe)
@@ -278,8 +282,21 @@ func main() {
 	}
 }
 
-func appendLoop(store *StreamStore, pool *batchPool) {
-	for batch := range pool.ready {
+// appendLoop stores each submitted buffer, decodes its CAN frames when decoder
+// is not nil, and returns the buffer to the pool. A decoder sent on swap
+// replaces the current one between buffers; nil turns decoding off.
+func appendLoop(store *StreamStore, pool *batchPool, decoder *canDecoder, swap <-chan *canDecoder) {
+	for {
+		var batch []byte
+		select {
+		case decoder = <-swap:
+			continue
+		case b, ok := <-pool.ready:
+			if !ok {
+				return
+			}
+			batch = b
+		}
 		if store.StoragePressureHigh() {
 			started := time.Now()
 			queueStats.blockStartedNS.Store(started.UnixNano())
@@ -291,6 +308,9 @@ func appendLoop(store *StreamStore, pool *batchPool) {
 		}
 		if _, err := store.Append(batch); err != nil {
 			// Append error during store closure or write failure
+		}
+		if decoder != nil {
+			decoder.decode(batch)
 		}
 		pool.put(batch)
 		

@@ -68,6 +68,18 @@ type ServerMetadata struct {
 	Queue       QueueMetadata   `json:"queue"`
 	Storage     StorageMetadata `json:"storage"`
 	Video       VideoMetadata   `json:"video"`
+	CAN         CANMetadata     `json:"can"`
+	Config      ConfigMetadata  `json:"config"`
+}
+
+// CANMetadata counts what CAN decoding has done since startup.
+type CANMetadata struct {
+	Enabled    bool   `json:"enabled"`
+	Frames     uint64 `json:"frames"`
+	Rows       uint64 `json:"rows"`
+	UnknownID  uint64 `json:"unknown_id"`  // frames no DBC defines, saved raw
+	Short      uint64 `json:"short"`       // frames too short for some signals
+	UnknownMux uint64 `json:"unknown_mux"` // frames naming an undefined mux page
 }
 
 type QueueMetadata struct {
@@ -138,6 +150,7 @@ func listenForObservers(
 	clients *ClientTracker,
 	pool *batchPool,
 	video *VideoStore,
+	settings *canSettings,
 	gate *ClientGate,
 	connWg *sync.WaitGroup,
 ) {
@@ -159,11 +172,14 @@ func listenForObservers(
 				return
 			}
 			defer gate.Release(c)
-			writeServerMetadata(ctx, c, startedAt, store, clients, pool, video)
+			writeServerMetadata(ctx, c, startedAt, store, clients, pool, video, settings)
 		}(conn)
 	}
 }
 
+// writeServerMetadata sends a metadata line every second. The observer may
+// also send commands on the same connection; each gets a reply line, and the
+// next metadata line follows straight away so the change shows at once.
 func writeServerMetadata(
 	ctx context.Context,
 	conn net.Conn,
@@ -172,6 +188,7 @@ func writeServerMetadata(
 	clients *ClientTracker,
 	pool *batchPool,
 	video *VideoStore,
+	settings *canSettings,
 ) {
 	defer conn.Close()
 
@@ -185,7 +202,17 @@ func writeServerMetadata(
 		}
 	}()
 
+	// Metadata and replies come from two goroutines; one line at a time.
+	var writeMu sync.Mutex
 	encoder := json.NewEncoder(conn)
+	write := func(v any) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return encoder.Encode(v)
+	}
+	refresh := make(chan struct{}, 1)
+	go readObserverCommands(conn, write, settings, refresh)
+
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -230,16 +257,98 @@ func writeServerMetadata(
 			},
 			Storage: storageMetadata(storage),
 			Video:   videoMetadata(video),
+			CAN: CANMetadata{
+				Enabled:    canStats.enabled.Load(),
+				Frames:     canStats.frames.Load(),
+				Rows:       canStats.rows.Load(),
+				UnknownID:  canStats.unknownID.Load(),
+				Short:      canStats.short.Load(),
+				UnknownMux: canStats.unknownMux.Load(),
+			},
+			Config: configMetadata(settings.current()),
 		}
-		if err := encoder.Encode(metadata); err != nil {
+		if err := write(metadata); err != nil {
 			return
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-refresh:
 		}
 	}
+}
+
+// observerCommand is a line an observer sends to change settings.
+type observerCommand struct {
+	Set struct {
+		CAN *canChange `json:"can"`
+	} `json:"set"`
+}
+
+// observerReply answers one command. It is a line of its own between metadata
+// lines, so an observer tells it apart by its "reply" key.
+type observerReply struct {
+	Reply replyBody `json:"reply"`
+}
+
+type replyBody struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// readObserverCommands applies each command the observer sends and replies to
+// it. It returns when the connection closes or sends something unreadable; the
+// metadata lines carry on either way.
+func readObserverCommands(conn net.Conn, write func(any) error, settings *canSettings, refresh chan<- struct{}) {
+	decoder := json.NewDecoder(conn)
+	for {
+		var cmd observerCommand
+		if err := decoder.Decode(&cmd); err != nil {
+			return
+		}
+		var reply observerReply
+		if cmd.Set.CAN == nil {
+			reply.Reply.Error = "nothing to change"
+		} else if _, err := settings.apply(*cmd.Set.CAN); err != nil {
+			reply.Reply.Error = err.Error()
+		} else {
+			reply.Reply.OK = true
+		}
+		if write(reply) != nil {
+			return
+		}
+		select {
+		case refresh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// ConfigMetadata is the configuration the server is running with.
+type ConfigMetadata struct {
+	CAN CANConfigMetadata `json:"can"`
+}
+
+// CANConfigMetadata is the CAN configuration in use. An observer can change
+// Decode and DBCDir; SampleRates are shown for reference.
+type CANConfigMetadata struct {
+	Decode      bool                 `json:"decode"`
+	DBCDir      string               `json:"dbc_dir"`
+	SampleRates []SampleRateMetadata `json:"sample_rates"`
+}
+
+type SampleRateMetadata struct {
+	Messages string  `json:"messages"`
+	Hz       float64 `json:"hz"`
+}
+
+func configMetadata(can CANConfig) ConfigMetadata {
+	rates := make([]SampleRateMetadata, len(can.SampleRates))
+	for i, r := range can.SampleRates {
+		rates[i] = SampleRateMetadata{Messages: r.Messages, Hz: r.Hz}
+	}
+	return ConfigMetadata{CAN: CANConfigMetadata{Decode: can.Decode, DBCDir: can.DBCDir, SampleRates: rates}}
 }
 
 func videoMetadata(store *VideoStore) VideoMetadata {

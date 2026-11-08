@@ -40,8 +40,11 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 	var ingressWg sync.WaitGroup
 	go listenForIngress(ctx, ingressListener, &ingressWg, pool)
 
-	// Append loop
-	go appendLoop(store, pool)
+	// Append loop; CAN decoding starts off and the observer turns it on below.
+	canCfg := DefaultCANConfig()
+	canCfg.DBCDir = testDBCDir
+	canSettings := newCANSettings(canCfg, nil)
+	go appendLoop(store, pool, nil, canSettings.swap)
 
 	// 2. Start Client fan-out listener on random available port
 	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -69,7 +72,7 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 	}
 	defer videoStore.Close()
 
-	go listenForObservers(ctx, observerListener, time.Now(), store, clients, pool, videoStore, gate, &observerWg)
+	go listenForObservers(ctx, observerListener, time.Now(), store, clients, pool, videoStore, canSettings, gate, &observerWg)
 
 	// 4. Connect a downstream client
 	clientConn, err := net.Dial("tcp", clientListener.Addr().String())
@@ -148,8 +151,46 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 	if meta.Video.SegmentCount < 0 {
 		t.Errorf("expected non-negative video segment count")
 	}
+	if meta.Config.CAN.Decode || meta.Config.CAN.DBCDir != testDBCDir || len(meta.Config.CAN.SampleRates) == 0 {
+		t.Errorf("config = %+v, want decoding off with the test DBC dir and sample rates", meta.Config.CAN)
+	}
 
-	// 8. Test shutdown
+	// 8. The observer changes settings on the same connection.
+	send := func(cmd string) replyBody {
+		t.Helper()
+		if _, err := obsConn.Write([]byte(cmd + "\n")); err != nil {
+			t.Fatalf("send %s: %v", cmd, err)
+		}
+		_ = obsConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		for { // metadata lines keep coming; skip to the reply
+			var line struct {
+				Reply *replyBody `json:"reply"`
+			}
+			if err := decoder.Decode(&line); err != nil {
+				t.Fatalf("waiting for reply to %s: %v", cmd, err)
+			}
+			if line.Reply != nil {
+				return *line.Reply
+			}
+		}
+	}
+	if r := send(`{"set":{"can":{"dbc_dir":"no/such/dir","decode":true}}}`); r.OK || r.Error == "" {
+		t.Errorf("a missing DBC dir was accepted: %+v", r)
+	}
+	if r := send(`{"set":{"can":{"decode":true}}}`); !r.OK {
+		t.Fatalf("turning decoding on failed: %s", r.Error)
+	}
+	if err := decoder.Decode(&meta); err != nil { // sent right after the reply
+		t.Fatal(err)
+	}
+	if !meta.Config.CAN.Decode || !meta.CAN.Enabled {
+		t.Errorf("after turning decoding on: config %+v, can %+v", meta.Config.CAN, meta.CAN)
+	}
+	if r := send(`{"set":{}}`); r.OK {
+		t.Errorf("an empty command was accepted")
+	}
+
+	// 9. Test shutdown
 	cancel()
 	_ = ingressListener.Close()
 	_ = clientListener.Close()

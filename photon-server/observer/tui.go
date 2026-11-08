@@ -37,6 +37,38 @@ type metadata struct {
 	Queue       queue     `json:"queue"`
 	Storage     storage   `json:"storage"`
 	Video       videoMeta `json:"video"`
+	CAN         canMeta   `json:"can"`
+	Config      config    `json:"config"`
+	// Reply is set only on the line answering a command; that line has no
+	// other fields.
+	Reply *reply `json:"reply"`
+}
+
+type canMeta struct {
+	Enabled    bool   `json:"enabled"`
+	Frames     uint64 `json:"frames"`
+	Rows       uint64 `json:"rows"`
+	UnknownID  uint64 `json:"unknown_id"`
+	Short      uint64 `json:"short"`
+	UnknownMux uint64 `json:"unknown_mux"`
+}
+
+type config struct {
+	CAN canConfig `json:"can"`
+}
+
+type canConfig struct {
+	Decode      bool   `json:"decode"`
+	DBCDir      string `json:"dbc_dir"`
+	SampleRates []struct {
+		Messages string  `json:"messages"`
+		Hz       float64 `json:"hz"`
+	} `json:"sample_rates"`
+}
+
+type reply struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error"`
 }
 
 type videoMeta struct {
@@ -140,7 +172,13 @@ const (
 
 type model struct {
 	decoder                 *json.Decoder
+	commands                io.Writer // the same connection; settings changes go back on it
 	data                    metadata
+	canRate                 float64 // decoded frames per second
+	canStatus               string  // the server's answer to the last change
+	canStatusOK             bool
+	editingDBC              bool
+	dbcInput                textinput.Model
 	err                     error
 	width                   int
 	height                  int
@@ -226,9 +264,46 @@ func read(decoder *json.Decoder) tea.Cmd {
 	}
 }
 
+// sendFailedMsg reports a command that could not be written to the server.
+type sendFailedMsg struct{ err error }
+
+// setCAN asks the server to change CAN settings. The answer arrives as a reply
+// line among the metadata.
+func setCAN(w io.Writer, change map[string]any) tea.Cmd {
+	return func() tea.Msg {
+		line, err := json.Marshal(map[string]any{"set": map[string]any{"can": change}})
+		if err == nil {
+			_, err = w.Write(append(line, '\n'))
+		}
+		if err != nil {
+			return sendFailedMsg{err}
+		}
+		return nil
+	}
+}
+
 func (m model) Init() tea.Cmd { return tea.Batch(read(m.decoder), blink()) }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.editingDBC {
+		if key, ok := msg.(tea.KeyPressMsg); ok {
+			switch key.String() {
+			case "enter":
+				m.editingDBC = false
+				m.dbcInput.Blur()
+				m.canStatus, m.canStatusOK = "loading DBCs…", true
+				return m, setCAN(m.commands, map[string]any{"dbc_dir": m.dbcInput.Value()})
+			case "esc":
+				m.editingDBC = false
+				m.dbcInput.Blur()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.dbcInput, cmd = m.dbcInput.Update(msg)
+			return m, cmd
+		}
+	}
+
 	var filterCmd tea.Cmd
 	if m.filtering {
 		if key, ok := msg.(tea.KeyPressMsg); ok {
@@ -275,6 +350,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterInput.SetValue("")
 			return m, m.filterInput.Focus()
 		}
+		if msg.String() == "e" && !m.data.StartTime.IsZero() {
+			on := !m.data.Config.CAN.Decode
+			if on {
+				m.canStatus = "loading DBCs…"
+			} else {
+				m.canStatus = "turning decoding off…"
+			}
+			m.canStatusOK = true
+			return m, setCAN(m.commands, map[string]any{"decode": on})
+		}
+		if msg.String() == "c" && !m.data.StartTime.IsZero() {
+			m.editingDBC = true
+			m.dbcInput.SetValue(m.data.Config.CAN.DBCDir)
+			m.dbcInput.CursorEnd()
+			return m, m.dbcInput.Focus()
+		}
 		if msg.String() == "s" && m.focus == 1 {
 			m.packetSort = (m.packetSort + 1) % 3
 			m.setStorageRows()
@@ -294,11 +385,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dot = !m.dot
 		m.setStorageRows()
 		return m, tea.Batch(blink(), filterCmd)
+	case sendFailedMsg:
+		m.canStatus, m.canStatusOK = "could not send: "+msg.err.Error(), false
+		return m, nil
 	case metadata:
+		if msg.Reply != nil {
+			// A reply line answers a command; the metadata shown stays as it is.
+			if msg.Reply.OK {
+				m.canStatus, m.canStatusOK = "applied", true
+			} else {
+				m.canStatus, m.canStatusOK = msg.Reply.Error, false
+			}
+			return m, read(m.decoder)
+		}
 		decodeStorage(&msg.Storage)
 		seconds := 0.0
 		if !m.data.CurrentTime.IsZero() {
 			seconds = msg.CurrentTime.Sub(m.data.CurrentTime).Seconds()
+			if seconds > 0 && msg.CAN.Frames >= m.data.CAN.Frames {
+				m.canRate = float64(msg.CAN.Frames-m.data.CAN.Frames) / seconds
+			}
 			if seconds > 0 && msg.Ingress.Bytes >= m.data.Ingress.Bytes &&
 				msg.Ingress.Reads >= m.data.Ingress.Reads {
 				m.prevByteRate, m.prevReadRate = m.byteRate, m.readRate
@@ -433,6 +539,12 @@ func (m *model) resize() {
 	m.clientTable.SetWidth(listWidth)
 	m.setClientRows()
 	reservedRows := 39
+	// The CAN panel: its two columns side by side from 100 wide, stacked below.
+	if w >= 100 {
+		reservedRows += 9
+	} else {
+		reservedRows += 16
+	}
 	if !m.packetDetailsHorizontal {
 		reservedRows += 6
 	}
@@ -625,6 +737,52 @@ func (m model) ingressText() string {
 			rateText(m.readRate, m.prevReadRate, "read/s")),
 			metricStyle(m.byteRate > 0 || m.readRate > 0, blue)),
 	)
+}
+
+// canText is the CAN decoding panel: what decoding is doing, the settings it
+// runs with, and the server's answer to the last change. Rows have nowhere to
+// go until the DB writer exists, so this is the place to see decoding work.
+func (m model) canText() string {
+	can, cfg := m.data.CAN, m.data.Config.CAN
+	state := styledRow("Decoding", "off", muted)
+	if cfg.Decode {
+		state = styledRow("Decoding", "on", lipgloss.NewStyle().Foreground(green).Bold(true))
+	}
+	dir := cfg.DBCDir
+	if dir == "" {
+		dir = "(none)"
+	}
+	stats := lipgloss.JoinVertical(lipgloss.Left,
+		title.Render("CAN"),
+		state,
+		row("DBC dir", dir),
+		styledRow("Frames", fmt.Sprintf("%d  %.0f/s", can.Frames, m.canRate),
+			metricStyle(can.Frames > 0, blue)),
+		row("Rows", fmt.Sprint(can.Rows)),
+		styledRow("Raw", fmt.Sprintf("%d unknown ID  %d short  %d mux", can.UnknownID, can.Short, can.UnknownMux),
+			metricStyle(can.UnknownID+can.Short+can.UnknownMux > 0, yellow)),
+	)
+
+	rates := []string{title.Render("Sample rates")}
+	for _, r := range cfg.SampleRates {
+		rates = append(rates, muted.Render(fmt.Sprintf("%5.0f Hz  ", r.Hz))+value.Render(r.Messages))
+	}
+	if len(cfg.SampleRates) == 0 {
+		rates = append(rates, muted.Render("none"))
+	}
+	if m.canStatus != "" {
+		style := lipgloss.NewStyle().Foreground(green)
+		if !m.canStatusOK {
+			style = lipgloss.NewStyle().Foreground(red)
+		}
+		rates = append(rates, "", style.Render(m.canStatus))
+	}
+	ratesText := lipgloss.JoinVertical(lipgloss.Left, rates...)
+
+	if m.width >= 100 {
+		return lipgloss.JoinHorizontal(lipgloss.Top, stats, "    ", ratesText)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, stats, "", ratesText)
 }
 
 func (m *model) resizeChart() {
@@ -883,6 +1041,10 @@ func focusView(name, body string, focused bool) string {
 }
 
 func (m model) controls() string {
+	if m.editingDBC {
+		return title.Render("DBC dir  ") + m.dbcInput.View() +
+			muted.Render("  Enter apply  Esc cancel")
+	}
 	if m.filtering {
 		return title.Render("Filter CAN ID  ") + m.filterInput.View() +
 			muted.Render("  Enter apply  Esc clear")
@@ -900,12 +1062,12 @@ func (m model) controls() string {
 	}
 	if m.width < 110 {
 		return muted.Render(fmt.Sprintf(
-			"%s · %s  / filter  s sort  ↑/↓ select  Tab focus  q quit",
+			"%s · %s  / filter  s sort  e decode  c DBC dir  Tab focus  q quit",
 			context, filter,
 		))
 	}
 	return muted.Render(fmt.Sprintf(
-		"%s  filter %s  / filter  s sort  ↑/↓ select  PgUp/PgDn page  Tab focus  Ctrl+↑/↓ dashboard  q quit",
+		"%s  filter %s  / filter  s sort  ↑/↓ select  e decode on/off  c DBC dir  PgUp/PgDn page  Tab focus  Ctrl+↑/↓ dashboard  q quit",
 		context, filter,
 	))
 }
@@ -1289,6 +1451,7 @@ func (m model) View() tea.View {
 		ingressBody = lipgloss.JoinHorizontal(lipgloss.Top, ingressText, "  ", m.chart.View())
 	}
 	ingress := renderBlock(outerWidth, ingressBody)
+	canPanel := renderBlock(outerWidth, m.canText())
 	clientSummary := m.clientSummary()
 	details := m.clientDetails()
 	sections := []string{
@@ -1334,7 +1497,7 @@ func (m model) View() tea.View {
 		packetArea,
 	)
 	queueStorage := ""
-	fixedHeight := lipgloss.Height(header) + lipgloss.Height(ingress) + lipgloss.Height(clients)
+	fixedHeight := lipgloss.Height(header) + lipgloss.Height(ingress) + lipgloss.Height(canPanel) + lipgloss.Height(clients)
 	if m.queueStorageHorizontal {
 		const queueOuterWidth = 34
 		storageOuterWidth := outerWidth - queueOuterWidth - 1
@@ -1367,7 +1530,7 @@ func (m model) View() tea.View {
 	}
 
 	body := lipgloss.JoinVertical(lipgloss.Left,
-		header, ingress, clients, queueStorage)
+		header, ingress, canPanel, clients, queueStorage)
 	page := m.page
 	page.SetContent(body)
 	view := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, page.View(), m.controls()))
@@ -1375,7 +1538,9 @@ func (m model) View() tea.View {
 	return view
 }
 
-func newModel(decoder *json.Decoder) model {
+// newModel reads metadata with decoder and sends settings changes to commands,
+// both the one observer connection.
+func newModel(decoder *json.Decoder, commands io.Writer) model {
 	chart := tslc.New(40, 9,
 		tslc.WithXYSteps(2, 2),
 		tslc.WithXLabelFormatter(tslc.HourTimeLabelFormatter()),
@@ -1423,8 +1588,15 @@ func newModel(decoder *json.Decoder) model {
 	filterInput.Placeholder = "0x3FF"
 	filterInput.CharLimit = 10
 	filterInput.SetWidth(12)
+	dbcInput := textinput.New()
+	dbcInput.Prompt = ""
+	dbcInput.Placeholder = "dbc/spec/dbc"
+	dbcInput.CharLimit = 260
+	dbcInput.SetWidth(48)
 	m := model{
 		decoder:       decoder,
+		commands:      commands,
+		dbcInput:      dbcInput,
 		chart:         chart,
 		clientChart:   clientChart,
 		queueChart:    queueChart,
@@ -1549,7 +1721,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	m := newModel(json.NewDecoder(conn))
+	m := newModel(json.NewDecoder(conn), conn)
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

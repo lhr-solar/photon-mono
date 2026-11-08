@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"server/dbc"
 )
 
 const (
@@ -42,6 +44,30 @@ type Config struct {
 	InfluxURL        string // InfluxDB 3 base URL for the live tally, or "off"
 	InfluxDB         string
 	InfluxToken      string // env only, so it stays out of process listings
+	CAN              CANConfig
+}
+
+// CANConfig is how the server decodes the car's CAN frames. It is set here, not
+// by flags; Photon web will edit it later.
+type CANConfig struct {
+	Decode      bool             // decode ingested frames with the DBCs
+	DBCDir      string           // folder of *.dbc files, one per bus, named after the bus
+	SampleRates []dbc.SampleRate // how fast the sensors behind multi-sample messages sample
+}
+
+// DefaultCANConfig is the car's CAN setup: the spec copied from the firmware
+// repo, and the sample rates of its DAqCAN sensors.
+func DefaultCANConfig() CANConfig {
+	return CANConfig{
+		Decode: false,
+		DBCDir: "dbc/spec/dbc",
+		SampleRates: []dbc.SampleRate{
+			{Messages: `Chassis(Acceleration|Gyro)Data`, Hz: 208},
+			{Messages: `Upright\w+(Acceleration|Gyro)Data`, Hz: 416},
+			{Messages: `Upright\w+WheelSpeedData`, Hz: 100},
+			{Messages: `Suspension\w+Data`, Hz: 500},
+		},
+	}
 }
 
 // IngressAddr returns the TCP listen address for the ingress service.
@@ -146,6 +172,9 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.DataDir) == "" {
 		return fmt.Errorf("data directory cannot be empty")
 	}
+	if c.CAN.Decode && strings.TrimSpace(c.CAN.DBCDir) == "" {
+		return fmt.Errorf("CAN decoding is on but no DBC directory is set")
+	}
 	return nil
 }
 
@@ -167,6 +196,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		DataDir:          DefaultDataDir,
 		InfluxURL:        DefaultInfluxURL,
 		InfluxDB:         DefaultInfluxDB,
+		CAN:              DefaultCANConfig(),
 	}
 
 	// Environment variable fallbacks
