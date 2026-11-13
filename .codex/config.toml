@@ -1,0 +1,22 @@
+[mcp_servers.mermaid]
+command = "docker"
+args = [
+    "run",
+    "-i",
+    "--rm",
+    "--network",
+    "none",
+    "--read-only",
+    "--tmpfs",
+    "/tmp:rw,size=256m",
+    "--shm-size",
+    "256m",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
+    "photon-mermaid-mcp:0.4.1",
+]
+
+[mcp_servers.photon-db]
+url = "https://150.136.85.207.sslip.io/mcp"

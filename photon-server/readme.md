@@ -67,6 +67,8 @@ By hand:
 
 `photon-server -h` lists the remaining flags (ports, data dir, DBC path). You should not need them; the defaults are the deployed topology.
 
+The local UI also forwards `/mcp` and its Google sign-in paths to the [Photon MCP](gamma/README.md) server, `database-mcp` on `127.0.0.1:9100` (`PHOTON_MCP_URL` to change it). Those paths skip the console password; the MCP server checks every request. The page's **Agent link** button copies the address for users' own agents.
+
 ## Storage
 
 Two stores on this PC, one timeline. `photon-server` starts `photon-index --live-fanout` so the TSDB is written here; the laptop must not write a second store (`--no-live-tail`).

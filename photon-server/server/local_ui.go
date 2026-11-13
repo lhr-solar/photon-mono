@@ -27,8 +27,17 @@ import (
 const (
 	DefaultUiHttpPort = 8080
 	DefaultUiWsPort   = 8765
+	DefaultMcpURL     = "http://127.0.0.1:9100"
 	uiCookieName      = "photon_ui"
 )
+
+// uiMcpPaths belong to database-mcp (photon-server/gamma): the MCP endpoint and its
+// Google sign-in flow. Agents and the sign-in pages carry no Photon cookie, so the
+// password gate lets these through; database-mcp checks every MCP request itself.
+// A trailing slash is a prefix, as in http.ServeMux.
+var uiMcpPaths = []string{"/mcp", "/authorize", "/token", "/register", "/consent", "/auth/callback", "/.well-known/"}
+
+const kUiMcpMaxBytes = 1 << 20
 
 // LocalUI is the PC console: photon-backend + the WASM page, both on loopback.
 // It reads this machine's fan-out. It does not write a second TSDB.
@@ -194,17 +203,8 @@ func startLocalUI(cfg *Config) *LocalUI {
 		return ui
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/crash", uiCrashHandler(uiCrashLogPath()))
-	mux.Handle("/ws", uiWsProxy())
-	mux.Handle("/export.csv", uiExportProxy())
-	mux.Handle("/", uiFileHandler(uiDir))
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(DefaultUiHttpPort))
-	handler := http.Handler(mux)
-	if cfg.Password != "" {
-		handler = uiPasswordGate(cfg.Password, mux)
-	}
-	srv := &http.Server{Addr: addr, Handler: handler}
+	srv := &http.Server{Addr: addr, Handler: uiHandler(uiDir, cfg.Password, resolveMcpURL())}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Printf("[photon-server] local UI http %s: %v", addr, err)
@@ -220,6 +220,22 @@ func startLocalUI(cfg *Config) *LocalUI {
 	log.Printf("[photon-server] local UI %s (password on HTTP; /ws proxies loopback :%d)", url, DefaultUiWsPort)
 	openBrowser(url)
 	return ui
+}
+
+func uiHandler(uiDir, password, mcpURL string) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/crash", uiCrashHandler(uiCrashLogPath()))
+	mux.Handle("/ws", uiWsProxy())
+	mux.Handle("/export.csv", uiExportProxy())
+	mcp := uiMcpProxy(mcpURL)
+	for _, p := range uiMcpPaths {
+		mux.Handle(p, mcp)
+	}
+	mux.Handle("/", uiFileHandler(uiDir))
+	if password == "" {
+		return mux
+	}
+	return uiPasswordGate(password, mux)
 }
 
 func uiCookieValue(password string) string {
@@ -266,6 +282,10 @@ func uiPasswordGate(password string, next http.Handler) http.Handler {
 			return
 		}
 		if r.URL.Path == "/crash" && r.Method == http.MethodPost {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if uiMcpPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -343,6 +363,63 @@ func uiWsProxy() http.Handler {
 
 func uiExportProxy() http.Handler {
 	return uiLoopbackProxy(false)
+}
+
+func uiMcpPath(path string) bool {
+	for _, p := range uiMcpPaths {
+		if path == p || strings.HasSuffix(p, "/") && strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveMcpURL() string {
+	if env := strings.TrimSpace(os.Getenv("PHOTON_MCP_URL")); env != "" {
+		return env
+	}
+	return DefaultMcpURL
+}
+
+// uiMcpProxy passes agents' requests and the sign-in pages to database-mcp as they
+// are, Authorization included. Only the console cookie is dropped.
+func uiMcpProxy(base string) http.Handler {
+	target, err := url.Parse(base)
+	if err != nil || target.Host == "" {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "PHOTON_MCP_URL is not a URL", http.StatusBadGateway)
+		})
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	// MCP replies may be server-sent events; pass each one through as it arrives.
+	proxy.FlushInterval = -1
+	director := proxy.Director
+	proxy.Director = func(r *http.Request) {
+		director(r)
+		r.Host = target.Host
+		cookies := r.Cookies()
+		r.Header.Del("Cookie")
+		for _, c := range cookies {
+			if c.Name != uiCookieName {
+				r.AddCookie(c)
+			}
+		}
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		if r.Context().Err() != nil {
+			return
+		}
+		// The URL can hold a sign-in code; log the path only.
+		if ue, ok := err.(*url.Error); ok {
+			err = ue.Err
+		}
+		log.Printf("[photon-server] mcp proxy %s: %v", r.URL.Path, err)
+		http.Error(w, "MCP server unreachable", http.StatusBadGateway)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, kUiMcpMaxBytes)
+		proxy.ServeHTTP(w, r)
+	})
 }
 
 func openBrowser(url string) {

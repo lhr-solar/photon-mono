@@ -1,0 +1,169 @@
+<section id="battery-temperature-sep27" aria-labelledby="battery-chart-title">
+  <div class="battery-heading">
+    <h2 id="battery-chart-title">Battery temperature</h2>
+    <span class="text-small text-muted">September 27, 2026 · Recorded snapshot</span>
+  </div>
+  <div class="battery-key text-small" aria-label="Chart key">
+    <span><i class="mean-swatch" aria-hidden="true"></i>Pack average · minute mean</span>
+    <span><i class="range-swatch" aria-hidden="true"></i>Recorded min–max per minute</span>
+  </div>
+  <div class="battery-plot">
+    <svg class="battery-svg" role="img" aria-labelledby="battery-svg-title battery-svg-desc">
+      <title id="battery-svg-title">Average battery temperature on September 27, 2026</title>
+      <desc id="battery-svg-desc">Recorded battery temperatures from 12:20:55 PM to 1:07:51 PM Central Daylight Time. The last reading is 36.29 degrees Celsius. The line shows sample-weighted minute means; shading shows each minute's recorded minimum and maximum. The recorded values include large spikes and gaps. No readings have been filtered.</desc>
+    </svg>
+    <div class="battery-loading text-small text-muted">Loading temperature graph…</div>
+  </div>
+  <div class="battery-footer text-small text-muted">
+    <span>12:20–1:07 PM CDT · 2,500 samples</span>
+    <span>LHR Solar telemetry · Unfiltered · Gaps = no data</span>
+  </div>
+  <div class="tooltip battery-tooltip" role="tooltip" hidden></div>
+  <div class="sr-only"><table><caption>One-minute battery temperature aggregates, degrees Celsius, Central Daylight Time</caption><thead><tr><th>Time</th><th>Mean °C</th><th>Minimum °C</th><th>Maximum °C</th><th>Samples</th></tr></thead><tbody class="battery-accessible-data"></tbody></table></div>
+  <script type="application/json" id="battery-temperature-payload">{"rows":[["2026-09-27T17:20:00",37.44111111111111,36.68,38.410000000000004,9,"2026-09-27T17:20:59"],["2026-09-27T17:21:00",37.30394495412844,32.79,49.17,109,"2026-09-27T17:21:58"],["2026-09-27T17:22:00",5.1874,-88.77,60.28,50,"2026-09-27T17:22:23"],["2026-09-27T17:24:00",37.64821428571429,35.1,39.65,28,"2026-09-27T17:24:59"],["2026-09-27T17:25:00",35.73808333333333,31.150000000000002,40.52,120,"2026-09-27T17:25:59"],["2026-09-27T17:26:00",35.778275862068966,31.28,59.27,116,"2026-09-27T17:26:59"],["2026-09-27T17:27:00",-7.3967307692307696,-91.10000000000001,59.06,52,"2026-09-27T17:27:26"],["2026-09-27T17:31:00",29.152051282051282,-243.02,284.8,117,"2026-09-27T17:31:59"],["2026-09-27T17:32:00",-122.55391666666668,-247.23000000000002,280.08,120,"2026-09-27T17:32:59"],["2026-09-27T17:33:00",96.71925,-244.42000000000002,280.44,120,"2026-09-27T17:33:59"],["2026-09-27T17:34:00",166.76508333333334,-244.19,281.12,120,"2026-09-27T17:34:59"],["2026-09-27T17:35:00",123.84051724137932,-258.73,280.13,116,"2026-09-27T17:35:58"],["2026-09-27T17:36:00",36.43834710743802,34.04,39.19,121,"2026-09-27T17:36:58"],["2026-09-27T17:37:00",36.6090099009901,30.45,52.550000000000004,101,"2026-09-27T17:37:59"],["2026-09-27T17:38:00",-87.05925,-247.62,278.37,120,"2026-09-27T17:38:59"],["2026-09-27T17:39:00",-36.428333333333335,-244.92000000000002,282.43,120,"2026-09-27T17:39:59"],["2026-09-27T17:40:00",28.928292682926827,-248.69,279.72,82,"2026-09-27T17:40:40"],["2026-09-27T17:54:00",145.67338983050846,30.21,284.7,59,"2026-09-27T17:54:59"],["2026-09-27T17:55:00",-71.98983333333334,-236.09,289.13,120,"2026-09-27T17:55:59"],["2026-09-27T17:56:00",-235.67000000000002,-235.99,-235.35,2,"2026-09-27T17:56:00"],["2026-09-27T18:00:00",132.16984126984127,-247.91,285.72,63,"2026-09-27T18:00:59"],["2026-09-27T18:01:00",36.15016666666667,32.99,38.37,120,"2026-09-27T18:01:59"],["2026-09-27T18:02:00",15.591344537815127,-226.36,59.42,119,"2026-09-27T18:02:59"],["2026-09-27T18:03:00",-17.863166666666665,-243.28,292.57,120,"2026-09-27T18:03:59"],["2026-09-27T18:04:00",43.36588235294118,-249.98000000000002,274.32,68,"2026-09-27T18:04:33"],["2026-09-27T18:06:00",69.61512396694215,-255.9,291.25,121,"2026-09-27T18:06:59"],["2026-09-27T18:07:00",36.93563218390805,34.14,49.86,87,"2026-09-27T18:07:51"]],"first":"2026-09-27T17:20:55Z","last":"2026-09-27T18:07:51Z","samples":2500,"latest":{"time":"2026-09-27T18:07:51Z","value":36.29},"queried":{"start":"2026-09-27T05:00:00Z","end":"2026-09-28T05:00:00Z"}}</script>
+</section>
+<style>
+  #battery-temperature-sep27 { position:relative; color:var(--foreground); }
+  #battery-temperature-sep27 .battery-heading { display:flex; flex-direction:column; gap:calc(var(--font-size-base) * .25); margin-bottom:calc(var(--font-size-base) * .75); padding-right:92px; }
+  #battery-temperature-sep27 .battery-key { display:flex; flex-wrap:wrap; gap:calc(var(--font-size-base) * .5) calc(var(--font-size-base) * 1.25); margin-bottom:calc(var(--font-size-base) * .5); }
+  #battery-temperature-sep27 .battery-key span { display:inline-flex; align-items:center; gap:calc(var(--font-size-base) * .4); }
+  #battery-temperature-sep27 .battery-key i { display:inline-block; width:24px; flex-shrink:0; }
+  #battery-temperature-sep27 .mean-swatch { height:2px; background:var(--viz-series-1); }
+  #battery-temperature-sep27 .range-swatch { height:12px; background:var(--viz-series-1); opacity:.16; }
+  #battery-temperature-sep27 .battery-plot { position:relative; width:100%; min-width:0; }
+  #battery-temperature-sep27 .battery-svg { display:block; width:100%; overflow:visible; font-family:inherit; }
+  #battery-temperature-sep27 .battery-svg text { font-family:inherit; font-size:12px; font-weight:400; fill:var(--foreground); }
+  #battery-temperature-sep27 .battery-svg .axis text { font-variant-numeric:tabular-nums; }
+  #battery-temperature-sep27 .battery-svg .grid line { stroke:var(--border); stroke-width:1; shape-rendering:crispEdges; }
+  #battery-temperature-sep27 .battery-svg .grid path, #battery-temperature-sep27 .battery-svg .axis .domain { display:none; }
+  #battery-temperature-sep27 .battery-svg .axis line { stroke:var(--border); }
+  #battery-temperature-sep27 .battery-svg .mean-line { fill:none; stroke:var(--viz-series-1); stroke-width:2.25; stroke-linecap:round; stroke-linejoin:round; }
+  #battery-temperature-sep27 .battery-svg .range-band { fill:var(--viz-series-1); opacity:.16; stroke:none; }
+  #battery-temperature-sep27 .battery-svg .point { fill:var(--viz-series-1); }
+  #battery-temperature-sep27 .battery-svg .annotation { font-weight:500; paint-order:stroke; stroke:var(--background); stroke-width:4px; stroke-linejoin:round; }
+  #battery-temperature-sep27 .battery-footer { display:flex; justify-content:space-between; flex-wrap:wrap; gap:calc(var(--font-size-base) * .4) calc(var(--font-size-base) * 1); margin-top:calc(var(--font-size-base) * .5); }
+  #battery-temperature-sep27 .battery-tooltip { position:absolute; z-index:2; pointer-events:none; max-width:calc(100% - 16px); background:var(--popover); color:var(--popover-foreground); border:1px solid var(--border); border-radius:6px; padding:calc(var(--font-size-base) * .65); font-variant-numeric:tabular-nums; white-space:pre-line; }
+  #battery-temperature-sep27 .battery-loading { padding:calc(var(--font-size-base) * 1); }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script>
+(() => {
+  const root = document.getElementById('battery-temperature-sep27');
+  const payload = JSON.parse(root.querySelector('#battery-temperature-payload').textContent);
+  const svgNode = root.querySelector('.battery-svg');
+  const plot = root.querySelector('.battery-plot');
+  const tooltip = root.querySelector('.battery-tooltip');
+  const loading = root.querySelector('.battery-loading');
+  if (!window.d3) {
+    loading.textContent = 'Graph could not load. Last recorded temperature: 36.29 °C at 1:07:51 PM CDT.';
+    return;
+  }
+  const d3 = window.d3;
+  const data = payload.rows.map(r => ({x:new Date(r[0]+'Z'), y:r[1], lo:r[2], hi:r[3], n:r[4], last:new Date(r[5]+'Z')}));
+  const latest = {x:new Date(payload.latest.time), y:payload.latest.value};
+  const timeFormat = new Intl.DateTimeFormat('en-US', {timeZone:'America/Chicago', hour:'numeric', minute:'2-digit'});
+  const exactFormat = new Intl.DateTimeFormat('en-US', {timeZone:'America/Chicago', hour:'numeric', minute:'2-digit', second:'2-digit'});
+  const number = value => Number(value).toFixed(2);
+  const byTime = new Map(data.map(d => [+d.x, d]));
+  const timeline = d3.utcMinute.range(data[0].x, d3.utcMinute.offset(data[data.length-1].x, 1)).map(x => byTime.get(+x) || {x, y:null});
+  const tableBody = root.querySelector('.battery-accessible-data');
+  data.forEach(d => {
+    const row = document.createElement('tr');
+    [timeFormat.format(d.x)+' CDT', number(d.y), number(d.lo), number(d.hi), String(d.n)].forEach(value => {
+      const cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell);
+    });
+    tableBody.appendChild(row);
+  });
+  let pinned = null;
+  let focusTime = null;
+  const saved = window.openai?.widgetState?.privateContent;
+  if (saved?.chart === 'battery-sep27' && Number.isFinite(saved.minute) && byTime.has(saved.minute)) pinned = saved.minute;
+  const save = () => {
+    const datum = pinned === null ? null : byTime.get(pinned);
+    window.openai?.setWidgetState?.({
+      modelContent:datum ? {chart:'battery temperature', minute:datum.x.toISOString(), mean_c:datum.y, minimum_c:datum.lo, maximum_c:datum.hi} : null,
+      privateContent:{chart:'battery-sep27', minute:pinned}
+    })?.catch(() => {});
+  };
+  let inspect = () => {};
+  function draw() {
+    const width = Math.floor(plot.getBoundingClientRect().width);
+    if (width < 150) return;
+    const height = width < 440 ? 330 : 360;
+    const margin = {top:20, right:14, bottom:62, left:72};
+    const left = margin.left, right = width-margin.right, top = margin.top, bottom = height-margin.bottom;
+    const svg = d3.select(svgNode).attr('viewBox', '0 0 '+width+' '+height).attr('height',height);
+    svg.selectAll('g,defs,rect').remove();
+    const xExtent = d3.extent([...data.map(d => +d.x), +latest.x]);
+    const yExtent = d3.extent([...data.flatMap(d => [d.lo,d.hi,d.y]), latest.y]);
+    const xPad = (xExtent[1]-xExtent[0]) * .012;
+    const yPad = Math.max(1, (yExtent[1]-yExtent[0]) * .06);
+    const x = d3.scaleUtc().domain([xExtent[0]-xPad, xExtent[1]+xPad]).range([left+5,right-5]);
+    const y = d3.scaleLinear().domain([yExtent[0]-yPad,yExtent[1]+yPad]).range([bottom-5,top+5]);
+    const chart = svg.append('g');
+    chart.append('rect').attr('data-chart-frame','').attr('x',left).attr('y',top).attr('width',right-left).attr('height',bottom-top).attr('fill','none').attr('stroke','var(--border)').attr('stroke-width',1);
+    chart.append('g').attr('class','grid').attr('transform','translate('+left+',0)').call(d3.axisLeft(y).ticks(5).tickSize(-(right-left)).tickFormat(''));
+    chart.append('g').attr('class','axis').attr('transform','translate('+left+',0)').call(d3.axisLeft(y).ticks(5).tickSize(0).tickPadding(8));
+    const tickCount = width < 440 ? 3 : 5;
+    const ticks = x.ticks(tickCount).filter(t => +t >= xExtent[0] && +t <= xExtent[1]);
+    chart.append('g').attr('class','axis x-axis').attr('transform','translate(0,'+bottom+')').call(d3.axisBottom(x).tickValues(ticks).tickFormat(d => timeFormat.format(d)).tickSize(4).tickPadding(8).tickSizeOuter(0));
+    chart.append('text').attr('class','axis-title').attr('data-axis','x').attr('x',(left+right)/2).attr('y',height-10).attr('text-anchor','middle').text('Time (CDT)');
+    chart.append('text').attr('class','axis-title').attr('data-axis','y').attr('transform','translate(16,'+((top+bottom)/2)+') rotate(-90)').attr('text-anchor','middle').text('Battery temperature (°C)');
+    svg.append('defs').append('clipPath').attr('id','battery-temperature-clip').append('rect').attr('x',left).attr('y',top).attr('width',right-left).attr('height',bottom-top);
+    const marks = chart.append('g').attr('clip-path','url(#battery-temperature-clip)');
+    const binCenter = d => x(+d.x + 30000);
+    marks.append('path').datum(timeline).attr('class','range-band').attr('d',d3.area().defined(d => d.y !== null).x(binCenter).y0(d => y(d.lo)).y1(d => y(d.hi)).curve(d3.curveLinear));
+    marks.append('path').datum(timeline).attr('class','mean-line').attr('d',d3.line().defined(d => d.y !== null).x(binCenter).y(d => y(d.y)).curve(d3.curveLinear));
+    marks.selectAll('circle.point').data(data).join('circle').attr('class','point').attr('cx',binCenter).attr('cy',d => y(d.y)).attr('r',2.4);
+    marks.append('circle').attr('class','point latest-point').attr('cx',x(latest.x)).attr('cy',y(latest.y)).attr('r',5);
+    const endLabel = chart.append('text').attr('class','annotation').attr('x',x(latest.x)-10).attr('y',y(latest.y)+24).attr('text-anchor','end').text('Last: '+number(latest.y)+' °C');
+    const gapStart = +new Date('2026-09-27T17:41:00Z'), gapEnd = +new Date('2026-09-27T17:54:00Z');
+    chart.append('text').attr('x',x((gapStart+gapEnd)/2)).attr('y',top+28).attr('text-anchor','middle').attr('opacity',.7).text(width < 440 ? 'Gap' : 'No telemetry');
+    const hover = chart.append('g').attr('display','none').attr('pointer-events','none');
+    const guide = hover.append('line').attr('data-chart-hover-guide','').attr('y1',top).attr('y2',bottom).attr('stroke','var(--foreground)').attr('stroke-opacity',.35);
+    const marker = hover.append('circle').attr('data-chart-hover-marker','').attr('class','point').attr('r',4);
+    inspect = (instant, pointerY) => {
+      if (instant === null) { hover.attr('display','none'); tooltip.hidden = true; return; }
+      focusTime = instant;
+      const minute = +d3.utcMinute.floor(new Date(instant));
+      const datum = byTime.get(minute);
+      hover.attr('display',null);
+      const guideX = x(Math.max(xExtent[0],Math.min(xExtent[1],instant)));
+      guide.attr('x1',guideX).attr('x2',guideX);
+      marker.attr('display',datum ? null : 'none');
+      if (datum) marker.attr('cx',binCenter(datum)).attr('cy',y(datum.y));
+      tooltip.textContent = datum ? timeFormat.format(datum.x)+' CDT\nMinute mean: '+number(datum.y)+' °C\nRecorded range: '+number(datum.lo)+' to '+number(datum.hi)+' °C\n'+datum.n+' samples' : timeFormat.format(new Date(minute))+' CDT\nNo telemetry';
+      if (instant >= +d3.utcMinute.floor(latest.x) && instant >= +latest.x-10000) tooltip.textContent += '\nLast reading: '+number(latest.y)+' °C at '+exactFormat.format(latest.x)+' CDT';
+      tooltip.hidden = false;
+      const rootBox = root.getBoundingClientRect(), plotBox = plot.getBoundingClientRect();
+      const tipBox = tooltip.getBoundingClientRect();
+      const tipX = guideX + 12 + tipBox.width <= width ? guideX+12 : guideX-tipBox.width-12;
+      tooltip.style.left = Math.max(4,Math.min(width-tipBox.width-4,tipX))+'px';
+      const preferredY = plotBox.top-rootBox.top+(pointerY ?? top)+12;
+      tooltip.style.top = Math.max(plotBox.top-rootBox.top,Math.min(rootBox.height-tipBox.height,preferredY))+'px';
+    };
+    chart.append('rect').attr('data-chart-hit','').attr('class','cursor-interaction').attr('x',left).attr('y',top).attr('width',right-left).attr('height',bottom-top).attr('fill','transparent').style('touch-action','pan-y')
+      .on('pointermove',function(event){ if (pinned !== null || event.pointerType === 'touch') return; const point=d3.pointer(event,this); inspect(+x.invert(point[0]),point[1]); })
+      .on('pointerleave',() => { if (pinned === null) {focusTime=null;inspect(null);} })
+      .on('click',function(event){ const point=d3.pointer(event,this); const minute=+d3.utcMinute.floor(x.invert(point[0])); pinned=pinned===minute ? null : minute; if(pinned!==null) inspect(pinned,point[1]); else {focusTime=null;inspect(null);} save(); });
+    const textBoxes = chart.selectAll('.axis text,.axis-title,.annotation').nodes().map(node => ({node,box:node.getBoundingClientRect()}));
+    const rootWidth = plot.getBoundingClientRect();
+    const xTicks = textBoxes.filter(item => item.node.closest('.x-axis'));
+    let previousRight = -Infinity;
+    xTicks.forEach(item => { if(item.box.left<previousRight+4 || item.box.left<rootWidth.left+4 || item.box.right>rootWidth.right-4) item.node.closest('.tick').remove(); else previousRight=item.box.right; });
+    const labelBox = endLabel.node().getBBox();
+    if(labelBox.x<left+4 || labelBox.x+labelBox.width>right-4 || labelBox.y<top+4 || labelBox.y+labelBox.height>bottom-4) endLabel.remove();
+    if (pinned !== null) inspect(pinned); else if(focusTime!==null) inspect(focusTime); else inspect(null);
+    loading.hidden = true;
+    root.dataset.ready='true';
+  }
+  window.addEventListener('openai:set_globals',event => {
+    const state = event.detail?.globals?.widgetState?.privateContent;
+    if(state?.chart !== 'battery-sep27') return;
+    pinned = Number.isFinite(state.minute) && byTime.has(state.minute) ? state.minute : null;
+    inspect(pinned);
+  });
+  draw();
+  new ResizeObserver(draw).observe(plot);
+})();
+</script>

@@ -41,12 +41,62 @@ EM_JS(void, photon_copy_screen_param, (char* buf, int n), {
     }
     stringToUTF8(s, buf, n);
 });
+
+// Copies the MCP link users paste into their own agent. It comes from database-mcp's
+// resource metadata, which photon-server forwards, so it is the public address that
+// Google sign-in expects even when this page was opened on loopback.
+// Status: 0 idle, 1 working, 2 copied, 3 unavailable.
+EM_JS(void, photon_agent_link_copy, (), {
+    var show = function(s) {
+        Module.photonAgentLink = s;
+        setTimeout(function() { Module.photonAgentLink = 0; }, 3000);
+    };
+    Module.photonAgentLink = 1;
+    // The metadata is cacheable for an hour; ask the server so "Unavailable" is current.
+    fetch("/.well-known/oauth-protected-resource/mcp", {cache: "no-store"})
+        .then(function(r) {
+            if (!r.ok) {
+                throw new Error("HTTP " + r.status);
+            }
+            return r.json();
+        })
+        .then(function(meta) {
+            var link = meta.resource;
+            var manual = function() {
+                window.prompt("Copy this link into your agent:", link);
+                Module.photonAgentLink = 0;
+            };
+            if (!navigator.clipboard || !window.isSecureContext) {
+                manual();
+                return;
+            }
+            return navigator.clipboard.writeText(link).then(function() { show(2); }, manual);
+        })
+        .catch(function() { show(3); });
+});
+
+EM_JS(int, photon_agent_link_status, (), { return Module.photonAgentLink | 0; });
 #else
 extern "C" void photon_copy_screen_param(char* buf, int n);
 #endif
 
 namespace photon::ui {
 namespace {
+
+#ifdef __EMSCRIPTEN__
+void drawAgentLink(ImVec2 size) {
+    const int status = photon_agent_link_status();
+    const char* label = status == 2 ? "Copied" : status == 3 ? "Unavailable" : "Agent link";
+    if (ImGui::Button(label, size) && status != 1) {
+        photon_agent_link_copy();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(status == 3 ? "The MCP server is not running, or Google sign-in is not set up."
+                                      : "Copy a link for your own agent (Claude, Claude Code, Codex).\n"
+                                        "It asks you to sign in with Google.");
+    }
+}
+#endif
 
 const char* timelineLabel(std::uint8_t mode) {
     switch (static_cast<proto::TimelineMode>(mode)) {
@@ -489,6 +539,11 @@ void App::drawTitlebar(ImVec2 size) {
     const ImVec2 clockSz = ImGui::CalcTextSize(clock);
     const ImVec2 indexSz = buffering ? ImGui::CalcTextSize("indexing log") : ImVec2(0.0f, 0.0f);
     const float themeW = 64.0f;
+#ifdef __EMSCRIPTEN__
+    const float agentW = ImGui::CalcTextSize("Unavailable").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+#else
+    const float agentW = 0.0f;
+#endif
     std::vector<std::string> dayChoices;
     dayChoices.reserve(arena_.driveDays.size() + 8);
     for (const auto& row : arena_.driveDays) {
@@ -514,7 +569,8 @@ void App::drawTitlebar(ImVec2 size) {
     const std::string pinnedDay =
         arena_.catalogPinned() ? localYmdFromUnixMs(arena_.timeline().minTimeMs) : std::string();
     const float dayW = dayChoices.empty() ? 0.0f : 128.0f;
-    const float clusterW = themeW + clusterGap + (dayW > 0.0f ? dayW + clusterGap : 0.0f) + liveW +
+    const float clusterW = (agentW > 0.0f ? agentW + clusterGap : 0.0f) + themeW + clusterGap +
+                           (dayW > 0.0f ? dayW + clusterGap : 0.0f) + liveW +
                            (showTransport ? playW + pauseW + clusterGap : 0.0f) + clusterGap * 2.0f + clusterGap +
                            stateSz.x + clusterGap + sourceSz.x + clusterGap + antSz.x +
                            (showMode ? clusterGap + modeSz.x : 0.0f) +
@@ -522,6 +578,10 @@ void App::drawTitlebar(ImVec2 size) {
     ImGui::SetCursorScreenPos(ImVec2(p1.x - clusterW - pad.x, p0.y + pad.y));
     ImGui::BeginGroup();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(clusterGap, 0.0f));
+#ifdef __EMSCRIPTEN__
+    drawAgentLink(ImVec2(agentW, btnH));
+    ImGui::SameLine();
+#endif
     theme::drawSwitcher(ImVec2(themeW, btnH));
     if (!dayChoices.empty()) {
         ImGui::SameLine();

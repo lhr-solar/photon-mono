@@ -20,6 +20,8 @@ photon station
 
 `PHOTON_PASSWORD` defaults to `laptop`. `PHOTON_DATA_DIR` defaults to `data\` in this repo. Flags after the use case are passed through to `photon-server` or `photon-backend`.
 
+On Ubuntu, `scripts/photon.sh build` and `scripts/photon.sh station` do the same two jobs. The build needs clang, cmake, git, python3, and Go 1.26.4 from go.dev, and installs emsdk into `photon-next/.external` the first time. There is no desktop `photon-ui` on Linux; open the page.
+
 `Photon/` stays its own repo. That tree is the native desktop client and the embedded sharepoint.
 
 InfluxDB 3 Core and Grafana are installed programs on the PC. They bind to `127.0.0.1`. Dashboard JSON for those panels belongs in `dashboards/`.

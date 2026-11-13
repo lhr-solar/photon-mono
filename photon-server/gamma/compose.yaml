@@ -1,0 +1,32 @@
+services:
+  # Holds the InfluxDB token. Published on loopback; photon-server forwards /mcp and the
+  # sign-in pages to it, so agents reach it through the public Photon address.
+  database-mcp:
+    build: .
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    volumes:
+      - sign-in:/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:${DATABASE_MCP_PORT:-9100}:9000"
+    environment:
+      INFLUX_URL: ${INFLUX_URL:-}
+      INFLUX_DB: ${INFLUX_DB:-photon}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      PHOTON_MCP_BASE_URL: ${PHOTON_MCP_BASE_URL:-https://150.136.85.207.sslip.io}
+      PHOTON_MCP_ALLOWED: ${PHOTON_MCP_ALLOWED}
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+
+volumes:
+  sign-in:
