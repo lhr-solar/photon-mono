@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func newTestSink(t *testing.T, f *fakeInflux, token string) *influxSink {
 	t.Helper()
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	s, err := newInfluxSink(srv.URL+"/", "photon_dev", token)
+	s, err := newInfluxSink(srv.URL+"/", "photon_dev", token, influxOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestInfluxSinkSendNeverBlocks(t *testing.T) {
 	}))
 	defer srv.Close()
 	defer close(block)
-	s, err := newInfluxSink(srv.URL, "photon_dev", "")
+	s, err := newInfluxSink(srv.URL, "photon_dev", "", influxOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +137,65 @@ func TestInfluxSinkSendNeverBlocks(t *testing.T) {
 }
 
 func TestInfluxSinkRejectsBadURL(t *testing.T) {
-	if _, err := newInfluxSink("127.0.0.1:8181", "db", ""); err == nil {
+	if _, err := newInfluxSink("127.0.0.1:8181", "db", "", influxOptions{}); err == nil {
 		t.Fatal("URL without scheme accepted")
+	}
+}
+
+func TestInfluxSinkBatchesWithinFlushInterval(t *testing.T) {
+	f := &fakeInflux{}
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	s, err := newInfluxSink(srv.URL, "photon_dev", "", influxOptions{Flush: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Send([]string{"a v=1i 1"})
+	s.Send([]string{"b v=2i 2", "c v=3i 3"})
+	s.Close(5 * time.Second) // closing posts whatever is pending
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.bodies) != 1 {
+		t.Fatalf("posts = %d, want 1 joined post", len(f.bodies))
+	}
+	if want := "a v=1i 1\nb v=2i 2\nc v=3i 3\n"; f.bodies[0] != want {
+		t.Fatalf("body = %q, want %q", f.bodies[0], want)
+	}
+	if got := s.written.Load(); got != 3 {
+		t.Fatalf("written = %d, want 3", got)
+	}
+}
+
+func TestInfluxSinkFlushesOnTick(t *testing.T) {
+	f := &fakeInflux{}
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	s, err := newInfluxSink(srv.URL, "photon_dev", "", influxOptions{Flush: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(time.Second)
+	s.Send([]string{"a v=1i 1"})
+	deadline := time.Now().Add(2 * time.Second)
+	for s.written.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("lines not posted after the flush interval")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestInfluxSinkNoSyncQuery(t *testing.T) {
+	for _, noSync := range []bool{false, true} {
+		s, err := newInfluxSink("http://127.0.0.1:8181", "photon_dev", "", influxOptions{NoSync: noSync})
+		if err != nil {
+			t.Fatal(err)
+		}
+		has := strings.Contains(s.writeURL, "no_sync=true")
+		s.Close(time.Second)
+		if has != noSync {
+			t.Fatalf("NoSync=%v: writeURL %q", noSync, s.writeURL)
+		}
 	}
 }

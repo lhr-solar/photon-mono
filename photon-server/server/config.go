@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"server/dbc"
 )
@@ -24,6 +25,11 @@ const (
 	DefaultDataDir          = "./data"
 	DefaultInfluxURL        = "http://127.0.0.1:8181"
 	DefaultInfluxDB         = "photon_dev"
+	// DefaultInfluxFlush is how often the sink posts a batch to InfluxDB.
+	// Together with InfluxDB's own --wal-flush-interval (run it at 250ms too),
+	// rows are queryable within about 500 ms of arriving. At 1 MiB/s of CAN a
+	// 250 ms batch is still large enough to post efficiently.
+	DefaultInfluxFlush = 250 * time.Millisecond
 )
 
 // Config holds runtime configuration for the photon server.
@@ -43,7 +49,9 @@ type Config struct {
 	Password         string
 	InfluxURL        string // InfluxDB 3 base URL for the live tally, or "off"
 	InfluxDB         string
-	InfluxToken      string // env only, so it stays out of process listings
+	InfluxToken      string        // env only, so it stays out of process listings
+	InfluxFlush      time.Duration // how often queued lines are posted; 0 posts each Send at once
+	InfluxNoSync     bool          // ask InfluxDB to acknowledge before its WAL is saved (no_sync=true)
 	CAN              CANConfig
 }
 
@@ -172,6 +180,9 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.DataDir) == "" {
 		return fmt.Errorf("data directory cannot be empty")
 	}
+	if c.InfluxFlush < 0 {
+		return fmt.Errorf("invalid influx flush interval: %s (must not be negative)", c.InfluxFlush)
+	}
 	if c.CAN.Decode && strings.TrimSpace(c.CAN.DBCDir) == "" {
 		return fmt.Errorf("CAN decoding is on but no DBC directory is set")
 	}
@@ -196,6 +207,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		DataDir:          DefaultDataDir,
 		InfluxURL:        DefaultInfluxURL,
 		InfluxDB:         DefaultInfluxDB,
+		InfluxFlush:      DefaultInfluxFlush,
 		CAN:              DefaultCANConfig(),
 	}
 
@@ -257,6 +269,16 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	if db := getenvFirst(getenv, "PHOTON_INFLUX_DB"); db != "" {
 		cfg.InfluxDB = db
 	}
+	if v := getenvFirst(getenv, "PHOTON_INFLUX_FLUSH"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.InfluxFlush = d
+		}
+	}
+	if v := getenvFirst(getenv, "PHOTON_INFLUX_NO_SYNC"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.InfluxNoSync = b
+		}
+	}
 	cfg.InfluxToken = getenvFirst(getenv, "PHOTON_INFLUX_TOKEN", "INFLUXDB3_AUTH_TOKEN")
 
 	fs := flag.NewFlagSet("photon-server", flag.ContinueOnError)
@@ -277,6 +299,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var passwordFlag string
 	var influxURLFlag string
 	var influxDBFlag string
+	var influxFlushFlag time.Duration
+	var influxNoSyncFlag bool
 
 	fs.StringVar(&hostFlag, "host", cfg.Host, "Bind host/IP address (e.g. 0.0.0.0 for all interfaces, 127.0.0.1 for local only)")
 	fs.StringVar(&hostFlag, "bind", cfg.Host, "Alias for -host")
@@ -301,6 +325,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.StringVar(&passwordFlag, "password", cfg.Password, "shared client password (env: PHOTON_PASSWORD)")
 	fs.StringVar(&influxURLFlag, "influx-url", cfg.InfluxURL, "InfluxDB 3 URL for the live tally, or 'off'")
 	fs.StringVar(&influxDBFlag, "influx-db", cfg.InfluxDB, "InfluxDB database for the live tally")
+	fs.DurationVar(&influxFlushFlag, "influx-flush", cfg.InfluxFlush, "how often to post queued lines to InfluxDB (0 = each batch at once)")
+	fs.BoolVar(&influxNoSyncFlag, "influx-no-sync", cfg.InfluxNoSync, "InfluxDB acknowledges before its WAL is saved (faster ack, may lose the last WAL interval on crash, hides some write errors)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(output, "Usage of photon-server:\n")
@@ -344,6 +370,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.Password = passwordFlag
 	cfg.InfluxURL = influxURLFlag
 	cfg.InfluxDB = influxDBFlag
+	cfg.InfluxFlush = influxFlushFlag
+	cfg.InfluxNoSync = influxNoSyncFlag
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err

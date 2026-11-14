@@ -13,12 +13,23 @@ import (
 )
 
 const (
-	// influxQueueBatches holds about ten minutes of one-second flushes while
-	// InfluxDB is down. Raw segments keep every frame regardless.
+	// influxQueueBatches is how many Send calls can wait while a post is in
+	// flight or InfluxDB is down. Raw segments keep every frame regardless.
 	influxQueueBatches = 600
 	influxMaxAttempts  = 5
 	influxTimeout      = 10 * time.Second
 )
+
+// influxOptions tunes how the sink writes.
+type influxOptions struct {
+	// Flush is how often queued lines are joined and posted. Zero posts each
+	// Send on its own.
+	Flush time.Duration
+	// NoSync asks InfluxDB to acknowledge before its WAL is saved. The ack
+	// comes sooner, but a crash can lose the last WAL interval and some write
+	// errors (bad lines, type conflicts) are no longer reported.
+	NoSync bool
+}
 
 // influxSink posts line protocol to InfluxDB 3 Core (/api/v3/write_lp) from
 // its own goroutine, so a slow or down database never blocks ingest.
@@ -26,6 +37,7 @@ type influxSink struct {
 	writeURL string
 	token    string
 	client   *http.Client
+	flush    time.Duration
 	queue    chan []string
 	done     chan struct{}
 	backoff  func(attempt int) time.Duration
@@ -35,18 +47,23 @@ type influxSink struct {
 	failing atomic.Bool
 }
 
-func newInfluxSink(baseURL, db, token string) (*influxSink, error) {
+func newInfluxSink(baseURL, db, token string, opts influxOptions) (*influxSink, error) {
 	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("bad InfluxDB URL %q", baseURL)
 	}
 	u.Path += "/api/v3/write_lp"
-	u.RawQuery = url.Values{"db": {db}, "precision": {"nanosecond"}}.Encode()
+	q := url.Values{"db": {db}, "precision": {"nanosecond"}}
+	if opts.NoSync {
+		q.Set("no_sync", "true")
+	}
+	u.RawQuery = q.Encode()
 
 	s := &influxSink{
 		writeURL: u.String(),
 		token:    token,
 		client:   &http.Client{Timeout: influxTimeout},
+		flush:    opts.Flush,
 		queue:    make(chan []string, influxQueueBatches),
 		done:     make(chan struct{}),
 		backoff: func(attempt int) time.Duration {
@@ -85,8 +102,32 @@ func (s *influxSink) Close(wait time.Duration) {
 
 func (s *influxSink) run() {
 	defer close(s.done)
-	for lines := range s.queue {
-		s.deliver(lines)
+	if s.flush <= 0 {
+		for lines := range s.queue {
+			s.deliver(lines)
+		}
+		return
+	}
+	// Join everything that arrives within one interval into a single post.
+	tick := time.NewTicker(s.flush)
+	defer tick.Stop()
+	var pending []string
+	for {
+		select {
+		case lines, ok := <-s.queue:
+			if !ok {
+				if len(pending) > 0 {
+					s.deliver(pending)
+				}
+				return
+			}
+			pending = append(pending, lines...)
+		case <-tick.C:
+			if len(pending) > 0 {
+				s.deliver(pending)
+				pending = nil
+			}
+		}
 	}
 }
 
