@@ -36,8 +36,8 @@ func main() {
 	}
 	defer store.Close()
 
-	// The tally is optional: a bad DBC or tally dir turns it off, never ingest.
-	tally := startTally(cfg, startedAt)
+	// InfluxDB rows are optional: a bad DBC or URL turns them off, never ingest.
+	frames := startFrameWriter(cfg, startedAt)
 
 	stats := store.Stats()
 	log.Printf("[photon-server] Store initialized: %d segments recovered (oldest ID: %d, latest ID: %d, disk bytes: %d)",
@@ -152,7 +152,10 @@ func main() {
 	defer localUI.Stop()
 
 	clients := NewClientTracker()
-	ingress := make(chan ingressPayload, 1024)
+	// Every ingest buffer is allocated here, once. The channel holds one slot
+	// per buffer, so handing a full buffer to the decoder never waits.
+	pool := newBufPool(poolBuffers, poolBufferSize)
+	ingress := make(chan ingressPayload, poolBuffers)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -163,7 +166,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		appendLoop(store, ingress, tally)
+		appendLoop(store, pool, ingress, frames)
 	}()
 
 	// Ingress listener & connection tracking
@@ -171,7 +174,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		listenForIngress(ctx, ingressListener, ingress, tally != nil, &ingressConnWg)
+		listenForIngress(ctx, ingressListener, pool, ingress, &ingressConnWg)
 	}()
 
 	// Client fan-out listener & connection tracking
@@ -282,11 +285,12 @@ func main() {
 	}
 }
 
-// ingressPayload is one TCP read. Raw goes to the segment store unchanged;
-// Frames feed the one-second tally (see tallyWriter).
+// ingressPayload is one full pool buffer from connection Conn, or End when
+// that connection has closed. The decoder returns Buf to the pool.
 type ingressPayload struct {
-	Raw    []byte
-	Frames []cache.Frame
+	Conn uint64
+	Buf  *ingressBuf
+	End  bool
 }
 
 const (
@@ -297,72 +301,121 @@ const (
 	canpPacketSize = 29
 )
 
-// ingressDecoder turns a TCP byte stream of CANP batches into frames
+// ingressDecoder turns a TCP byte stream of CANP batches into frames. It
+// parses straight out of the caller's buffer; pending holds only the bytes of
+// a batch cut off at the end of one buffer, until the next one completes it.
 type ingressDecoder struct {
 	pending []byte
 }
 
-func (d *ingressDecoder) Decode(b []byte) []cache.Frame {
-	d.pending = append(d.pending, b...)
-	var frames []cache.Frame
-	for len(d.pending) >= canpHeaderSize {
-		p := d.pending
-		magic := binary.BigEndian.Uint32(p[0:4])
-		version := binary.BigEndian.Uint16(p[4:6])
-		count := int(binary.BigEndian.Uint16(p[6:8]))
-		if magic != canpMagic || version != canpVersion || count == 0 || count > canpMaxBatch {
-			d.pending = p[1:]
+// Decode appends the frames of every complete batch to dst and returns it.
+// Pass a reused dst[:0] so decoding allocates nothing in steady state.
+func (d *ingressDecoder) Decode(dst []cache.Frame, b []byte) []cache.Frame {
+	// Finish a carried batch, taking from b only the bytes it still needs.
+	for len(d.pending) > 0 {
+		if len(b) == 0 {
+			return dst
+		}
+		if len(d.pending) < canpHeaderSize {
+			k := min(canpHeaderSize-len(d.pending), len(b))
+			d.pending, b = append(d.pending, b[:k]...), b[k:]
 			continue
 		}
-		need := canpHeaderSize + count*canpPacketSize
-		if len(p) < need {
-			break
+		need, ok := canpBatchSize(d.pending)
+		if !ok {
+			// The carried bytes were not a batch start (garbage in the
+			// stream). Rare, so resync the simple way: join and rescan.
+			d.pending = append(d.pending, b...)
+			var n int
+			dst, n = parseCANP(dst, d.pending)
+			d.pending = append(d.pending[:0], d.pending[n:]...)
+			return dst
 		}
-		ts := binary.BigEndian.Uint64(p[12:20])
-		for i := 0; i < count; i++ {
-			pkt := p[canpHeaderSize+i*canpPacketSize:]
-			age := uint64(binary.BigEndian.Uint16(pkt[13:15])) // δt[0]: ms before header timestamp
-			t := ts
-			if age <= ts {
-				t = ts - age
-			}
-			fr := cache.Frame{
-				TimeMs: t,
-				CANID:  binary.BigEndian.Uint32(pkt[0:4]),
-				DLC:    int(pkt[4]),
-			}
-			copy(fr.Data[:], pkt[5:13])
-			frames = append(frames, fr)
+		k := min(need-len(d.pending), len(b))
+		d.pending, b = append(d.pending, b[:k]...), b[k:]
+		if len(d.pending) < need {
+			return dst
 		}
-		d.pending = p[need:]
+		dst = appendCANPFrames(dst, d.pending)
+		d.pending = d.pending[:0]
 	}
-	return frames
+
+	dst, n := parseCANP(dst, b)
+	d.pending = append(d.pending, b[n:]...) // the unfinished tail, under one batch
+	return dst
 }
 
-// appendLoop owns the tally: folding and draining stay on this goroutine, so
-// the cache needs no lock. tally is nil when no DBC is loaded.
-func appendLoop(store *StreamStore, ingress <-chan ingressPayload, tally *tallyWriter) {
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
-	if tally != nil {
-		// main gives shutdown 5 s in all; leave the sink most of it.
-		defer tally.Close(3 * time.Second)
+// canpBatchSize reads a batch header. ok is false when p does not start with
+// a valid one; p must hold at least canpHeaderSize bytes.
+func canpBatchSize(p []byte) (size int, ok bool) {
+	magic := binary.BigEndian.Uint32(p[0:4])
+	version := binary.BigEndian.Uint16(p[4:6])
+	count := int(binary.BigEndian.Uint16(p[6:8]))
+	if magic != canpMagic || version != canpVersion || count == 0 || count > canpMaxBatch {
+		return 0, false
 	}
+	return canpHeaderSize + count*canpPacketSize, true
+}
 
-	for {
-		var payload ingressPayload
-		select {
-		case p, ok := <-ingress:
-			if !ok {
-				return
-			}
-			payload = p
-		case <-tick.C:
-			if tally != nil {
-				tally.FlushClosed()
-			}
+// parseCANP appends the frames of every complete batch in p to dst, skipping
+// bytes that are not a batch start. n is how far it got: p[n:] is an
+// unfinished batch, or too short to tell.
+func parseCANP(dst []cache.Frame, p []byte) (out []cache.Frame, n int) {
+	for len(p)-n >= canpHeaderSize {
+		need, ok := canpBatchSize(p[n:])
+		if !ok {
+			n++
 			continue
 		}
+		if len(p)-n < need {
+			break
+		}
+		dst = appendCANPFrames(dst, p[n:n+need])
+		n += need
+	}
+	return dst, n
+}
+
+// appendCANPFrames decodes one complete, validated batch.
+func appendCANPFrames(dst []cache.Frame, p []byte) []cache.Frame {
+	count := int(binary.BigEndian.Uint16(p[6:8]))
+	ts := binary.BigEndian.Uint64(p[12:20])
+	for i := 0; i < count; i++ {
+		pkt := p[canpHeaderSize+i*canpPacketSize:]
+		age := uint64(binary.BigEndian.Uint16(pkt[13:15])) // δt[0]: ms before header timestamp
+		t := ts
+		if age <= ts {
+			t = ts - age
+		}
+		fr := cache.Frame{
+			TimeMs: t,
+			CANID:  binary.BigEndian.Uint32(pkt[0:4]),
+			DLC:    int(pkt[4]),
+		}
+		copy(fr.Data[:], pkt[5:13])
+		dst = append(dst, fr)
+	}
+	return dst
+}
+
+// appendLoop is the decoder. For each full buffer it appends the raw bytes to
+// the segment store, decodes frames into rows for the DB writer, and returns
+// the buffer to the pool. frames is nil when no DBC is loaded.
+func appendLoop(store *StreamStore, pool *bufPool, ingress <-chan ingressPayload, frames *frameWriter) {
+	if frames != nil {
+		// main gives shutdown 5 s in all; leave the DB writer most of it.
+		defer frames.Close(3 * time.Second)
+	}
+	// A CANP batch can span two buffers, so each connection keeps its own tail.
+	decoders := make(map[uint64]*ingressDecoder)
+	var scratch []cache.Frame // reused for every buffer's frames
+
+	for payload := range ingress {
+		if payload.End {
+			delete(decoders, payload.Conn)
+			continue
+		}
+		raw := payload.Buf.Bytes()
 
 		if store.StoragePressureHigh() {
 			started := time.Now()
@@ -373,22 +426,31 @@ func appendLoop(store *StreamStore, ingress <-chan ingressPayload, tally *tallyW
 			queueStats.blockStartedNS.Store(0)
 			queueStats.blockedNS.Add(time.Since(started).Nanoseconds())
 		}
-		if _, err := store.Append(payload.Raw); err != nil {
+		if _, err := store.Append(raw); err != nil {
 			// Append error during store closure or write failure
 		}
-		if tally != nil {
-			tally.Fold(payload.Frames)
+		if frames != nil {
+			d := decoders[payload.Conn]
+			if d == nil {
+				d = &ingressDecoder{}
+				decoders[payload.Conn] = d
+			}
+			scratch = d.Decode(scratch[:0], raw)
+			frames.Fold(scratch)
 		}
+		// Append and Decode copy what they keep, so the buffer is free again.
+		pool.Put(payload.Buf)
 	}
 }
 
 func listenForIngress(
 	ctx context.Context,
 	listener net.Listener,
+	pool *bufPool,
 	ingress chan<- ingressPayload,
-	decode bool,
 	connWg *sync.WaitGroup,
 ) {
+	var nextConn uint64
 	ingressStats.listening.Store(true)
 	defer ingressStats.listening.Store(false)
 
@@ -406,17 +468,20 @@ func listenForIngress(
 		ingressStats.active.Add(1)
 		ingressStats.total.Add(1)
 
+		nextConn++
 		connWg.Add(1)
-		go func(c net.Conn) {
+		go func(c net.Conn, id uint64) {
 			defer connWg.Done()
-			readIngressConnection(ctx, c, ingress, decode)
-		}(conn)
+			readIngressConnection(ctx, c, id, pool, ingress)
+		}(conn, nextConn)
 	}
 }
 
-// decode is false when no DBC is loaded; frames would only be thrown away.
-func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- ingressPayload, decode bool) {
-	const readBuffer = 32 * 1024 // This reader owns the connection and its active-connection count.
+// readIngressConnection reads straight into free pool buffers and hands each
+// one to the decoder when it is full or poolFillWait after its first byte.
+// When the pool is empty it stops reading, so TCP pushes back on the sender.
+// This reader owns the connection and its active-connection count.
+func readIngressConnection(ctx context.Context, conn net.Conn, id uint64, pool *bufPool, ingress chan<- ingressPayload) {
 	defer conn.Close()
 	defer ingressStats.active.Add(-1)
 
@@ -432,32 +497,41 @@ func readIngressConnection(ctx context.Context, conn net.Conn, ingress chan<- in
 		}
 	}()
 
-	buf := make([]byte, readBuffer)
-	var decoder ingressDecoder
+	// Send when there is room, even during shutdown; wait on ctx only when
+	// the queue is full, so shutdown cannot hang here.
+	send := func(p ingressPayload) bool {
+		select {
+		case ingress <- p:
+			return true
+		default:
+		}
+		select {
+		case ingress <- p:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	// The decoder drops this connection's partial batch.
+	defer send(ingressPayload{Conn: id, End: true})
 
 	for {
-		n, err := conn.Read(buf)
-		if n > 0 {
-			ingressStats.bytes.Add(uint64(n))
+		buf := pool.Get(ctx) // waits while every buffer is in flight
+		if buf == nil {
+			return
+		}
+		err := fillBuf(conn, buf)
+		if buf.n > 0 {
+			ingressStats.bytes.Add(uint64(buf.n))
 			ingressStats.reads.Add(1)
 			ingressStats.lastReceiveMS.Store(time.Now().UnixMilli())
-			payload := ingressPayload{Raw: append([]byte(nil), buf[:n]...)}
-			if decode {
-				payload.Frames = decoder.Decode(buf[:n])
+			if !send(ingressPayload{Conn: id, Buf: buf}) {
+				pool.Put(buf)
+				return
 			}
-			// Send when there is room, even during shutdown; wait on ctx only
-			// when the queue is full, so shutdown cannot hang here.
-			select {
-			case ingress <- payload:
-			default:
-				select {
-				case ingress <- payload:
-				case <-ctx.Done():
-					return
-				}
-			}
-
 			observeQueueDepth(len(ingress))
+		} else {
+			pool.Put(buf)
 		}
 		if err != nil {
 			if err != io.EOF && !errors.Is(err, net.ErrClosed) {

@@ -39,7 +39,7 @@ type Config struct {
 	LiveWriter       string
 	Ui               string
 	Password         string
-	InfluxURL        string // InfluxDB 3 base URL for the live tally, or "off"
+	InfluxURL        string // InfluxDB 3 base URL for per-frame rows, or "off"
 	InfluxDB         string
 	InfluxToken      string // env only, so it stays out of process listings
 }
@@ -265,12 +265,12 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.StringVar(&dataDirFlag, "data-dir", cfg.DataDir, "Directory path for persistent storage segments")
 	fs.StringVar(&dataDirFlag, "storage-path", cfg.DataDir, "Alias for -data-dir")
 	fs.StringVar(&tsdbDirFlag, "tsdb-dir", cfg.TsdbDir, "TSDB root (default: <data-dir>/tsdb)")
-	fs.StringVar(&dbcPathFlag, "dbc", cfg.DbcPath, "DBC file for the live TSDB writer and the live tally")
+	fs.StringVar(&dbcPathFlag, "dbc", cfg.DbcPath, "DBC file for the live TSDB writer and per-frame InfluxDB rows")
 	fs.StringVar(&liveWriterFlag, "live-writer", cfg.LiveWriter, "photon-index binary that writes the TSDB, or 'off'")
 	fs.StringVar(&uiFlag, "ui", cfg.Ui, "local UI backend (photon-backend), or off")
 	fs.StringVar(&passwordFlag, "password", cfg.Password, "shared client password (env: PHOTON_PASSWORD)")
-	fs.StringVar(&influxURLFlag, "influx-url", cfg.InfluxURL, "InfluxDB 3 URL for the live tally, or 'off'")
-	fs.StringVar(&influxDBFlag, "influx-db", cfg.InfluxDB, "InfluxDB database for the live tally")
+	fs.StringVar(&influxURLFlag, "influx-url", cfg.InfluxURL, "InfluxDB 3 URL for per-frame rows, or 'off'")
+	fs.StringVar(&influxDBFlag, "influx-db", cfg.InfluxDB, "InfluxDB database for per-frame rows")
 
 	fs.Usage = func() {
 		fmt.Fprintf(output, "Usage of photon-server:\n")
@@ -285,11 +285,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -video-udp-port, -video-udp int UDP live video fan-out port (default %d, env: PHOTON_VIDEO_UDP_PORT)\n", DefaultVideoUdpPort)
 		fmt.Fprintf(output, "  -data-dir, -storage-path string Storage directory (default %q, env: PHOTON_DATA_DIR)\n", DefaultDataDir)
 		fmt.Fprintf(output, "  -tsdb-dir string             TSDB root (default <data-dir>/tsdb, env: PHOTON_TSDB_DIR)\n")
-		fmt.Fprintf(output, "  -dbc string                  DBC for live TSDB writer and tally (env: PHOTON_DBC)\n")
+		fmt.Fprintf(output, "  -dbc string                  DBC for live TSDB writer and InfluxDB rows (env: PHOTON_DBC)\n")
 		fmt.Fprintf(output, "  -live-writer string          photon-index path, or off (env: PHOTON_LIVE_WRITER)\n")
 		fmt.Fprintf(output, "  -ui string                   local photon-backend + page, or off (env: PHOTON_UI)\n")
 		fmt.Fprintf(output, "  -password string             client password (env: PHOTON_PASSWORD; random if unset)\n")
-		fmt.Fprintf(output, "  -influx-url string           InfluxDB 3 URL for the live tally, or off (default %q, env: PHOTON_INFLUX_URL)\n", DefaultInfluxURL)
+		fmt.Fprintf(output, "  -influx-url string           InfluxDB 3 URL for per-frame rows, or off (default %q, env: PHOTON_INFLUX_URL)\n", DefaultInfluxURL)
 		fmt.Fprintf(output, "  -influx-db string            InfluxDB database (default %q, env: PHOTON_INFLUX_DB)\n", DefaultInfluxDB)
 		fmt.Fprintf(output, "                               token: env PHOTON_INFLUX_TOKEN or INFLUXDB3_AUTH_TOKEN\n")
 	}

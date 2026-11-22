@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -88,6 +89,12 @@ func ParseDBC(text string) (*SessionCache, error) {
 		cache.Definitions[id] = def
 		key := wireID(id)
 		cache.byCANID[key] = append(cache.byCANID[key], def)
+	}
+	// Map order is random; sort so frame rows list fields the same way every run.
+	cache.layouts = make(map[uint32]*frameLayout, len(cache.byCANID))
+	for key, defs := range cache.byCANID {
+		sort.Slice(defs, func(i, j int) bool { return defs[i].ID.Name < defs[j].ID.Name })
+		cache.layouts[key] = newFrameLayout(defs)
 	}
 	return cache, nil
 }

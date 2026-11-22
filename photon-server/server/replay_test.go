@@ -22,7 +22,7 @@ func TestReplayBrainerdClip(t *testing.T) {
 		t.Fatal(err)
 	}
 	var d ingressDecoder
-	frames := d.Decode(raw)
+	frames := d.Decode(nil, raw)
 	if len(frames) == 0 {
 		t.Fatal("no frames decoded")
 	}

@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
+	"server/cache"
 	"testing"
 )
 
@@ -24,10 +26,10 @@ func TestIngressDecoderReassemblesSplitBatch(t *testing.T) {
 	batch := canpBatch(1234, 0x100, 0x200)
 	var d ingressDecoder
 
-	if frames := d.Decode(batch[:30]); len(frames) != 0 {
+	if frames := d.Decode(nil, batch[:30]); len(frames) != 0 {
 		t.Fatalf("partial batch decoded %d frames", len(frames))
 	}
-	frames := d.Decode(batch[30:])
+	frames := d.Decode(nil, batch[30:])
 	if len(frames) != 2 {
 		t.Fatalf("got %d frames, want 2", len(frames))
 	}
@@ -46,7 +48,7 @@ func TestIngressDecoderAppliesFrameAge(t *testing.T) {
 	binary.BigEndian.PutUint16(batch[canpHeaderSize+canpPacketSize+13:], 0)
 
 	var d ingressDecoder
-	frames := d.Decode(batch)
+	frames := d.Decode(nil, batch)
 	if len(frames) != 2 {
 		t.Fatalf("got %d frames, want 2", len(frames))
 	}
@@ -63,7 +65,7 @@ func TestIngressDecoderAgeOlderThanTimestamp(t *testing.T) {
 	binary.BigEndian.PutUint16(batch[canpHeaderSize+13:], 500)
 
 	var d ingressDecoder
-	frames := d.Decode(batch)
+	frames := d.Decode(nil, batch)
 	if len(frames) != 1 || frames[0].TimeMs != 100 {
 		t.Fatalf("got %+v, want TimeMs 100 (no underflow)", frames)
 	}
@@ -74,8 +76,55 @@ func TestIngressDecoderSkipsGarbage(t *testing.T) {
 	in := append([]byte{0xde, 0xad, 0xbe}, canpBatch(1, 0x10)...)
 	in = append(in, canpBatch(2, 0x20)...)
 
-	frames := d.Decode(in)
+	frames := d.Decode(nil, in)
 	if len(frames) != 2 || frames[0].CANID != 0x10 || frames[1].CANID != 0x20 {
 		t.Fatalf("got %+v", frames)
+	}
+}
+
+// Cutting the stream anywhere, into pieces of any size, must decode the same
+// frames as the whole stream at once. The stream has garbage at the start,
+// between batches, and a stray magic number, so every carry path runs.
+func TestIngressDecoderAnySplitMatchesWhole(t *testing.T) {
+	var stream []byte
+	stream = append(stream, 0xde, 0xad)
+	stream = append(stream, canpBatch(1000, 0x10, 0x11, 0x12)...)
+	stream = append(stream, 0x43, 0x41, 0x4e, 0x31, 0, 9) // magic, bad version
+	stream = append(stream, canpBatch(2000, 0x20)...)
+	stream = append(stream, canpBatch(3000, 0x30, 0x31)...)
+	stream = append(stream, 1, 2, 3)
+	stream = append(stream, canpBatch(4000, 0x40)...)
+
+	var whole ingressDecoder
+	want := whole.Decode(nil, stream)
+	if len(want) != 7 {
+		t.Fatalf("whole stream decoded %d frames, want 7", len(want))
+	}
+
+	check := func(name string, pieces [][]byte) {
+		t.Helper()
+		var d ingressDecoder
+		var got []cache.Frame
+		for _, p := range pieces {
+			got = d.Decode(got, p)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s: %d frames, want %d", name, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s: frame %d = %+v, want %+v", name, i, got[i], want[i])
+			}
+		}
+	}
+	for cut := 0; cut <= len(stream); cut++ {
+		check(fmt.Sprintf("cut at %d", cut), [][]byte{stream[:cut], stream[cut:]})
+	}
+	for size := 1; size <= 64; size++ {
+		var pieces [][]byte
+		for s := stream; len(s) > 0; s = s[min(size, len(s)):] {
+			pieces = append(pieces, s[:min(size, len(s))])
+		}
+		check(fmt.Sprintf("pieces of %d", size), pieces)
 	}
 }
