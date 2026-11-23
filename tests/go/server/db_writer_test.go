@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -250,5 +251,77 @@ func TestDBWriterGivesUpAfterMaxAttempts(t *testing.T) {
 func TestDBWriterRejectsBadURL(t *testing.T) {
 	if _, err := newDBWriter("127.0.0.1:8181", "db", "", dbWriterOptions{}); err == nil {
 		t.Fatal("URL without scheme accepted")
+	}
+}
+
+// With Block set, a Write that finds buffer A full waits for InfluxDB to hand
+// buffer B back, instead of dropping its rows. Here InfluxDB holds the first
+// request until the test lets go, and every row arrives in order.
+func TestDBWriterBlockWaitsForRoom(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	var mu sync.Mutex
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if calls.Add(1) == 1 {
+			<-release // a slow InfluxDB: the first buffer stays in flight
+		}
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		rw.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	w, err := newDBWriter(srv.URL, "photon_dev", "", dbWriterOptions{Flush: time.Hour, Block: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.flushRows = 1
+	w.maxBytes = 2 * len("a v=1i 1\n") // A holds two rows while B is busy
+
+	send(w, "a v=1i 1") // A goes out and stays in flight
+	send(w, "a v=1i 2") // B fills
+	send(w, "a v=1i 3") // B is at its cap
+	blocked := make(chan struct{})
+	go func() {
+		send(w, "a v=1i 4") // over the cap: waits for B
+		close(blocked)
+	}()
+	select {
+	case <-blocked:
+		t.Fatal("Write did not wait while InfluxDB held the buffer")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Write still waiting after InfluxDB let go")
+	}
+	w.Close(5 * time.Second)
+
+	if w.Written() != 4 || w.Dropped() != 0 {
+		t.Fatalf("written=%d dropped=%d, want 4 and 0", w.Written(), w.Dropped())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := strings.Join(bodies, ""), "a v=1i 1\na v=1i 2\na v=1i 3\na v=1i 4\n"; got != want {
+		t.Fatalf("bodies %q, want %q", got, want)
+	}
+}
+
+// A block writer takes a single Write bigger than its cap once buffer A is
+// empty, rather than waiting for room that will never come.
+func TestDBWriterBlockAcceptsOversizedWrite(t *testing.T) {
+	f := &fakeInflux{}
+	w := newTestWriter(t, f, "")
+	w.block = true
+	w.maxBytes = 4
+	send(w, "a v=1i 1") // 10 bytes, more than the cap
+	w.Close(time.Second)
+
+	if w.Written() != 1 || w.Dropped() != 0 {
+		t.Fatalf("written=%d dropped=%d, want 1 and 0", w.Written(), w.Dropped())
 	}
 }

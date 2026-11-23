@@ -39,6 +39,10 @@ type dbWriterOptions struct {
 	// comes sooner, but a crash can lose the last WAL interval and some write
 	// errors (bad lines, type conflicts) are no longer reported.
 	NoSync bool
+	// Block makes Write wait for room instead of dropping rows, for a writer
+	// whose caller can wait (backfill). The live server leaves it off: its
+	// decoder must never wait on InfluxDB.
+	Block bool
 }
 
 // rowBuf is one of the writer's two buffers: line protocol, one row per line.
@@ -64,6 +68,7 @@ type dbWriter struct {
 	flushRows  int
 	flushAfter time.Duration
 	maxBytes   int
+	block      bool // Write waits for room rather than dropping rows
 
 	mu      sync.Mutex
 	idle    *sync.Cond  // signalled when the sender hands its buffer back
@@ -99,6 +104,7 @@ func newDBWriter(baseURL, db, token string, opts dbWriterOptions) (*dbWriter, er
 		flushRows:  dbFlushRows,
 		flushAfter: opts.Flush,
 		maxBytes:   dbMaxBatchBytes,
+		block:      opts.Block,
 		fill:       &rowBuf{body: make([]byte, 0, dbBufferBytes)},
 		spare:      &rowBuf{body: make([]byte, 0, dbBufferBytes)},
 		sending:    make(chan *rowBuf, 1),
@@ -115,19 +121,30 @@ func newDBWriter(baseURL, db, token string, opts dbWriterOptions) (*dbWriter, er
 }
 
 // Write adds n rows, already formatted and each ending in '\n', to buffer A
-// in one copy. It does not keep rows and never blocks on InfluxDB. When A is
-// at dbMaxBatchBytes because B is still sending, the rows are dropped.
+// in one copy. It does not keep rows. When A is at dbMaxBatchBytes because B
+// is still sending, the rows are dropped; a block writer waits for room
+// instead.
 func (w *dbWriter) Write(rows []byte, n int) {
 	if n == 0 {
 		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.block {
+		// Once A is empty a single Write goes in, even one bigger than maxBytes.
+		for len(w.fill.body)+len(rows) > w.maxBytes && w.fill.rows > 0 && !w.closed {
+			if w.spare != nil {
+				w.swapLocked()
+			} else {
+				w.idle.Wait() // the sender hands B back, then we look again
+			}
+		}
+	}
 	if w.closed {
 		w.dropped.Add(int64(n))
 		return
 	}
-	if len(w.fill.body)+len(rows) > w.maxBytes {
+	if !w.block && len(w.fill.body)+len(rows) > w.maxBytes {
 		w.dropped.Add(int64(n))
 		if !w.dropping.Swap(true) {
 			log.Printf("[photon-server] InfluxDB is behind; dropping rows until it catches up (raw segments keep them)")
@@ -146,6 +163,13 @@ func (w *dbWriter) Write(rows []byte, n int) {
 		w.swapLocked()
 	}
 }
+
+// Written is the number of rows InfluxDB has accepted.
+func (w *dbWriter) Written() int64 { return w.written.Load() }
+
+// Dropped is the number of rows given up on: buffer full, retries spent,
+// rejected by InfluxDB, or written after Close.
+func (w *dbWriter) Dropped() int64 { return w.dropped.Load() }
 
 // dueLocked reports whether A should go to the sender now.
 func (w *dbWriter) dueLocked() bool {

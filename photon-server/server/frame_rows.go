@@ -119,7 +119,12 @@ type frameSession struct {
 
 // newFrameSession starts a session for the server that started at startedAt.
 func newFrameSession(startedAt time.Time, sink lineSink) *frameSession {
-	sid := startedAt.UTC().Format("20060102T150405Z")
+	return newFrameSessionID(sessionID(startedAt), sink)
+}
+
+// newFrameSessionID starts a session with the given ID, as sessionID makes it.
+// Backfill replays a past session under its own ID.
+func newFrameSessionID(sid string, sink lineSink) *frameSession {
 	return &frameSession{
 		sid:    sid,
 		prefix: "frame,session=" + tagEscaper.Replace(sid),
@@ -258,16 +263,23 @@ func (s *frameSession) flush() {
 	s.buf, s.n = s.buf[:0], 0
 }
 
-// Close queues the final session row, sends everything, and gives the sink up
-// to wait to deliver it. It does nothing on a nil session.
-func (s *frameSession) Close(wait time.Duration) {
-	if s == nil {
-		return
-	}
+// finish queues the final session row if the end has moved, and sends every
+// queued row. It leaves the sink open, so backfill can run more sessions into
+// it.
+func (s *frameSession) finish() {
 	if s.endMs != s.sentEndMs {
 		s.appendSession()
 	}
 	s.flush()
+}
+
+// Close finishes the session, then gives the sink up to wait to deliver its
+// rows. It does nothing on a nil session.
+func (s *frameSession) Close(wait time.Duration) {
+	if s == nil {
+		return
+	}
+	s.finish()
 	s.sink.Close(wait)
 }
 

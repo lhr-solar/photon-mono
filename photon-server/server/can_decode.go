@@ -66,7 +66,14 @@ func startCANDecoder(cfg CANConfig, session *frameSession) *canDecoder {
 // canStats. They add up across decoders, so turning decoding off and on again
 // keeps the totals.
 func (c *canDecoder) decode(buf []byte) {
-	c.maxNS = time.Now().Add(frameMaxFuture).UnixNano()
+	c.decodeAt(buf, time.Now())
+}
+
+// decodeAt is decode with the server clock given as now. A frame stamped more
+// than frameMaxFuture after now is a bad clock. Backfill passes the time a
+// buffer was written, so replayed frames get the same check as live ones.
+func (c *canDecoder) decodeAt(buf []byte, now time.Time) {
+	c.maxNS = now.Add(frameMaxFuture).UnixNano()
 	walkCANP3(buf, c.emit)
 	if c.session != nil {
 		c.session.flush()

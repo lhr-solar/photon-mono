@@ -23,6 +23,10 @@ var influxWriter atomic.Pointer[dbWriter]
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
+	if len(os.Args) > 1 && os.Args[1] == "backfill" {
+		os.Exit(backfillMain(os.Args[2:], os.Getenv, os.Stdout))
+	}
+
 	cfg, err := ParseConfig(os.Args[1:])
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -43,6 +47,12 @@ func main() {
 	stats := store.Stats()
 	log.Printf("[photon-server] Store initialized: %d segments recovered (oldest ID: %d, latest ID: %d, disk bytes: %d)",
 		stats.Segments, stats.OldestID, stats.LatestID, stats.DiskBytes)
+
+	// Backfill needs to know which run wrote each record. This run's records
+	// start at the next ID.
+	if err := appendSessionStart(cfg.SegmentsDir(), sessionID(startedAt), store.LatestID()+1); err != nil {
+		log.Printf("[photon-server] Could not record the session start in %s: %v", sessionLogName, err)
+	}
 
 	log.Printf("[photon-server] Initializing video storage at %s...", cfg.VideoSegmentsDir())
 	videoStore, err := OpenVideoStore(cfg.DataDir)
