@@ -30,7 +30,7 @@ func TestDBCFoldersLoad(t *testing.T) {
 		dir  string
 		want int
 	}{
-		{"../dbc/highnoon2026", 127},
+		{"../dbc/highnoon2026", 130},
 		{"../dbc/spec/dbc", 117},
 		{"../dbc/spec-cdr/dbc", 115},
 	} {

@@ -100,11 +100,12 @@ func parse(bus, text string) ([]*Message, error) {
 			m.Bus = bus
 			msgs = append(msgs, m)
 			cur = m
-		case strings.HasPrefix(line, " SG_ "):
+		case line != strings.TrimLeft(line, " \t") && strings.HasPrefix(strings.TrimLeft(line, " \t"), "SG_ "):
+			// A signal line is indented; tools write a space or a tab.
 			if cur == nil {
 				return nil, fmt.Errorf("line %d: signal outside a message", n)
 			}
-			if err := parseSignal(cur, line); err != nil {
+			if err := parseSignal(cur, " "+strings.TrimLeft(line, " \t")); err != nil {
 				return nil, fmt.Errorf("line %d: %s: %w", n, cur.Name, err)
 			}
 		case strings.HasPrefix(line, "SIG_VALTYPE_ "):

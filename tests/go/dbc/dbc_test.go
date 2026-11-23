@@ -61,3 +61,34 @@ func TestCatalogSHAAndBuses(t *testing.T) {
 		t.Fatalf("SHA %q is not 40 hex digits", c3.SHA)
 	}
 }
+
+// Signal lines may be indented with a tab, as some tools write them; they must
+// not be skipped. The HighNoon 2026 client DBC lost most of its signals this way.
+func TestTabIndentedSignals(t *testing.T) {
+	dir := writeDBCs(t, map[string]string{
+		"Car.dbc": "BO_ 100 Tabbed: 8 Node\n\tSG_ A : 0|8@1+ (1,0) [0|255] \"\" Node\n\tSG_ B : 8|8@1+ (1,0) [0|255] \"\" Node\n\n",
+	})
+	c, err := Load(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := c.Lookup(100)
+	if m == nil || len(m.Signals) != 2 {
+		t.Fatalf("Tabbed = %+v, want 2 signals", m)
+	}
+}
+
+// The HighNoon 2026 DBC defines its can0 messages with bit 12 set (0x1xxx).
+func TestCan0BitIDs(t *testing.T) {
+	dir := writeDBCs(t, map[string]string{"Car.dbc": oneMessage(0x1123, "A") + oneMessage(0x123, "B")})
+	c, err := Load(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Lookup(0x1123) == nil || c.Lookup(0x123) == nil || c.Lookup(0x1123) == c.Lookup(0x123) {
+		t.Fatalf("0x1123 and 0x123 should be two messages")
+	}
+	if _, err := Load(writeDBCs(t, map[string]string{"Car.dbc": oneMessage(0x2000, "C")}), nil); err == nil {
+		t.Fatalf("a 14-bit standard ID loaded")
+	}
+}
