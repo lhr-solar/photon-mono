@@ -77,7 +77,8 @@ type v2TileError struct {
 	Message string `json:"message"`
 }
 
-// v2Run is one session in the runs list.
+// v2Run is one session in the runs list. Rev rises each time the run's history
+// is rewritten by a backfill, so a client can tell its cached tiles are stale.
 type v2Run struct {
 	ID      string `json:"id"`
 	Label   string `json:"label"`
@@ -86,6 +87,7 @@ type v2Run struct {
 	DBCSHA  string `json:"dbc_sha"`
 	StartMS int64  `json:"start_ms"`
 	EndMS   int64  `json:"end_ms"`
+	Rev     int64  `json:"rev"`
 	Live    bool   `json:"live"`
 }
 
@@ -95,8 +97,12 @@ type v2RunsMsg struct {
 	Runs []v2Run `json:"runs"`
 }
 
-// sessionQuery lists the sessions, newest first.
-const sessionQuery = `SELECT id, dbc_label, dbc_sha, start, "end" FROM session ORDER BY start DESC`
+// sessionQuery lists the sessions, newest first, with their revs.
+const sessionQuery = `SELECT id, dbc_label, dbc_sha, start, "end", rev FROM session ORDER BY start DESC`
+
+// sessionQueryNoRev is sessionQuery for a database whose session rows were all
+// written before rev existed. Every run then has rev 0.
+const sessionQueryNoRev = `SELECT id, dbc_label, dbc_sha, start, "end" FROM session ORDER BY start DESC`
 
 // listRuns returns the reply to runs_list: every session InfluxDB has, newest
 // first. It is an error reply when the query fails.
@@ -104,6 +110,11 @@ func (h *v2Hub) listRuns(ctx context.Context) []byte {
 	runs := []v2Run{}
 	if h.querier != nil {
 		rows, err := h.querier.query(ctx, sessionQuery, nil)
+		if errors.Is(err, errNoData) {
+			// A rev column that does not exist yet reads as no data, so ask again
+			// without it. If the session table is missing too, this is no data as well.
+			rows, err = h.querier.query(ctx, sessionQueryNoRev, nil)
+		}
 		if err != nil && !errors.Is(err, errNoData) {
 			return encodeV2(v2Error{Type: "error", Code: "runs", Message: err.Error()})
 		}
@@ -135,6 +146,13 @@ func sessionRun(row map[string]any, live string) (v2Run, error) {
 	}
 	if r.EndMS, err = rowInt(row, "end"); err != nil {
 		return v2Run{}, err
+	}
+	// A session written before rev existed has no rev, or a null one when other
+	// sessions have it. Such a run has rev 0.
+	if row["rev"] != nil {
+		if r.Rev, err = rowInt(row, "rev"); err != nil {
+			return v2Run{}, err
+		}
 	}
 	r.Label, r.Source, r.Live = r.ID, "car", r.ID == live
 	return r, nil

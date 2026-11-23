@@ -35,6 +35,7 @@ type Message struct {
 	Name      string
 	Bus       string // the DBC it is defined in, e.g. "MotorCAN"
 	Length    uint8  // bytes, 0–64
+	CycleMS   uint32 // the DBC's cycle time in ms, the frame period; 0 when it has none
 	Signals   []Signal
 	Selector  int     // index of the mux selector in Signals, or -1
 	Timestamp int     // index of the "Timestamp" signal, or -1
@@ -141,6 +142,7 @@ func (c *Catalog) set(m *Message) {
 // sameLayout reports whether a and b decode a frame identically. Bus is left
 // out; it is the one thing a duplicate is expected to differ in. So is a
 // signal's [min|max]: it only sets a plot's default range, not the decoding.
+// Neither is a message's CycleMS, which is timing only.
 func sameLayout(a, b *Message) bool {
 	if a.Name != b.Name || a.Length != b.Length || a.Selector != b.Selector || len(a.Signals) != len(b.Signals) {
 		return false

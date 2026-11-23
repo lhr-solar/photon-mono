@@ -158,3 +158,91 @@ func TestDuplicateIgnoresRange(t *testing.T) {
 		t.Fatal("Dup missing")
 	}
 }
+
+// GenMsgCycleTime gives a message's frame period in ms. A message without one
+// has 0.
+func TestCycleTimeParsed(t *testing.T) {
+	dir := writeDBCs(t, map[string]string{"Car.dbc": oneMessage(100, "A") + oneMessage(101, "B") +
+		"BA_ \"GenMsgCycleTime\" BO_ 100 20;\n"})
+	c, err := Load(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m100, m101 := c.Lookup(100), c.Lookup(101)
+	if m100 == nil || m101 == nil {
+		t.Fatal("messages 100 and 101 should both load")
+	}
+	if m100.CycleMS != 20 {
+		t.Errorf("message 100 CycleMS = %d, want 20", m100.CycleMS)
+	}
+	if m101.CycleMS != 0 {
+		t.Errorf("message 101 without a cycle time: CycleMS = %d, want 0", m101.CycleMS)
+	}
+}
+
+// The 2026 HighNoon DBC has no cycle times, so every message has 0.
+func TestCycleTimeAbsentIsZero(t *testing.T) {
+	c, err := Load("highnoon2026", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Messages) == 0 {
+		t.Fatal("HighNoon has no messages")
+	}
+	for _, m := range c.Messages {
+		if m.CycleMS != 0 {
+			t.Errorf("%s CycleMS = %d, want 0", m.Name, m.CycleMS)
+		}
+	}
+}
+
+// A cycle time line that does not read, or names no message, is an error.
+func TestCycleTimeBadLineIsError(t *testing.T) {
+	for _, line := range []string{
+		"BA_ \"GenMsgCycleTime\" BO_ 100 soon;\n",
+		"BA_ \"GenMsgCycleTime\" BO_ 100 20\n",
+		"BA_ \"GenMsgCycleTime\" BO_ 100 99999999999;\n",
+		"BA_ \"GenMsgCycleTime\" BO_ 999 20;\n",
+	} {
+		dir := writeDBCs(t, map[string]string{"Car.dbc": oneMessage(100, "A") + line})
+		if _, err := Load(dir, nil); err == nil {
+			t.Errorf("%q loaded without an error", line)
+		}
+	}
+}
+
+// A duplicate that differs only in its cycle time still loads, and the copy on a
+// direct bus (CarCAN) keeps its own cycle time.
+func TestDuplicateIgnoresCycleTime(t *testing.T) {
+	a := oneMessage(100, "A") + "BA_ \"GenMsgCycleTime\" BO_ 100 10;\n"
+	b := oneMessage(100, "A") + "BA_ \"GenMsgCycleTime\" BO_ 100 50;\n"
+	c, err := Load(writeDBCs(t, map[string]string{"CarCAN.dbc": a, "ChargerCAN.dbc": b}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := c.Lookup(100)
+	if m == nil || m.Bus != "CarCAN" || m.CycleMS != 10 {
+		t.Fatalf("100 = %+v, want the CarCAN copy with cycle time 10", m)
+	}
+}
+
+// The 2027 spec gives a cycle time to 25 of CarCAN's 30 messages; the five External
+// command messages have none. BPSStatus (0x060) has 200 ms.
+func TestCycleTimeInSpec(t *testing.T) {
+	c, err := Load("spec/dbc", testRates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withCycle := 0
+	for _, m := range c.Messages {
+		if m.Bus == "CarCAN" && m.CycleMS > 0 {
+			withCycle++
+		}
+	}
+	if withCycle != 25 {
+		t.Errorf("CarCAN messages with a cycle time = %d, want 25", withCycle)
+	}
+	if m := c.Lookup(0x060); m == nil || m.CycleMS != 200 {
+		t.Errorf("BPSStatus CycleMS = %+v, want 200", m)
+	}
+}

@@ -263,6 +263,7 @@ type runsReply struct {
 		DBCSHA  string `json:"dbc_sha"`
 		StartMS int64  `json:"start_ms"`
 		EndMS   int64  `json:"end_ms"`
+		Rev     int64  `json:"rev"`
 		Live    bool   `json:"live"`
 	} `json:"runs"`
 }
@@ -270,8 +271,8 @@ type runsReply struct {
 func TestRunsListMarksTheLiveRun(t *testing.T) {
 	f := &fakeQueries{reply: func(_ context.Context, q fakeQuery) (int, string) {
 		return http.StatusOK,
-			`{"id":"run-old","dbc_label":"A+B","dbc_sha":"aaa","start":1000,"end":2000}` + "\n" +
-				`{"id":"run-test","dbc_label":"A+B","dbc_sha":"bbb","start":3000,"end":3500}` + "\n"
+			`{"id":"run-old","dbc_label":"A+B","dbc_sha":"aaa","start":1000,"end":2000,"rev":0}` + "\n" +
+				`{"id":"run-test","dbc_label":"A+B","dbc_sha":"bbb","start":3000,"end":3500,"rev":1700000000000}` + "\n"
 	}}
 	h := newTileHub(t, f, fixedLive(tileTestRun))
 	conn := tileConn(t, h)
@@ -279,7 +280,7 @@ func TestRunsListMarksTheLiveRun(t *testing.T) {
 	var reply runsReply
 	readInto(t, conn, &reply)
 
-	if got := f.queries()[0].SQL; got != `SELECT id, dbc_label, dbc_sha, start, "end" FROM session ORDER BY start DESC` {
+	if got := f.queries()[0].SQL; got != `SELECT id, dbc_label, dbc_sha, start, "end", rev FROM session ORDER BY start DESC` {
 		t.Fatalf("runs query = %q", got)
 	}
 	if reply.Type != "runs" || len(reply.Runs) != 2 {
@@ -287,11 +288,52 @@ func TestRunsListMarksTheLiveRun(t *testing.T) {
 	}
 	old, live := reply.Runs[0], reply.Runs[1]
 	if old.ID != "run-old" || old.Label != "run-old" || old.Source != "car" || old.Device != "" ||
-		old.DBCSHA != "aaa" || old.StartMS != 1000 || old.EndMS != 2000 || old.Live {
+		old.DBCSHA != "aaa" || old.StartMS != 1000 || old.EndMS != 2000 || old.Rev != 0 || old.Live {
 		t.Fatalf("old run = %+v", old)
 	}
-	if live.ID != tileTestRun || !live.Live || live.DBCSHA != "bbb" || live.StartMS != 3000 || live.EndMS != 3500 {
+	if live.ID != tileTestRun || !live.Live || live.DBCSHA != "bbb" || live.StartMS != 3000 || live.EndMS != 3500 ||
+		live.Rev != 1700000000000 {
 		t.Fatalf("live run = %+v", live)
+	}
+}
+
+// Before rev existed, InfluxDB answers the query with "No field named rev". The
+// runs are then read again without rev, and each has rev 0.
+func TestRunsListWithoutRevColumn(t *testing.T) {
+	f := &fakeQueries{reply: func(_ context.Context, q fakeQuery) (int, string) {
+		if strings.Contains(q.SQL, ", rev FROM") {
+			return http.StatusInternalServerError, "Error during planning: No field named rev in table session"
+		}
+		return http.StatusOK, `{"id":"run-old","dbc_label":"A+B","dbc_sha":"aaa","start":1000,"end":2000}` + "\n"
+	}}
+	conn := tileConn(t, newTileHub(t, f, fixedLive(tileTestRun)))
+	sendV2(t, conn, map[string]any{"type": "runs_list"})
+	var reply runsReply
+	readInto(t, conn, &reply)
+
+	qs := f.queries()
+	if len(qs) != 2 || qs[1].SQL != `SELECT id, dbc_label, dbc_sha, start, "end" FROM session ORDER BY start DESC` {
+		t.Fatalf("queries %+v, want the rev query and then the query without rev", qs)
+	}
+	if len(reply.Runs) != 1 || reply.Runs[0].ID != "run-old" || reply.Runs[0].Rev != 0 {
+		t.Fatalf("runs %+v, want run-old with rev 0", reply.Runs)
+	}
+}
+
+// Once some session rows have a rev, InfluxDB leaves rev out of the rows written
+// before it existed. Such a run has rev 0. A null rev is the same.
+func TestRunsListOldSessionWithoutRevIsZero(t *testing.T) {
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) {
+		return http.StatusOK,
+			`{"id":"run-old","dbc_label":"A+B","dbc_sha":"aaa","start":1000,"end":2000}` + "\n" +
+				`{"id":"run-test","dbc_label":"A+B","dbc_sha":"bbb","start":3000,"end":3500,"rev":4}` + "\n"
+	}}
+	conn := tileConn(t, newTileHub(t, f, fixedLive(tileTestRun)))
+	sendV2(t, conn, map[string]any{"type": "runs_list"})
+	var reply runsReply
+	readInto(t, conn, &reply)
+	if len(reply.Runs) != 2 || reply.Runs[0].Rev != 0 || reply.Runs[1].Rev != 4 {
+		t.Fatalf("runs %+v, want revs 0 and 4", reply.Runs)
 	}
 }
 

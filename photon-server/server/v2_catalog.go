@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"slices"
 
 	"server/dbc"
 )
@@ -24,13 +25,14 @@ type v2CatalogMessage struct {
 }
 
 type v2CatalogSignal struct {
-	Index   int     `json:"index"`
-	Name    string  `json:"name"`
-	Unit    string  `json:"unit"`
-	Min     float64 `json:"min"`
-	Max     float64 `json:"max"`
-	Integer bool    `json:"integer"`
-	Mux     int16   `json:"mux"`
+	Index    int     `json:"index"`
+	Name     string  `json:"name"`
+	Unit     string  `json:"unit"`
+	Min      float64 `json:"min"`
+	Max      float64 `json:"max"`
+	Integer  bool    `json:"integer"`
+	Mux      int16   `json:"mux"`
+	PeriodMS float64 `json:"period_ms"`
 }
 
 // catalogJSON encodes c as the catalog message. Messages and their signals keep
@@ -66,13 +68,14 @@ func catalogJSON(c *dbc.Catalog) []byte {
 				lo, hi = 0, 0
 			}
 			cm.Signals = append(cm.Signals, v2CatalogSignal{
-				Index:   index,
-				Name:    sig.Name,
-				Unit:    sig.Unit,
-				Min:     lo,
-				Max:     hi,
-				Integer: sig.Kind == dbc.Integer && sig.Factor == 1 && sig.Offset == 0,
-				Mux:     sig.Mux,
+				Index:    index,
+				Name:     sig.Name,
+				Unit:     sig.Unit,
+				Min:      lo,
+				Max:      hi,
+				Integer:  sig.Kind == dbc.Integer && sig.Factor == 1 && sig.Offset == 0,
+				Mux:      sig.Mux,
+				PeriodMS: signalPeriodMS(m, i),
 			})
 			index++
 		}
@@ -84,6 +87,20 @@ func catalogJSON(c *dbc.Catalog) []byte {
 		return nil
 	}
 	return out
+}
+
+// signalPeriodMS is how often signal i of m is sampled, in ms: the period of its
+// sample group when it is in one, else the message's cycle time. A group's period
+// is the time between its samples, not the frame's, so a group with no known rate
+// gives 0 even when the message has a cycle time. 0 also means the cycle time is
+// unknown.
+func signalPeriodMS(m *dbc.Message, i int) float64 {
+	for _, g := range m.Groups {
+		if slices.Contains(g.Signals, i) {
+			return float64(g.PeriodNS) / 1e6
+		}
+	}
+	return float64(m.CycleMS)
 }
 
 // catalogSignals lists the signals of c in catalog index order: the order

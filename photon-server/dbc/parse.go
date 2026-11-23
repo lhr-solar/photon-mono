@@ -67,6 +67,8 @@ var (
 	// DBC names stop at 32 characters; a longer name is cut in the BO_ or SG_
 	// line and written in full here.
 	longNameLine = regexp.MustCompile(`^BA_ "System(?:Signal|Message)LongSymbol" (?:SG_ (\d+) (\w+)|BO_ (\d+)) "([^"]+)";$`)
+	// GenMsgCycleTime: a message's frame period in ms. The 2026 DBC has none.
+	cycleTimeLine = regexp.MustCompile(`^BA_ "GenMsgCycleTime" BO_ (\d+) (\d+);$`)
 )
 
 // parse reads one DBC file's messages, all on bus.
@@ -87,6 +89,12 @@ func parse(bus, text string) ([]*Message, error) {
 		line int
 	}
 	var longNames []longName
+	type cycleTime struct {
+		id   uint32
+		ms   uint32
+		line int
+	}
+	var cycleTimes []cycleTime
 
 	for n, line := range strings.Split(text, "\n") {
 		n++ // line numbers start at 1
@@ -132,6 +140,17 @@ func parse(bus, text string) ([]*Message, error) {
 				id, _ := strconv.ParseUint(p[3], 10, 32)
 				longNames = append(longNames, longName{id: uint32(id), full: p[4], line: n})
 			}
+		case strings.HasPrefix(line, "BA_ \"GenMsgCycleTime\" BO_ "):
+			p := cycleTimeLine.FindStringSubmatch(line)
+			if p == nil {
+				return nil, fmt.Errorf("line %d: unreadable cycle time: %q", n, line)
+			}
+			id, err1 := strconv.ParseUint(p[1], 10, 32)
+			ms, err2 := strconv.ParseUint(p[2], 10, 32)
+			if err1 != nil || err2 != nil {
+				return nil, fmt.Errorf("line %d: unreadable cycle time: %q", n, line)
+			}
+			cycleTimes = append(cycleTimes, cycleTime{uint32(id), uint32(ms), n})
 		case strings.TrimSpace(line) == "":
 			cur = nil // a blank line ends the message's signal list
 		}
@@ -163,6 +182,13 @@ func parse(bus, text string) ([]*Message, error) {
 			return nil, fmt.Errorf("line %d: long name for unknown signal %d %s", ln.line, ln.id, ln.sig)
 		}
 		sig.Name = ln.full
+	}
+	for _, ct := range cycleTimes {
+		m := findMessage(msgs, ct.id)
+		if m == nil {
+			return nil, fmt.Errorf("line %d: cycle time for unknown message %d", ct.line, ct.id)
+		}
+		m.CycleMS = ct.ms
 	}
 
 	for _, m := range msgs {

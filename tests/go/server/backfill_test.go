@@ -7,11 +7,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+// revField is the rev field of a session row.
+var revField = regexp.MustCompile(`,rev=\d+i`)
 
 // backfillDirs makes a data directory with its segments folder, as the server does.
 func backfillDirs(t *testing.T) (dataDir, segDir string) {
@@ -80,7 +84,8 @@ func noEnvironment(string) string { return "" }
 
 // The rows a backfill writes for a recording are the rows the live server wrote
 // for the same frames: frame and signal_def rows exactly, and the final session
-// row. Session rows may repeat, so only the last one is compared.
+// row apart from its rev (see TestBackfillSessionRevIsItsStart). Session rows may
+// repeat, so only the last one is compared.
 func TestBackfillWritesSameRowsAsLive(t *testing.T) {
 	dir := writeFrameTestDBC(t)
 	bufs := [][]byte{
@@ -137,8 +142,42 @@ func TestBackfillWritesSameRowsAsLive(t *testing.T) {
 		}
 		return rows[len(rows)-1]
 	}
-	if got, want := last(replayedLines), last(liveLines); got != want {
+	got, want := revField.ReplaceAllString(last(replayedLines), ""), revField.ReplaceAllString(last(liveLines), "")
+	if got != want {
 		t.Fatalf("final session row %q, want %q", got, want)
+	}
+}
+
+// A replayed session's rows carry the time the backfill started as their rev, so
+// the runs list shows that its history changed. Both sessions get the same rev.
+func TestBackfillSessionRevIsItsStart(t *testing.T) {
+	dir := writeFrameTestDBC(t)
+	dataDir, segDir := backfillDirs(t)
+	storeBuffers(t, dataDir,
+		frameBatch(testTSMS, testFrame{id: 100, data: plainData}),
+		frameBatch(testTSMS+1000, testFrame{id: 100, data: plainData}))
+	logSession(t, segDir, "S1", 1)
+	storeBuffers(t, dataDir, frameBatch(testTSMS+5000, testFrame{id: 101, data: muxData(1)}))
+	logSession(t, segDir, "S2", 3)
+
+	started := time.UnixMilli(1_700_000_123_456)
+	sink := &recordSink{}
+	opts := backfillOptions{SegmentsDir: segDir, CAN: CANConfig{DBCDir: dir}, All: true,
+		Now: func() time.Time { return started }}
+	if _, err := runBackfill(opts, sink); err != nil {
+		t.Fatal(err)
+	}
+	const rev = ",rev=1700000123456i "
+	seen := map[string]bool{}
+	for _, row := range rowsWithPrefix(sink.lines(t), "session,") {
+		id, _, _ := strings.Cut(strings.TrimPrefix(row, "session,id="), " ")
+		seen[id] = true
+		if !strings.Contains(row, rev) {
+			t.Fatalf("session row %q does not carry the backfill's rev %q", row, rev)
+		}
+	}
+	if !seen["S1"] || !seen["S2"] || len(seen) != 2 {
+		t.Fatalf("session rows for %v, want S1 and S2", seen)
 	}
 }
 

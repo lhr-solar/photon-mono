@@ -112,6 +112,9 @@ func runBackfill(opts backfillOptions, sink lineSink) ([]backfillResult, error) 
 	if now == nil {
 		now = time.Now
 	}
+	// Every session replayed here gets this rev, so the runs list shows that its
+	// history changed. A later backfill has a later start, so its rev is higher.
+	rev := now().UnixMilli()
 	starts, sessions, err := scanSessions(opts.SegmentsDir)
 	if err != nil {
 		return nil, err
@@ -166,6 +169,7 @@ func runBackfill(opts backfillOptions, sink lineSink) ([]backfillResult, error) 
 		if i != cur || fs == nil {
 			finishCurrent()
 			s := newFrameSessionID(results[i].SID, rowCounter{next: sink, rows: &results[i].Rows})
+			s.rev = rev
 			cfg := opts.CAN
 			cfg.Decode = true
 			c, err := newCANDecoder(cfg, s)

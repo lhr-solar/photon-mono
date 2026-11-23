@@ -308,8 +308,9 @@ func TestSignalDefsAndSessionRows(t *testing.T) {
 		}
 	}
 
+	// The live server's rev is 0.
 	sessionRow := func(end uint64) string {
-		return fmt.Sprintf(`session,id=%s dbc_label="Test",dbc_sha="%s",start=%di,end=%di %d`,
+		return fmt.Sprintf(`session,id=%s dbc_label="Test",dbc_sha="%s",start=%di,end=%di,rev=0i %d`,
 			testSID, c1.catalog.SHA, t0, end, int64(t0)*nsPerMs)
 	}
 	// One session row at the first flush, one a second later, one at Close with

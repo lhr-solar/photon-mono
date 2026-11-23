@@ -478,8 +478,8 @@ func TestV2CatalogFieldSet(t *testing.T) {
 	for _, m := range doc.Messages {
 		for _, sv := range m["signals"].([]any) {
 			s := sv.(map[string]any)
-			if got := sortedKeys(s); !slices.Equal(got, []string{"index", "integer", "max", "min", "mux", "name", "unit"}) {
-				t.Fatalf("signal fields %v, want index integer max min mux name unit", got)
+			if got := sortedKeys(s); !slices.Equal(got, []string{"index", "integer", "max", "min", "mux", "name", "period_ms", "unit"}) {
+				t.Fatalf("signal fields %v, want index integer max min mux name period_ms unit", got)
 			}
 			if int(s["index"].(float64)) != index {
 				t.Fatalf("signal %v has index %v, want %d", s["name"], s["index"], index)
@@ -513,6 +513,55 @@ func TestV2CatalogRangeNotFinite(t *testing.T) {
 	x, y := doc.Messages[0].Signals[0], doc.Messages[0].Signals[1]
 	if x.Min != 0 || x.Max != 0 || y.Min != 0 || y.Max != 255 {
 		t.Fatalf("ranges X %v..%v, Y %v..%v; want 0..0 and 0..255", x.Min, x.Max, y.Min, y.Max)
+	}
+}
+
+// period_ms is a signal's sample period when it is in a sample group, else its
+// message's cycle time, and 0 when neither is known.
+func TestV2CatalogPeriodMS(t *testing.T) {
+	cat := loadDBC(t, "BO_ 300 Samp: 8 Node\n"+
+		" SG_ Timestamp : 0|16@1+ (1,0) [0|0] \"\" Node\n"+
+		" SG_ Acc1 : 16|16@1+ (0.5,0) [0|0] \"\" Node\n"+
+		" SG_ Acc2 : 32|16@1+ (0.5,0) [0|0] \"\" Node\n"+
+		" SG_ Plain : 48|8@1+ (1,0) [0|255] \"\" Node\n\n"+
+		"BO_ 301 Cyc: 8 Node\n SG_ C : 0|8@1+ (1,0) [0|255] \"\" Node\n\n"+
+		"BO_ 302 Bare: 8 Node\n SG_ D : 0|8@1+ (1,0) [0|255] \"\" Node\n\n"+
+		"BO_ 303 Other: 8 Node\n"+
+		" SG_ Timestamp : 0|16@1+ (1,0) [0|0] \"\" Node\n"+
+		" SG_ Acc1 : 16|16@1+ (0.5,0) [0|0] \"\" Node\n"+
+		" SG_ Acc2 : 32|16@1+ (0.5,0) [0|0] \"\" Node\n\n"+
+		"BA_ \"GenMsgCycleTime\" BO_ 300 100;\n"+
+		"BA_ \"GenMsgCycleTime\" BO_ 301 20;\n"+
+		"BA_ \"GenMsgCycleTime\" BO_ 303 100;\n",
+		[]dbc.SampleRate{{Messages: "Samp", Hz: 500}})
+	var doc v2CatalogMsg
+	if err := json.Unmarshal(catalogJSON(cat), &doc); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, m := range doc.Messages {
+		for _, s := range m.Signals {
+			got[m.Name+"."+s.Name] = s.PeriodMS
+		}
+	}
+	want := map[string]float64{
+		"Samp.Timestamp":  100, // not in a group: the cycle time
+		"Samp.Acc1":       2,   // a group at 500 Hz: 2 ms between samples, not the frame's 100 ms
+		"Samp.Acc2":       2,
+		"Samp.Plain":      100,
+		"Cyc.C":           20,
+		"Bare.D":          0, // no cycle time
+		"Other.Timestamp": 100,
+		"Other.Acc1":      0, // a group with no rate: unknown, even with a cycle time
+		"Other.Acc2":      0,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("catalog has %d signals, want %d: %v", len(got), len(want), got)
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("%s period_ms = %v, want %v", name, got[name], w)
+		}
 	}
 }
 

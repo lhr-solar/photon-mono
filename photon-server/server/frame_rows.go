@@ -113,6 +113,10 @@ type frameSession struct {
 	dbcSHA   string
 	dbcLabel string
 
+	// rev is the run's revision on its session row. The live server leaves it 0;
+	// a backfill sets it to the time it started, so a replay always raises it.
+	rev int64
+
 	buf []byte // rows waiting for the next flush
 	n   int    // rows in buf
 }
@@ -236,12 +240,13 @@ func (s *frameSession) appendSignalDefs(c *dbc.Catalog, startMs int64) {
 	}
 }
 
-// appendSession queues the session row with the span so far. Its time is the
-// session start, so a later row overwrites the earlier one in InfluxDB.
+// appendSession queues the session row with the span so far and the run's rev.
+// Its time is the session start, so a later row overwrites the earlier one in
+// InfluxDB.
 func (s *frameSession) appendSession() {
-	s.buf = fmt.Appendf(s.buf, "session,id=%s dbc_label=\"%s\",dbc_sha=\"%s\",start=%di,end=%di %d\n",
+	s.buf = fmt.Appendf(s.buf, "session,id=%s dbc_label=\"%s\",dbc_sha=\"%s\",start=%di,end=%di,rev=%di %d\n",
 		tagEscaper.Replace(s.sid), strEscaper.Replace(s.dbcLabel), strEscaper.Replace(s.dbcSHA),
-		s.startMs, s.endMs, s.startMs*nsPerMs)
+		s.startMs, s.endMs, s.rev, s.startMs*nsPerMs)
 	s.n++
 	s.sentEndMs = s.endMs
 }

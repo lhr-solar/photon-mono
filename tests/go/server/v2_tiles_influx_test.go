@@ -164,8 +164,8 @@ func TestHistoryFromRealInfluxDB(t *testing.T) {
 			continue
 		}
 		found = true
-		if r.StartMS != t0 || r.EndMS != t0+490 || r.Source != "car" || r.Live {
-			t.Fatalf("run %+v, want start %d, end %d, source car, not live", r, t0, t0+490)
+		if r.StartMS != t0 || r.EndMS != t0+490 || r.Rev != 0 || r.Source != "car" || r.Live {
+			t.Fatalf("run %+v, want start %d, end %d, rev 0, source car, not live", r, t0, t0+490)
 		}
 	}
 	if !found {
