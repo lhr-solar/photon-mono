@@ -56,12 +56,12 @@ func listBackfillSessions(segmentsDir string) ([]backfillSession, error) {
 		}
 		s := backfillSession{SID: name}
 		for _, c := range w.chunks {
-			if !c.plain() {
-				log.Printf("[photon-server] backfill: skipping %s, which is %q, not a plain chunk", c.path, c.state)
+			if !c.readable() {
+				log.Printf("[photon-server] backfill: skipping %s, which is %q, not a readable chunk", c.path, c.state)
 				continue
 			}
-			if _, err := os.Stat(c.path); err != nil {
-				log.Printf("[photon-server] backfill: skipping %s: %v", c.path, err)
+			if _, err := os.Stat(c.readPath()); err != nil {
+				log.Printf("[photon-server] backfill: skipping %s: %v", c.readPath(), err)
 				continue
 			}
 			r := chunkCounts{

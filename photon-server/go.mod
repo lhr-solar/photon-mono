@@ -7,6 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.7
 	charm.land/lipgloss/v2 v2.0.4
 	github.com/NimbleMarkets/ntcharts/v2 v2.2.0
+	github.com/klauspost/compress v1.20.5
 )
 
 require (

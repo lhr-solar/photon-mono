@@ -71,6 +71,7 @@ type ServerMetadata struct {
 	CAN         CANMetadata     `json:"can"`
 	Influx      InfluxMetadata  `json:"influx"`
 	V2          V2Metadata      `json:"v2"`
+	Archive     ArchiveMetadata `json:"archive"`
 	Config      ConfigMetadata  `json:"config"`
 }
 
@@ -357,9 +358,10 @@ func writeServerMetadata(
 				UnknownMux: canStats.unknownMux.Load(),
 				BadClock:   canStats.badClock.Load(),
 			},
-			Influx: influxMetadata(influxWriter.Load()),
-			V2:     v2Metadata(v2Current.Load()),
-			Config: configMetadata(settings.current()),
+			Influx:  influxMetadata(influxWriter.Load()),
+			V2:      v2Metadata(v2Current.Load()),
+			Archive: archiveMetadata(archiveCurrent.Load()),
+			Config:  configMetadata(settings.current()),
 		}
 		if err := write(metadata); err != nil {
 			return

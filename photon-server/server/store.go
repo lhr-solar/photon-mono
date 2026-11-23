@@ -262,6 +262,9 @@ func (s *StreamStore) Read(id MessageID) (Message, bool, error) {
 			s.mu.Unlock()
 			cps, err := buildCheckpoints(c)
 			if err != nil {
+				if s.archivedSince(c) {
+					continue
+				}
 				return Message{}, false, err
 			}
 			s.mu.Lock()
@@ -282,6 +285,9 @@ func (s *StreamStore) Read(id MessageID) (Message, bool, error) {
 
 		msg, next, err := readChunkRecord(c.path, from, off, id, limit)
 		if err != nil {
+			if s.archivedSince(c) {
+				continue
+			}
 			return Message{}, false, err
 		}
 		s.mu.Lock()

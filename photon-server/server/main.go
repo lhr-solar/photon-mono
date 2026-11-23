@@ -238,6 +238,20 @@ func main() {
 	defer cancel()
 	stopV2 := startV2(ctx, cfg, hub)
 
+	// The archiver compresses sealed chunks, and uploads them when -archive-remote is set.
+	// If it cannot start, the server runs without it.
+	var arc *archiver
+	if cfg.Archive {
+		if arc, err = startArchiver(ctx, cfg, store); err != nil {
+			log.Printf("[photon-server] Archive off: %v", err)
+		} else {
+			archiveCurrent.Store(arc)
+			log.Printf("[photon-server] Archive on: sealed chunks compress to .segz; upload remote %q (rclone %s)", cfg.ArchiveRemote, cfg.Rclone)
+		}
+	} else {
+		log.Printf("[photon-server] Archive off (-archive=false)")
+	}
+
 	var wg sync.WaitGroup
 
 	// Append loop
@@ -342,6 +356,9 @@ func main() {
 	// Wait for existing ingress readers to finish reading and close ingress channel
 	ingressConnWg.Wait()
 	close(pool.ready)
+
+	// The archiver finishes or abandons its file before the store closes.
+	arc.Stop()
 
 	// Close stores so any waiting client readers unblock immediately and video indexes flush
 	_ = store.Close()

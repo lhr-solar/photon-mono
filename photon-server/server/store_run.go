@@ -29,7 +29,11 @@ import (
 const (
 	chunkStateActive = "active"
 	chunkStateSealed = "sealed"
-	manifestName     = "manifest.json"
+	// chunkStateCompressed: the chunk has a .segz copy, verified, and its .seg is gone.
+	chunkStateCompressed = "compressed"
+	// chunkStateUploaded: the .segz copy is also on the archive remote.
+	chunkStateUploaded = "uploaded"
+	manifestName       = "manifest.json"
 	// legacyFolder holds the old single-file layout after it is migrated.
 	legacyFolder = "legacy"
 	// manifestTries is how often a manifest rename is tried. Windows will not
@@ -44,21 +48,28 @@ type manifestFile struct {
 	Chunks []json.RawMessage `json:"chunks"`
 }
 
-// manifestChunk is one entry of a manifest's chunk list.
+// manifestChunk is one entry of a manifest's chunk list. The archive fields are
+// set once the chunk is compressed or uploaded.
 type manifestChunk struct {
-	File       string    `json:"file"`
-	FirstID    MessageID `json:"first_id"`
-	LastID     MessageID `json:"last_id"`
-	FirstWrite int64     `json:"first_write"`
-	LastWrite  int64     `json:"last_write"`
-	Records    int       `json:"records"`
-	Bytes      int64     `json:"bytes"`
-	State      string    `json:"state"`
+	File         string    `json:"file"`
+	FirstID      MessageID `json:"first_id"`
+	LastID       MessageID `json:"last_id"`
+	FirstWrite   int64     `json:"first_write"`
+	LastWrite    int64     `json:"last_write"`
+	Records      int       `json:"records"`
+	Bytes        int64     `json:"bytes"`
+	State        string    `json:"state"`
+	FileZ        string    `json:"file_z,omitempty"`
+	BytesZ       int64     `json:"bytes_z,omitempty"`
+	SHA256       string    `json:"sha256,omitempty"`
+	CompressedAt string    `json:"compressed_at,omitempty"`
+	UploadedAt   string    `json:"uploaded_at,omitempty"`
 }
 
 var (
 	manifestFileKeys  = []string{"run", "chunks"}
-	manifestChunkKeys = []string{"file", "first_id", "last_id", "first_write", "last_write", "records", "bytes", "state"}
+	manifestChunkKeys = []string{"file", "first_id", "last_id", "first_write", "last_write", "records", "bytes", "state",
+		"file_z", "bytes_z", "sha256", "compressed_at", "uploaded_at"}
 )
 
 // Sentinels that stop a scan early. errFound and errPassed are internal to a
@@ -75,12 +86,25 @@ type checkpoint struct {
 	offset int64
 }
 
+// chunkArchive is where a compressed chunk's copy is, and what the manifest says
+// about it.
+type chunkArchive struct {
+	fileZ        string // "000001.segz"
+	zpath        string // the full path of fileZ
+	bytesZ       int64  // size of the .segz file
+	sha256       string // hex sha256 of the original .seg bytes
+	compressedAt string // RFC 3339, UTC
+	uploadedAt   string // RFC 3339, UTC; empty until uploaded
+}
+
 // chunk is one chunk file of a run and the records in it.
 type chunk struct {
 	number     int
 	file       string // "000001.seg"
 	path       string
-	state      string                     // "active", "sealed", or a state from a later version
+	owner      *runWriter // the run this chunk is in
+	state      string     // "active", "sealed", "compressed", "uploaded", or a state from a later version
+	archive    chunkArchive
 	extra      map[string]json.RawMessage // manifest fields this version does not know
 	firstID    MessageID
 	lastID     MessageID
@@ -104,6 +128,25 @@ func (c *chunk) plain() bool {
 	return c.state == chunkStateActive || c.state == chunkStateSealed
 }
 
+// compressed reports whether the chunk's records are in a .segz file.
+func (c *chunk) compressed() bool {
+	return c.state == chunkStateCompressed || c.state == chunkStateUploaded
+}
+
+// readable reports whether the chunk's records can be read from disk: from the
+// .seg file, or from the .segz file once compressed.
+func (c *chunk) readable() bool {
+	return c.plain() || c.compressed()
+}
+
+// readPath is the file the chunk's records are read from.
+func (c *chunk) readPath() string {
+	if c.compressed() {
+		return c.archive.zpath
+	}
+	return c.path
+}
+
 // checkpointFor returns the last checkpoint at or before message id.
 func (c *chunk) checkpointFor(id MessageID) checkpoint {
 	i := sort.Search(len(c.checkpoints), func(i int) bool { return c.checkpoints[i].id > id }) - 1
@@ -115,14 +158,19 @@ func (c *chunk) checkpointFor(id MessageID) checkpoint {
 
 func (c *chunk) entry() manifestChunk {
 	return manifestChunk{
-		File:       c.file,
-		FirstID:    c.firstID,
-		LastID:     c.lastID,
-		FirstWrite: c.firstWrite,
-		LastWrite:  c.lastWrite,
-		Records:    c.records,
-		Bytes:      c.bytes,
-		State:      c.state,
+		File:         c.file,
+		FirstID:      c.firstID,
+		LastID:       c.lastID,
+		FirstWrite:   c.firstWrite,
+		LastWrite:    c.lastWrite,
+		Records:      c.records,
+		Bytes:        c.bytes,
+		State:        c.state,
+		FileZ:        c.archive.fileZ,
+		BytesZ:       c.archive.bytesZ,
+		SHA256:       c.archive.sha256,
+		CompressedAt: c.archive.compressedAt,
+		UploadedAt:   c.archive.uploadedAt,
 	}
 }
 
@@ -217,6 +265,7 @@ func (w *runWriter) newChunk(firstID MessageID) (int64, error) {
 		number:  number,
 		file:    chunkFileName(number),
 		path:    filepath.Join(w.dir, chunkFileName(number)),
+		owner:   w,
 		state:   chunkStateActive,
 		firstID: firstID,
 		f:       f,
@@ -315,9 +364,9 @@ func loadRuns(segmentsDir string) ([]*runWriter, error) {
 		}
 		dirty := false
 		for _, c := range w.chunks {
-			if _, err := os.Stat(c.path); err != nil {
+			if _, err := os.Stat(c.readPath()); err != nil {
 				c.missing = true
-				log.Printf("[photon-server] store: %s is listed in %s but is not on disk; its messages cannot be read", c.path, filepath.Join(w.dir, manifestName))
+				log.Printf("[photon-server] store: %s is listed in %s but is not on disk; its messages cannot be read", c.readPath(), filepath.Join(w.dir, manifestName))
 				continue
 			}
 			if c.state == chunkStateActive {
@@ -379,10 +428,11 @@ func parseManifest(dir, id string, data []byte) (*runWriter, error) {
 		if err != nil {
 			return nil, err
 		}
-		w.chunks = append(w.chunks, &chunk{
+		c := &chunk{
 			number:     number,
 			file:       e.File,
 			path:       filepath.Join(dir, e.File),
+			owner:      w,
 			state:      e.State,
 			extra:      cextra,
 			firstID:    e.FirstID,
@@ -391,7 +441,18 @@ func parseManifest(dir, id string, data []byte) (*runWriter, error) {
 			lastWrite:  e.LastWrite,
 			records:    e.Records,
 			bytes:      e.Bytes,
-		})
+			archive: chunkArchive{
+				fileZ:        e.FileZ,
+				bytesZ:       e.BytesZ,
+				sha256:       e.SHA256,
+				compressedAt: e.CompressedAt,
+				uploadedAt:   e.UploadedAt,
+			},
+		}
+		if e.FileZ != "" {
+			c.archive.zpath = filepath.Join(dir, e.FileZ)
+		}
+		w.chunks = append(w.chunks, c)
 	}
 	sort.Slice(w.chunks, func(i, j int) bool { return w.chunks[i].number < w.chunks[j].number })
 	return w, nil

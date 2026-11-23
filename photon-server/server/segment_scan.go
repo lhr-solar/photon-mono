@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 )
 
 // scanBufferBytes is the read buffer for each chunk or segment file.
@@ -39,25 +40,56 @@ func scanRuns(segmentsDir string, fn func(run string, id MessageID, writeUnix ui
 			continue
 		}
 		for _, c := range w.chunks {
-			if !c.plain() {
-				log.Printf("[photon-server] backfill: skipping %s, which is %q, not a plain chunk", c.path, c.state)
+			if !c.readable() {
+				log.Printf("[photon-server] backfill: skipping %s, which is %q, not a readable chunk", c.path, c.state)
 				continue
 			}
-			if _, err := os.Stat(c.path); err != nil {
-				log.Printf("[photon-server] backfill: skipping %s: %v", c.path, err)
+			if _, err := os.Stat(c.readPath()); err != nil {
+				log.Printf("[photon-server] backfill: skipping %s: %v", c.readPath(), err)
 				continue
-			}
-			limit := int64(-1)
-			if c.state == chunkStateSealed {
-				limit = c.bytes
 			}
 			run := name
-			_, err := scanRecordFile(c.path, 0, limit, scanBufferBytes, func(_ int64, id MessageID, writeUnix uint32, payload []byte) error {
+			deliver := func(_ int64, id MessageID, writeUnix uint32, payload []byte) error {
 				return fn(run, id, writeUnix, payload)
-			})
+			}
+			err := scanChunk(c, deliver)
+			if errors.Is(err, os.ErrNotExist) {
+				// The archiver may have compressed this chunk since the manifest was
+				// read, and removed its .seg file. Read the manifest again for the new file.
+				if fresh := chunkInManifest(segmentsDir, name, c.number); fresh != nil && fresh.readable() {
+					err = scanChunk(fresh, deliver)
+				}
+			}
 			if err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// scanChunk calls fn for the records of one chunk, read from its current file.
+// An active chunk is read to the end of its file; any other up to its size in the
+// manifest.
+func scanChunk(c *chunk, fn func(off int64, id MessageID, writeUnix uint32, payload []byte) error) error {
+	limit := int64(-1)
+	if c.state != chunkStateActive {
+		limit = c.bytes
+	}
+	_, err := scanRecordFile(c.readPath(), 0, limit, scanBufferBytes, fn)
+	return err
+}
+
+// chunkInManifest returns the chunk numbered number in a run's manifest, or nil
+// when the manifest cannot be read or has no such chunk.
+func chunkInManifest(segmentsDir, run string, number int) *chunk {
+	w := readRunManifest(segmentsDir, run)
+	if w == nil {
+		return nil
+	}
+	for _, c := range w.chunks {
+		if c.number == number {
+			return c
 		}
 	}
 	return nil
@@ -120,6 +152,9 @@ func scanSegmentFile(path string, fn func(id MessageID, writeUnix uint32, payloa
 // good records end. fn gets the record's offset; the payload is only valid during
 // the call. An error from fn stops the scan and is returned.
 func scanRecordFile(path string, start, limit int64, bufBytes int, fn func(off int64, id MessageID, writeUnix uint32, payload []byte) error) (int64, error) {
+	if strings.HasSuffix(path, chunkzExt) {
+		return scanChunkzFile(path, start, limit, bufBytes, fn)
+	}
 	f, err := openChunkFile(path)
 	if err != nil {
 		return start, err
@@ -137,6 +172,33 @@ func scanRecordFile(path string, start, limit int64, bufBytes int, fn func(off i
 	}
 
 	r := bufio.NewReaderSize(io.NewSectionReader(f, start, limit-start), bufBytes)
+	return scanRecordStream(r, start, limit, fn)
+}
+
+// scanChunkzFile is scanRecordFile for a compressed chunk. It reads the original
+// .seg bytes out of the .segz file, so the offsets are those of the .seg file.
+func scanChunkzFile(path string, start, limit int64, bufBytes int, fn func(off int64, id MessageID, writeUnix uint32, payload []byte) error) (int64, error) {
+	z, err := newChunkzReader(path, nil, nil)
+	if err != nil {
+		return start, err
+	}
+	defer z.Close()
+	if limit < 0 {
+		limit = z.size
+	}
+	if start >= limit {
+		return start, nil
+	}
+	if _, err := io.CopyN(io.Discard, z, start); err != nil {
+		return start, err
+	}
+	r := bufio.NewReaderSize(io.LimitReader(z, limit-start), bufBytes)
+	return scanRecordStream(r, start, limit, fn)
+}
+
+// scanRecordStream is the loop of scanRecordFile. r holds the bytes from start up
+// to limit.
+func scanRecordStream(r *bufio.Reader, start, limit int64, fn func(off int64, id MessageID, writeUnix uint32, payload []byte) error) (int64, error) {
 	off := start
 	header := make([]byte, frameHeaderBytes)
 	var payload []byte

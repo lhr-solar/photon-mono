@@ -58,6 +58,12 @@ const (
 // recording.
 const DefaultStoreMaxGB = 64
 
+// DefaultArchive is whether sealed chunks are compressed in the background.
+const DefaultArchive = true
+
+// DefaultRclone is the rclone program the archiver runs.
+const DefaultRclone = "rclone"
+
 // Config holds runtime configuration for the photon server.
 type Config struct {
 	Host             string
@@ -88,6 +94,9 @@ type Config struct {
 	CAN              CANConfig
 	Ingest           poolSizing    // sizes the ingest buffer pool
 	LiveSeconds      time.Duration // how far back the live ring for protocol v2 clients reaches
+	Archive          bool          // compress sealed chunks to .segz files in the background
+	ArchiveRemote    string        // rclone destination for the .segz files, e.g. sharepoint:photon/segments; empty = no upload
+	Rclone           string        // the rclone program used for uploads
 }
 
 // CANConfig is how the server decodes the car's CAN frames. It is set here, not
@@ -276,6 +285,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		CAN:              DefaultCANConfig(),
 		Ingest:           poolSizing{Rate: DefaultIngestRate, Latency: DefaultIngestLatency, Stall: DefaultIngestStall},
 		LiveSeconds:      DefaultLiveSeconds,
+		Archive:          DefaultArchive,
+		Rclone:           DefaultRclone,
 	}
 
 	// Environment variable fallbacks
@@ -401,6 +412,19 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 			cfg.LiveSeconds = d
 		}
 	}
+	if v := getenvFirst(getenv, "PHOTON_ARCHIVE"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("PHOTON_ARCHIVE: %w", err)
+		}
+		cfg.Archive = b
+	}
+	if v := getenvFirst(getenv, "PHOTON_ARCHIVE_REMOTE"); v != "" {
+		cfg.ArchiveRemote = v
+	}
+	if v := getenvFirst(getenv, "PHOTON_RCLONE"); v != "" {
+		cfg.Rclone = v
+	}
 
 	fs := flag.NewFlagSet("photon-server", flag.ContinueOnError)
 	fs.SetOutput(output)
@@ -430,6 +454,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var ingestRateFlag int
 	var ingestLatencyFlag, ingestStallFlag time.Duration
 	var liveSecondsFlag time.Duration
+	var archiveFlag bool
+	var archiveRemoteFlag, rcloneFlag string
 
 	fs.StringVar(&hostFlag, "host", cfg.Host, "Bind host/IP address (e.g. 0.0.0.0 for all interfaces, 127.0.0.1 for local only)")
 	fs.StringVar(&hostFlag, "bind", cfg.Host, "Alias for -host")
@@ -468,6 +494,9 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.DurationVar(&ingestLatencyFlag, "ingest-latency", cfg.Ingest.Latency, "hand a buffer to the decoder at most this long after its first batch")
 	fs.DurationVar(&ingestStallFlag, "ingest-stall", cfg.Ingest.Stall, "decoder stall the ingest pool absorbs before TCP pushes back")
 	fs.DurationVar(&liveSecondsFlag, "live-seconds", cfg.LiveSeconds, "how far back the live ring for protocol v2 clients reaches; a client that falls further behind gets a gap")
+	fs.BoolVar(&archiveFlag, "archive", cfg.Archive, "compress sealed chunks to .segz files in the background (env PHOTON_ARCHIVE)")
+	fs.StringVar(&archiveRemoteFlag, "archive-remote", cfg.ArchiveRemote, "rclone destination for the compressed chunks, e.g. sharepoint:photon/segments; empty = no upload (env PHOTON_ARCHIVE_REMOTE)")
+	fs.StringVar(&rcloneFlag, "rclone", cfg.Rclone, "rclone program used to upload compressed chunks (env PHOTON_RCLONE)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(output, "Usage of photon-server:\n")
@@ -502,6 +531,9 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -ingest-latency duration     max wait before a buffer goes to the decoder (default %s, env: PHOTON_INGEST_LATENCY)\n", DefaultIngestLatency)
 		fmt.Fprintf(output, "  -ingest-stall duration       decoder stall the pool absorbs (default %s, env: PHOTON_INGEST_STALL)\n", DefaultIngestStall)
 		fmt.Fprintf(output, "  -live-seconds duration       live ring window for protocol v2 clients (default %s, env: PHOTON_LIVE_SECONDS)\n", DefaultLiveSeconds)
+		fmt.Fprintf(output, "  -archive                     compress sealed chunks to .segz in the background (default %t, env: PHOTON_ARCHIVE)\n", true)
+		fmt.Fprintf(output, "  -archive-remote string       rclone destination for compressed chunks, empty = no upload (env: PHOTON_ARCHIVE_REMOTE)\n")
+		fmt.Fprintf(output, "  -rclone string               rclone program for uploads (default %q, env: PHOTON_RCLONE)\n", DefaultRclone)
 		fmt.Fprintf(output, "\nPHOTON_NO_BROWSER=1 starts the local UI without opening a browser.\n")
 	}
 
@@ -536,6 +568,9 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.InfluxQueries = influxQueriesFlag
 	cfg.Ingest = poolSizing{Rate: ingestRateFlag, Latency: ingestLatencyFlag, Stall: ingestStallFlag}
 	cfg.LiveSeconds = liveSecondsFlag
+	cfg.Archive = archiveFlag
+	cfg.ArchiveRemote = archiveRemoteFlag
+	cfg.Rclone = rcloneFlag
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
