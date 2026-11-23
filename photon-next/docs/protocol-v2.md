@@ -106,7 +106,7 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
 | `catalog` | S → C | sent after `hello_ack` and whenever the DBCs change; when decoding turns off, an empty one (`sha` `""`, no messages); see below |
 | `subscribe` | C → S | `signals`: catalog signal indexes. Replaces the previous set; `[]` stops live data |
 | `runs_list` | C → S | — |
-| `runs` | S → C | `runs`: `[{id, label, source, device, dbc_sha, start_ms, end_ms, live}]` |
+| `runs` | S → C | `runs`: `[{id, label, source, device, dbc_sha, start_ms, end_ms, live, rev}]`; `rev` changes when the run's history is rewritten (backfill) |
 | `tile_request` | C → S | `qid`, `run`, `signal`, `level`, `index` |
 | `tile_cancel` | C → S | `qid` |
 | `tile_error` | S → C | `qid`, `message` |
@@ -122,7 +122,7 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
 {"type": "catalog", "sha": "…", "buses": ["CarCAN", "DAqCAN"],
  "messages": [{"id": 1234, "name": "BPSPackData", "bus": 0,
    "signals": [{"index": 17, "name": "CellSumVoltage", "unit": "V", "min": 0, "max": 655.35,
-     "integer": false, "mux": -1}]}]}
+     "integer": false, "mux": -1, "period_ms": 100}]}]}
 ```
 - A signal's `index` is its position in the catalog and is stable for one `sha`.
   `TileKey.signalId` is this index; `TileKey.dbcHash` is `sha`.
@@ -131,6 +131,22 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
   without decimals). `mux` is the selector page the signal belongs to, or -1. `id` and `bus` are for
   showing where a message comes from.
 - No bit layouts, factors or offsets: the client never decodes CAN frames and never parses DBC files.
+- `period_ms`: how often the signal is normally sent (the DBC's cycle time, or a sensor group's sample
+  period), 0 when unknown. It is for drawing gaps, below.
+
+### Gaps and missing tiles
+- **No data** (car off, link down, rows dropped): the points are simply absent. Do not draw a line across a
+  hole: break the line when two neighbouring points are more than **3 × `period_ms`** apart (with
+  `period_ms` 0, more than 3 × the median spacing of that tile), and on a level > 0 also when more than **2
+  bucket widths** apart.
+- **Tile not here** (not received yet, `tile_error`): unknown, not empty. Draw that span from a coarser tile
+  the client already has, or show it as loading; retry after a `tile_error` with backoff (1 s, 2 s, 4 s, … up
+  to 30 s).
+- **Unsealed tiles** (the live edge): request them again until one arrives sealed. After a `Gap` (live data
+  skipped), request the tiles of the skipped span; their rows are in InfluxDB by then.
+- **Rewritten history:** a sealed tile never changes **for one `rev` of its run**. Keep `rev` in the cache
+  key (`TileKey` {session, rev, dbc hash, signal, level, index}); when `runs` shows a new `rev` for a run,
+  drop that run's cached tiles.
 
 ### Server rules
 - At most 4–8 InfluxDB queries run at once across all clients; cancelled ones are dropped.
