@@ -192,10 +192,22 @@ func TestHistoryFromRealInfluxDB(t *testing.T) {
 	checkRaw("integer", fetch(ii, 0, t0/tileSpanMS(0)), ii, wantIn)
 	checkRaw("muxed integer", fetch(mi, 0, t0/tileSpanMS(0)), mi, wantMux)
 
-	// Level 1: 100 ms buckets, each with the min, max and mean of its 10 frames.
-	tile := fetch(fi, 1, t0/tileSpanMS(1))
-	if tile.N != 5 || tile.Level != 1 {
-		t.Fatalf("level 1 tile holds %d buckets, want 5", tile.N)
+	// Level 1: 10 ms buckets with one frame each, so the min, max and mean are the frame's value.
+	ten := fetch(fi, 1, t0/tileSpanMS(1))
+	if ten.N != 50 || ten.Level != 1 {
+		t.Fatalf("level 1 tile holds %d buckets, want 50", ten.N)
+	}
+	for b := range 50 {
+		want := physical(fl, float64(b)*0.25)
+		if ten.TMS[b] != float64(t0+int64(b)*10) || ten.Min[b] != want || ten.Max[b] != want || ten.Mean[b] != want {
+			t.Fatalf("10 ms bucket %d = (%v, %v, %v, %v), want %v", b, ten.TMS[b], ten.Min[b], ten.Max[b], ten.Mean[b], want)
+		}
+	}
+
+	// Level 2: 100 ms buckets, each with the min, max and mean of its 10 frames.
+	tile := fetch(fi, 2, t0/tileSpanMS(2))
+	if tile.N != 5 || tile.Level != 2 {
+		t.Fatalf("level 2 tile holds %d buckets, want 5", tile.N)
 	}
 	for b := range 5 {
 		lo := float64(b) * 2.5

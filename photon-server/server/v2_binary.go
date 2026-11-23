@@ -105,8 +105,9 @@ const (
 	v2TileFixed    = 28 // the Tile payload before its samples: qid to n
 )
 
-// tileData is the samples of one tile, in time order. A level 0 tile has raw
-// values; a level above 0 has the min, max and mean of each bucket.
+// tileData holds the samples of one Tile piece, in time order, as the tile reader
+// fills them. A level 0 piece has raw values; a level above 0 has the min, max and
+// mean of each bucket.
 type tileData struct {
 	level uint8
 	index int64
@@ -125,39 +126,22 @@ func (t *tileData) values() [][]float64 {
 	return [][]float64{t.lo, t.hi, t.mean}
 }
 
-// encodeTile returns the Tile messages that answer request qid, one per piece. A
-// piece holds as many samples as fit in v2TilePieceMax bytes, and the last piece
-// has the last flag; a tile with no samples is one piece with n 0. The messages
-// have seq 0: the writer stamps it when it sends them.
-func encodeTile(qid, signal uint32, sealed bool, t *tileData) [][]byte {
+// tilePieceSamples is how many samples a Tile piece of level holds at most: as many
+// as fit in v2TilePieceMax bytes.
+func tilePieceSamples(level int) int {
 	cols := 2 // t_ms and raw
-	if t.level > 0 {
+	if level > 0 {
 		cols = 4 // t_ms, min, max, mean
 	}
-	perPiece := (v2TilePieceMax - v2HeaderSize - v2TileFixed) / (8 * cols)
-	n := len(t.tMS)
-	var msgs [][]byte
-	for off := 0; ; {
-		k := min(perPiece, n-off)
-		flags := byte(0)
-		if sealed {
-			flags |= v2TileSealed
-		}
-		last := off+k == n
-		if last {
-			flags |= v2TileLast
-		}
-		msgs = append(msgs, encodeTilePiece(qid, signal, flags, t, off, k))
-		if last {
-			return msgs
-		}
-		off += k
-	}
+	return (v2TilePieceMax - v2HeaderSize - v2TileFixed) / (8 * cols)
 }
 
-// encodeTilePiece returns the Tile message with samples off to off+n of t.
-func encodeTilePiece(qid, signal uint32, flags byte, t *tileData, off, n int) []byte {
+// encodeTilePiece returns the Tile message with the samples of t. They are the
+// samples of the tile from off on. The message has seq 0: the writer stamps it when
+// it sends it.
+func encodeTilePiece(qid, signal uint32, flags byte, off uint32, t *tileData) []byte {
 	arrays := append([][]float64{t.tMS}, t.values()...)
+	n := len(t.tMS)
 	size := v2HeaderSize + v2TileFixed + 8*n*len(arrays)
 	b := make([]byte, 0, size)
 	b = appendV2Header(b, v2MsgTile, size-v2HeaderSize)
@@ -165,10 +149,10 @@ func encodeTilePiece(qid, signal uint32, flags byte, t *tileData, off, n int) []
 	b = binary.LittleEndian.AppendUint32(b, signal)
 	b = append(b, t.level, flags, 0, 0) // level, flags, reserved
 	b = binary.LittleEndian.AppendUint64(b, uint64(t.index))
-	b = binary.LittleEndian.AppendUint32(b, uint32(off))
+	b = binary.LittleEndian.AppendUint32(b, off)
 	b = binary.LittleEndian.AppendUint32(b, uint32(n))
 	for _, a := range arrays {
-		for _, v := range a[off : off+n] {
+		for _, v := range a {
 			b = binary.LittleEndian.AppendUint64(b, math.Float64bits(v))
 		}
 	}

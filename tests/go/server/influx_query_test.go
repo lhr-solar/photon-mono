@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -222,6 +224,214 @@ func TestInfluxQueryCancelWhileWaiting(t *testing.T) {
 		t.Fatalf("%d queries reached InfluxDB, want 1", n)
 	}
 	unblock()
+}
+
+// The rows of a stream arrive in order, with the fields in the columns' order.
+func TestInfluxStreamRowsInOrder(t *testing.T) {
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) {
+		return http.StatusOK, "t_ns,v\n1,2\n3,4.5\n"
+	}}
+	q := newInfluxQuerier(newFakeQueryServer(t, f)+"/", "photon_dev", "tok", 2)
+	var got [][]string
+	err := q.stream(context.Background(), "SELECT 1", map[string]string{"run": "r1"}, []string{"t_ns", "v"}, func(row []string) error {
+		got = append(got, slices.Clone(row)) // the row is reused, so a copy is kept
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := [][]string{{"1", "2"}, {"3", "4.5"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("rows %q, want %q", got, want)
+	}
+	sent := f.queries()[0]
+	if sent.Path != "/api/v3/query_sql" || sent.Auth != "Bearer tok" || sent.DB != "photon_dev" ||
+		sent.SQL != "SELECT 1" || sent.Params["run"] != "r1" || sent.Format != "csv" {
+		t.Fatalf("query %+v", sent)
+	}
+}
+
+// A NULL field arrives as an empty string.
+func TestInfluxStreamNULLIsEmpty(t *testing.T) {
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) {
+		return http.StatusOK, "t_ns,v,w\n1795408093136000000,2,\n"
+	}}
+	q := newInfluxQuerier(newFakeQueryServer(t, f), "photon_dev", "", 2)
+	var got [][]string
+	err := q.stream(context.Background(), "SELECT 1", nil, []string{"t_ns", "v", "w"}, func(row []string) error {
+		got = append(got, slices.Clone(row))
+		return nil
+	})
+	if want := [][]string{{"1795408093136000000", "2", ""}}; err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("rows %q, err %v; want %q", got, err, want)
+	}
+}
+
+// An empty body is a query with no rows, and so is a reply with only its header.
+func TestInfluxStreamWithNoRows(t *testing.T) {
+	for _, body := range []string{"", "t_ns,v\n"} {
+		f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) { return http.StatusOK, body }}
+		q := newInfluxQuerier(newFakeQueryServer(t, f), "photon_dev", "", 2)
+		err := q.stream(context.Background(), "SELECT 1", nil, []string{"t_ns", "v"}, func([]string) error {
+			t.Fatalf("a row was delivered for reply %q", body)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("reply %q: %v", body, err)
+		}
+	}
+}
+
+// Replies that mean nothing is written yet give errNoData in a stream too; others are errors.
+func TestInfluxStreamNoDataReplies(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		noData bool
+	}{
+		{"missing column", http.StatusInternalServerError, `Schema error: No field named "tap". Valid fields are frame.v.`, true},
+		{"missing database", http.StatusNotFound, `{"error":"query error: database not found: photon_dev"}`, true},
+		{"missing table", http.StatusBadRequest, `Error during planning: table 'public.iox.frame' not found`, true},
+		{"server error", http.StatusInternalServerError, "boom", false},
+		{"other 404", http.StatusNotFound, "no such endpoint", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) { return tc.status, tc.body }}
+			q := newInfluxQuerier(newFakeQueryServer(t, f), "photon_dev", "", 2)
+			err := q.stream(context.Background(), "SELECT 1", nil, []string{"t_ns", "v"}, func([]string) error {
+				t.Fatal("a row was delivered for an error reply")
+				return nil
+			})
+			if got := errors.Is(err, errNoData); got != tc.noData {
+				t.Fatalf("error %v: no-data %v, want %v", err, got, tc.noData)
+			}
+			if err != nil && !tc.noData && !strings.Contains(err.Error(), tc.body) {
+				t.Fatalf("error %q does not carry the reply %q", err, tc.body)
+			}
+			want := uint64(1)
+			if tc.noData {
+				want = 0
+			}
+			if n := q.failures.Load(); n != want {
+				t.Fatalf("failures = %d, want %d", n, want)
+			}
+		})
+	}
+}
+
+// The header must name the columns asked for, and every row must have as many fields.
+func TestInfluxStreamChecksColumnsAndFieldCount(t *testing.T) {
+	for _, body := range []string{"t_ns,value\n1,2\n", "t_ns,v\n1,2,3\n"} {
+		f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) { return http.StatusOK, body }}
+		q := newInfluxQuerier(newFakeQueryServer(t, f), "photon_dev", "", 2)
+		err := q.stream(context.Background(), "SELECT 1", nil, []string{"t_ns", "v"}, func([]string) error {
+			t.Fatalf("a row was delivered for reply %q", body)
+			return nil
+		})
+		if err == nil {
+			t.Fatalf("reply %q was accepted", body)
+		}
+	}
+}
+
+// An error from fn stops the read and is returned as it is.
+func TestInfluxStreamFnErrorStopsTheRead(t *testing.T) {
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) {
+		return http.StatusOK, "t_ns,v\n1,1\n2,2\n3,3\n"
+	}}
+	q := newInfluxQuerier(newFakeQueryServer(t, f), "photon_dev", "", 2)
+	stop := errors.New("stop here")
+	calls := 0
+	err := q.stream(context.Background(), "SELECT 1", nil, []string{"t_ns", "v"}, func([]string) error {
+		calls++
+		return stop
+	})
+	if err != stop || calls != 1 {
+		t.Fatalf("err %v after %d rows, want the stop error after 1 row", err, calls)
+	}
+}
+
+// At most maxConcurrent streams reach InfluxDB at once; the rest wait for a slot.
+func TestInfluxStreamSemaphoreLimitsConcurrency(t *testing.T) {
+	release := make(chan struct{})
+	unblock := once(func() { close(release) })
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) {
+		<-release
+		return http.StatusOK, ""
+	}}
+	url := newFakeQueryServer(t, f)
+	t.Cleanup(unblock) // runs before the server closes, so blocked handlers return
+	q := newInfluxQuerier(url, "photon_dev", "", 2)
+
+	var wg sync.WaitGroup
+	var failed atomic.Int32
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := q.stream(context.Background(), "SELECT 1", nil, []string{"t_ns"}, func([]string) error { return nil })
+			if err != nil {
+				failed.Add(1)
+			}
+		}()
+	}
+	waitUntil(t, "two streams at InfluxDB", func() bool { return len(f.queries()) == 2 })
+	time.Sleep(100 * time.Millisecond)
+	if n := len(f.queries()); n != 2 {
+		t.Fatalf("%d streams reached InfluxDB at once, want 2", n)
+	}
+	if n := len(q.sem); n != 2 {
+		t.Fatalf("%d slots in use, want 2", n)
+	}
+	unblock()
+	wg.Wait()
+	if failed.Load() != 0 || len(f.queries()) != 3 {
+		t.Fatalf("%d failed, %d reached InfluxDB; want 0 failed and 3 reached", failed.Load(), len(f.queries()))
+	}
+}
+
+// Cancelling the context while the reply is still arriving ends the read, and is not
+// counted as a failure.
+func TestInfluxStreamCancelEndsTheRead(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "t_ns,v\n1,2\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done() // the reply never ends
+	}))
+	t.Cleanup(srv.Close)
+	q := newInfluxQuerier(srv.URL, "photon_dev", "", 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	seen := make(chan struct{}, 1)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- q.stream(ctx, "SELECT 1", nil, []string{"t_ns", "v"}, func([]string) error {
+			select {
+			case seen <- struct{}{}:
+			default:
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-seen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first row never arrived")
+	}
+	cancel()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("a cancelled read returned no error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read still waits after its context ended")
+	}
+	if n := q.failures.Load(); n != 0 {
+		t.Fatalf("%d failures, want 0 for a cancelled read", n)
+	}
 }
 
 func TestInfluxQueriesConfig(t *testing.T) {

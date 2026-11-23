@@ -175,7 +175,7 @@ func TestV2HelloAckThenCatalog(t *testing.T) {
 		t.Fatalf("hello_ack = %+v, want catalog_sha %q and live_run run-test", ack, cat.SHA)
 	}
 	wantFeatures := []string{"catalog", "live", "runs", "tiles"}
-	if !slices.Equal(ack.Levels, []int{0, 100, 1000, 10000, 60000, 600000}) || !slices.Equal(ack.Features, wantFeatures) {
+	if !slices.Equal(ack.Levels, []int{0, 10, 100, 1000, 10000, 60000, 600000}) || !slices.Equal(ack.Features, wantFeatures) {
 		t.Fatalf("levels %v features %v, want the tile levels and %v", ack.Levels, ack.Features, wantFeatures)
 	}
 

@@ -16,18 +16,18 @@ import (
 
 // tileLevelMS is the bucket size of each tile level, in ms. Level 0 is the raw
 // samples. hello_ack sends it, so the client has the same tile geometry.
-var tileLevelMS = []int{0, 100, 1000, 10000, 60000, 600000}
+var tileLevelMS = []int{0, 10, 100, 1000, 10000, 60000, 600000}
 
 const (
 	// tileRawSpanMS is how much time a level 0 tile covers.
-	tileRawSpanMS = 60000
+	tileRawSpanMS = 10000
 	// tileBuckets is how many buckets a tile above level 0 covers.
 	tileBuckets = 1024
 	// tileSealLagMS is how long before now a tile must end to be sealed: InfluxDB's
 	// write delay, with a margin.
 	tileSealLagMS = 2000
-	// tileRawRows caps the raw samples of one level 0 tile: 60 s at 3.3 kHz, far
-	// above any one signal's rate. A tile that reaches it is an error, not data.
+	// tileRawRows caps the raw samples of one level 0 tile: 10 s at 20 kHz, far above
+	// any one signal's rate. A tile that reaches it is an error, not data.
 	tileRawRows = 200000
 	// v2MaxTileRequests is how many tile requests one client may have in flight.
 	v2MaxTileRequests = 32
@@ -160,66 +160,160 @@ func (h *v2Hub) tileTarget(signal int64, level int, index int64) (tileSignal, st
 	return h.signals[signal], h.catalogSHA, nil
 }
 
-// fetchTile reads the samples of one tile from InfluxDB. A tile with nothing
-// written in its window has no samples.
-func (h *v2Hub) fetchTile(ctx context.Context, ts tileSignal, run string, level int, index int64) (*tileData, error) {
-	spanNS := tileSpanMS(level) * nsPerMs
-	fromNS := index * spanNS
-	sql, params := tileSQL(ts, run, level, fromNS, fromNS+spanNS)
-	t := &tileData{level: uint8(level), index: index}
-	rows, err := h.querier.query(ctx, sql, params)
-	if errors.Is(err, errNoData) {
-		return t, nil
+// tileSend hands one encoded piece of a tile on. last is set for the tile's last
+// piece. It returns false when the piece is not sent, which ends the tile.
+type tileSend func(piece []byte, last bool) bool
+
+// errTileStopped means a piece was not sent: the request was cancelled, or the
+// client is gone.
+var errTileStopped = errors.New("tile request stopped")
+
+// streamTile reads the samples of the tile of job from InfluxDB, and hands its
+// pieces to send as they fill. A tile with nothing written in its window is one
+// empty piece. It returns errTileStopped when send refuses a piece.
+func (h *v2Hub) streamTile(ctx context.Context, job tileJob, sealed bool, send tileSend) error {
+	spanNS := tileSpanMS(job.level) * nsPerMs
+	fromNS := job.index * spanNS
+	sql, params := tileSQL(job.ts, job.run, job.level, fromNS, fromNS+spanNS)
+	b := newTileBuilder(job, sealed, send)
+	err := h.querier.stream(ctx, sql, params, tileColumns(job.level), b.addRow)
+	if err != nil && !errors.Is(err, errNoData) {
+		return err
 	}
-	if err != nil {
-		return nil, err
-	}
-	if level == 0 && len(rows) >= tileRawRows {
-		// The LIMIT cut the tile short; an incomplete tile must not pass (or be
-		// cached) as a whole one. The client asks for a coarser level instead.
-		return nil, fmt.Errorf("tile has more than %d raw samples; use a coarser level", tileRawRows)
-	}
-	cols, dst := []string{"v"}, []*[]float64{&t.raw}
-	if level > 0 {
-		cols, dst = []string{"lo", "hi", "mean"}, []*[]float64{&t.lo, &t.hi, &t.mean}
-	}
-	for _, row := range rows {
-		ns, err := rowInt(row, "t_ns")
-		if err != nil {
-			return nil, err
-		}
-		t.tMS = append(t.tMS, nsToMS(ns))
-		for i, col := range cols {
-			v, err := rowFloat(row, col)
-			if err != nil {
-				return nil, err
-			}
-			*dst[i] = append(*dst[i], v)
-		}
-	}
-	toPhysical(t, ts.sig)
-	return t, nil
+	return b.end()
 }
 
-// toPhysical scales the values of t from raw to the signal's unit, as
-// dbc.Signal.Value does: v*factor + offset. With a negative factor the scaled min
-// and max trade places, so min is still the lower one.
-func toPhysical(t *tileData, sig *dbc.Signal) {
-	scale := func(v []float64) {
-		for i := range v {
-			v[i] = v[i]*sig.Factor + sig.Offset
+// tileBuilder turns the rows of one tile into its Tile pieces. It holds the samples
+// of one piece at a time, and sends the piece as soon as it is full.
+type tileBuilder struct {
+	qid, signal uint32
+	sig         *dbc.Signal // the signal, whose values are scaled to its unit
+	level       int
+	sealed      bool
+	perPiece    int        // samples in a full piece
+	cur         tileData   // the samples of the piece being filled; its slices are reused
+	off         int        // index in the tile of the first sample of cur
+	rows        int        // rows read from InfluxDB, NULL rows included
+	scratch     [3]float64 // the values of one row
+	send        tileSend
+}
+
+// newTileBuilder returns a builder for the tile of job. Its pieces are sealed when
+// sealed is set.
+func newTileBuilder(job tileJob, sealed bool, send tileSend) *tileBuilder {
+	n := tilePieceSamples(job.level)
+	b := &tileBuilder{
+		qid:      job.qid,
+		signal:   uint32(job.signal),
+		sig:      job.ts.sig,
+		level:    job.level,
+		sealed:   sealed,
+		perPiece: n,
+		cur:      tileData{level: uint8(job.level), index: job.index, tMS: make([]float64, 0, n)},
+		send:     send,
+	}
+	if job.level == 0 {
+		b.cur.raw = make([]float64, 0, n)
+	} else {
+		b.cur.lo = make([]float64, 0, n)
+		b.cur.hi = make([]float64, 0, n)
+		b.cur.mean = make([]float64, 0, n)
+	}
+	return b
+}
+
+// addRow reads one row of the reply: its time, then its values, in the order of
+// tileColumns. A row with a NULL value, or a value that is not finite, is no sample.
+func (b *tileBuilder) addRow(row []string) error {
+	b.rows++
+	if b.level == 0 && b.rows >= tileRawRows {
+		// The LIMIT cut the tile short, so an incomplete tile must not pass (or be
+		// cached) as a whole one. The client asks for a coarser level instead.
+		return fmt.Errorf("tile has more than %d raw samples; use a coarser level", tileRawRows)
+	}
+	ns, err := strconv.ParseInt(row[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("InfluxDB row has a bad time %q", row[0])
+	}
+	vals := b.scratch[:len(row)-1]
+	for i, s := range row[1:] {
+		if s == "" {
+			return nil // NULL: no sample at this time
+		}
+		if vals[i], err = strconv.ParseFloat(s, 64); err != nil {
+			return fmt.Errorf("InfluxDB row has a bad value %q", s)
 		}
 	}
-	if t.level == 0 {
-		scale(t.raw)
-		return
+	toPhysical(b.sig, b.level, vals)
+	for _, v := range vals {
+		if !finite(v) {
+			return nil
+		}
 	}
-	scale(t.lo)
-	scale(t.hi)
-	scale(t.mean)
-	if sig.Factor < 0 {
-		t.lo, t.hi = t.hi, t.lo
+	return b.add(nsToMS(ns), vals)
+}
+
+// add appends a sample to the piece being filled. A piece that becomes full is sent
+// at once.
+func (b *tileBuilder) add(tMS float64, vals []float64) error {
+	b.cur.tMS = append(b.cur.tMS, tMS)
+	if b.level == 0 {
+		b.cur.raw = append(b.cur.raw, vals[0])
+	} else {
+		b.cur.lo = append(b.cur.lo, vals[0])
+		b.cur.hi = append(b.cur.hi, vals[1])
+		b.cur.mean = append(b.cur.mean, vals[2])
 	}
+	if len(b.cur.tMS) == b.perPiece {
+		return b.flush(false)
+	}
+	return nil
+}
+
+// end sends the samples still held as the tile's last piece. The piece may be empty.
+func (b *tileBuilder) end() error {
+	return b.flush(true)
+}
+
+// flush sends the samples held as one piece, with the last flag when last is set,
+// and then empties the buffers for the next piece.
+func (b *tileBuilder) flush(last bool) error {
+	flags := byte(0)
+	if b.sealed {
+		flags |= v2TileSealed
+	}
+	if last {
+		flags |= v2TileLast
+	}
+	n := len(b.cur.tMS)
+	if !b.send(encodeTilePiece(b.qid, b.signal, flags, uint32(b.off), &b.cur), last) {
+		return errTileStopped
+	}
+	b.off += n
+	b.cur.tMS, b.cur.raw = b.cur.tMS[:0], b.cur.raw[:0]
+	b.cur.lo, b.cur.hi, b.cur.mean = b.cur.lo[:0], b.cur.hi[:0], b.cur.mean[:0]
+	return nil
+}
+
+// toPhysical scales the values of one row from raw to the signal's unit, as
+// dbc.Signal.Value does: v*factor + offset. vals is the raw value of a level 0 row,
+// or the raw min, max and mean of a bucket. With a negative factor the scaled min
+// and max trade places, so min is still the lower one.
+func toPhysical(sig *dbc.Signal, level int, vals []float64) {
+	for i := range vals {
+		vals[i] = vals[i]*sig.Factor + sig.Offset
+	}
+	if level > 0 && sig.Factor < 0 {
+		vals[0], vals[1] = vals[1], vals[0]
+	}
+}
+
+// tileColumns is the names of the columns of a tile query's reply, in order.
+func tileColumns(level int) []string {
+	if level == 0 {
+		return []string{"t_ns", "v"}
+	}
+	return []string{"t_ns", "lo", "hi", "mean"}
 }
 
 // tileSQL returns the query for the samples of one tile of ts in run, and its
@@ -355,19 +449,26 @@ func (c *v2Client) cancelTile(data []byte) {
 	}
 }
 
-// tileError queues a tile_error for qid.
+// tileError queues a tile_error for qid on the control queue. It is for a request
+// that has no pieces in flight.
 func (c *v2Client) tileError(qid uint32, msg string) {
-	c.enqueue(encodeV2(v2TileError{Type: "tile_error", QID: qid, Message: msg}))
+	c.enqueue(tileErrorMessage(qid, msg))
 }
 
-// serveTile answers one checked tile request, and sends nothing once ctx ends. A
-// sealed tile of the live run is kept in the hub's cache; any other tile is read
-// from InfluxDB every time.
+// tileErrorMessage returns the tile_error for qid.
+func tileErrorMessage(qid uint32, msg string) []byte {
+	return encodeV2(v2TileError{Type: "tile_error", QID: qid, Message: msg})
+}
+
+// serveTile answers one checked tile request, and sends nothing once ctx ends. The
+// tile is read from InfluxDB and sent piece by piece, as its rows arrive. A sealed
+// tile of the live run is kept in the hub's cache once it has been read whole; any
+// other tile is read from InfluxDB every time.
 func (c *v2Client) serveTile(ctx context.Context, me *tileRequest, job tileJob) {
 	defer me.cancel()
 	h := c.hub
-	// A request leaves the in-flight table just before its last message is queued,
-	// so a client that reads that message may reuse the qid at once.
+	// A request leaves the in-flight table just before its last piece is queued, so
+	// a client that reads that piece may reuse the qid at once.
 	finish := func() { c.finishTile(job.qid, me) }
 	defer finish()
 	live := h.liveRun()
@@ -384,39 +485,46 @@ func (c *v2Client) serveTile(ctx context.Context, me *tileRequest, job tileJob) 
 			return
 		}
 	}
-	t, err := h.fetchTile(ctx, job.ts, job.run, job.level, job.index)
-	if err != nil {
-		if ctx.Err() == nil {
-			finish()
-			c.tileError(job.qid, err.Error())
+
+	// kept holds the pieces as they are sent, for the cache. A tile that would not
+	// fit in the cache is not kept, so a request never holds more than the cache could.
+	var kept [][]byte
+	keptBytes := 0
+	send := func(piece []byte, last bool) bool {
+		if cacheable {
+			if keptBytes+len(piece) > tileCacheMax {
+				cacheable, kept = false, nil
+			} else {
+				keptBytes += len(piece)
+				// The cache keeps its own copies: the writer stamps seq into the piece it sends.
+				kept = append(kept, append([]byte(nil), piece...))
+			}
 		}
+		if last {
+			// The tile has been read whole, so it is cached before its last piece is
+			// queued: a client that reads that piece can ask for the tile at once.
+			if cacheable {
+				h.tiles.put(live, key, endMS, kept, nowMS)
+			}
+			h.tilesServed.Add(1)
+			finish()
+		}
+		return c.enqueueTile(ctx, outMsg{typ: wsBinary, data: piece})
+	}
+	err := h.streamTile(ctx, job, sealed, send)
+	if err == nil || errors.Is(err, errTileStopped) || ctx.Err() != nil {
 		return
 	}
-	msgs := encodeTile(job.qid, uint32(job.signal), sealed, t)
-	if cacheable {
-		// The cache keeps its own copies: the writer stamps seq into the messages it sends.
-		h.tiles.put(live, key, endMS, cloneMessages(msgs), nowMS)
-	}
-	h.tilesServed.Add(1)
-	c.sendPieces(ctx, msgs, finish)
-}
-
-// sendPieces queues the pieces of a tile, each through the live queue, so live
-// frames can go between them. beforeLast runs just before the last piece is queued.
-func (c *v2Client) sendPieces(ctx context.Context, msgs [][]byte, beforeLast func()) {
-	for i, m := range msgs {
-		if i == len(msgs)-1 {
-			beforeLast()
-		}
-		if !c.enqueueTile(ctx, outMsg{typ: wsBinary, data: m}) {
-			return
-		}
-	}
+	// The read failed, and some pieces may already be queued. The error goes through
+	// the live queue, behind them, so the client has read those pieces before it
+	// reads the error and drops them.
+	finish()
+	_ = c.enqueueTile(ctx, outMsg{typ: wsText, data: tileErrorMessage(job.qid, err.Error())})
 }
 
 // sendCached queues cached pieces with the request's qid in them. Each piece is
-// copied first, so the cached one is never changed. beforeLast runs just before
-// the last piece is queued.
+// copied first, so the cached one is never changed. beforeLast runs just before the
+// last piece is queued.
 func (c *v2Client) sendCached(ctx context.Context, qid uint32, msgs [][]byte, beforeLast func()) {
 	for i, m := range msgs {
 		if i == len(msgs)-1 {
@@ -430,8 +538,9 @@ func (c *v2Client) sendCached(ctx context.Context, qid uint32, msgs [][]byte, be
 	}
 }
 
-// enqueueTile queues one Tile piece on the live queue, waiting for room. It returns
-// false, without queueing, once ctx ends or the client is done.
+// enqueueTile queues one message on the live queue, waiting for room. It returns
+// false, without queueing, once ctx ends or the client is done. A tile piece goes
+// this way so that a cancelled request sends nothing more once it has ended.
 func (c *v2Client) enqueueTile(ctx context.Context, m outMsg) bool {
 	if ctx.Err() != nil {
 		return false
@@ -444,13 +553,4 @@ func (c *v2Client) enqueueTile(ctx context.Context, m outMsg) bool {
 	case <-c.done:
 		return false
 	}
-}
-
-// cloneMessages returns a copy of each message.
-func cloneMessages(msgs [][]byte) [][]byte {
-	out := make([][]byte, len(msgs))
-	for i, m := range msgs {
-		out[i] = append([]byte(nil), m...)
-	}
-	return out
 }

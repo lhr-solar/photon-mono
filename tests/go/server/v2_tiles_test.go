@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,7 +31,13 @@ func newTileHub(t *testing.T, fake *fakeQueries, live func() string) *v2Hub {
 // newTileHubOn is newTileHub on the catalog cat.
 func newTileHubOn(t *testing.T, fake *fakeQueries, live func() string, cat *dbc.Catalog) *v2Hub {
 	t.Helper()
-	q := newInfluxQuerier(newFakeQueryServer(t, fake), "photon_test", "", 6)
+	return newTileHubURL(t, newFakeQueryServer(t, fake), live, cat)
+}
+
+// newTileHubURL is newTileHubOn with history from the InfluxDB at url.
+func newTileHubURL(t *testing.T, url string, live func() string, cat *dbc.Catalog) *v2Hub {
+	t.Helper()
+	q := newInfluxQuerier(url, "photon_test", "", 6)
 	h := newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), live, newLiveRing(liveRingMinFrames), q)
 	h.SetCatalog(cat)
 	return h
@@ -54,14 +63,35 @@ func requestTile(t *testing.T, conn *wsConn, qid uint32, run string, signal int6
 	sendV2(t, conn, map[string]any{"type": "tile_request", "qid": qid, "run": run, "signal": signal, "level": level, "index": index})
 }
 
-// readTile reads the pieces that answer qid, up to the one with the last flag.
+// readTile reads the pieces that answer qid, up to the one with the last flag. A
+// tile_error for qid fails the test.
 func readTile(t *testing.T, conn *wsConn, qid uint32) []v2Tile {
+	t.Helper()
+	pieces, msg := readTileReply(t, conn, qid)
+	if msg != "" {
+		t.Fatalf("tile %d failed: %s", qid, msg)
+	}
+	return pieces
+}
+
+// readTileReply reads the messages that answer qid, up to the piece with the last
+// flag or a tile_error. It returns the pieces read, and the message of the tile_error
+// when there is one.
+func readTileReply(t *testing.T, conn *wsConn, qid uint32) ([]v2Tile, string) {
 	t.Helper()
 	var pieces []v2Tile
 	for {
 		typ, data := readAny(t, conn)
 		if typ == wsText {
-			t.Fatalf("got text %s while reading tile %d", data, qid)
+			var e struct {
+				Type    string `json:"type"`
+				QID     uint32 `json:"qid"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(data, &e); err != nil || e.Type != "tile_error" || e.QID != qid {
+				t.Fatalf("got text %s while reading tile %d", data, qid)
+			}
+			return pieces, e.Message
 		}
 		piece, err := decodeTile(data)
 		if err != nil {
@@ -72,9 +102,31 @@ func readTile(t *testing.T, conn *wsConn, qid uint32) []v2Tile {
 		}
 		pieces = append(pieces, piece)
 		if piece.Last {
-			return pieces
+			return pieces, ""
 		}
 	}
+}
+
+// newPausingQueryServer serves one query. It writes head and flushes it, then waits
+// until release is closed or the query's context ends; if released it writes tail.
+// The returned channel is closed when the handler returns.
+func newPausingQueryServer(t *testing.T, head, tail string, release <-chan struct{}) (string, <-chan struct{}) {
+	t.Helper()
+	returned := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(returned)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, head)
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = io.WriteString(w, tail)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, returned
 }
 
 // joinTile checks that the pieces come in order, with the last flag only on the
@@ -179,13 +231,25 @@ func wantTileSQL(ts tileSignal, level int, fromNS, toNS int64) string {
 		tileLevelMS[level], name, filter)
 }
 
-// rawRows is n level 0 rows of the query reply: one sample per ms from baseNS, valued 0 to n-1.
+// rawRows is the CSV reply to a level 0 tile query of n rows: one sample per ms from
+// baseNS, valued 0 to n-1.
 func rawRows(n int, baseNS int64) string {
+	return "t_ns,v\n" + rawLines(baseNS, 0, n)
+}
+
+// rawLines is the CSV rows of the level 0 samples from to to-1, one per ms from
+// baseNS, each valued by its index.
+func rawLines(baseNS int64, from, to int) string {
 	var b strings.Builder
-	for k := range n {
-		fmt.Fprintf(&b, `{"t_ns":%d,"v":%d}`+"\n", baseNS+int64(k)*nsPerMs, k)
+	for k := from; k < to; k++ {
+		fmt.Fprintf(&b, "%d,%d\n", baseNS+int64(k)*nsPerMs, k)
 	}
 	return b.String()
+}
+
+// rollupReply is the CSV reply to a rollup tile query, with rows as its data lines.
+func rollupReply(rows string) string {
+	return "t_ns,lo,hi,mean\n" + rows
 }
 
 // runsReply is the runs reply as the tests read it.
@@ -306,33 +370,32 @@ func TestTileRawSamplesOfAPlainSignal(t *testing.T) {
 // A muxed signal's query also asks for its page (the tap).
 func TestTileRollupOfAMuxedSignal(t *testing.T) {
 	signal, ts := muxSignal(t)
-	index := pastIndex(2)
-	from, to := tileBounds(2, index)
+	index := pastIndex(3)
+	from, to := tileBounds(3, index)
 	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) {
-		return http.StatusOK,
-			fmt.Sprintf(`{"t_ns":%d,"lo":1,"hi":9,"mean":5.5}`+"\n", from) +
-				fmt.Sprintf(`{"t_ns":%d,"lo":2,"hi":8,"mean":5}`+"\n", from+1000*nsPerMs)
+		return http.StatusOK, rollupReply(
+			fmt.Sprintf("%d,1,9,5.5\n", from) + fmt.Sprintf("%d,2,8,5\n", from+1000*nsPerMs))
 	}}
 	conn := tileConn(t, newTileHub(t, f, fixedLive(tileTestRun)))
 
-	requestTile(t, conn, 8, "run-old", signal, 2, index)
+	requestTile(t, conn, 8, "run-old", signal, 3, index)
 	tile := joinTile(t, readTile(t, conn, 8))
 
 	q := f.queries()[0]
-	if q.SQL != wantTileSQL(ts, 2, from, to) {
-		t.Fatalf("SQL\n%s\nwant\n%s", q.SQL, wantTileSQL(ts, 2, from, to))
+	if q.SQL != wantTileSQL(ts, 3, from, to) {
+		t.Fatalf("SQL\n%s\nwant\n%s", q.SQL, wantTileSQL(ts, 3, from, to))
 	}
 	if q.Params["tap"] != strconv.Itoa(int(ts.sig.Mux)) {
 		t.Fatalf("tap %q, want %d", q.Params["tap"], ts.sig.Mux)
 	}
 	min0, max0 := physicalRange(ts, 1, 9)
 	min1, max1 := physicalRange(ts, 2, 8)
-	if tile.Level != 2 || tile.Index != index || !tile.Sealed ||
+	if tile.Level != 3 || tile.Index != index || !tile.Sealed ||
 		!slices.Equal(tile.Min, []float64{min0, min1}) || !slices.Equal(tile.Max, []float64{max0, max1}) ||
 		!slices.Equal(tile.Mean, []float64{physical(ts, 5.5), physical(ts, 5)}) {
 		t.Fatalf("tile %+v", tile)
 	}
-	// Level 2 buckets are 1000 ms apart.
+	// Level 3 buckets are 1000 ms apart.
 	if !slices.Equal(tile.TMS, []float64{float64(from / nsPerMs), float64(from/nsPerMs) + 1000}) {
 		t.Fatalf("t_ms %v", tile.TMS)
 	}
@@ -412,8 +475,8 @@ func TestTileRequestsThatAreRefused(t *testing.T) {
 		message string
 	}{
 		{1, 1 << 30, 0, 0, "unknown signal"},
-		{2, 0, 6, 0, "level 6 is not in 0 to 5"},
-		{3, 0, -1, 0, "level -1 is not in 0 to 5"},
+		{2, 0, 7, 0, "level 7 is not in 0 to 6"},
+		{3, 0, -1, 0, "level -1 is not in 0 to 6"},
 		{4, 0, 0, -1, "tile index -1 is out of range"},
 		{5, 0, 0, 1 << 62, "is out of range"},
 	} {
@@ -646,20 +709,29 @@ func TestTileQIDIsFreeWhenTheAnswerEnds(t *testing.T) {
 	}
 }
 
-// encodeTile splits a long tile into pieces of at most 64 KiB, and an empty tile is
-// one piece with no samples.
-func TestEncodeTilePiecesFitTheLimit(t *testing.T) {
+// A tile built sample by sample is cut into pieces of at most 64 KiB: each piece
+// full but the last, with the offsets running on and the last flag only on the last.
+// An empty tile is one piece with no samples.
+func TestTilePiecesFitTheLimit(t *testing.T) {
 	for _, level := range []int{0, 2} {
 		const n = 10000
-		td := &tileData{level: uint8(level), index: 7, tMS: make([]float64, n)}
-		if level == 0 {
-			td.raw = make([]float64, n)
-		} else {
-			td.lo, td.hi, td.mean = make([]float64, n), make([]float64, n), make([]float64, n)
+		var pieces [][]byte
+		send := func(piece []byte, last bool) bool { pieces = append(pieces, piece); return true }
+		b := newTileBuilder(tileJob{qid: 9, signal: 3, level: level}, true, send)
+		vals := make([]float64, 1)
+		if level > 0 {
+			vals = make([]float64, 3)
 		}
-		msgs := encodeTile(9, 3, true, td)
+		for i := range n {
+			if err := b.add(float64(i), vals); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := b.end(); err != nil {
+			t.Fatal(err)
+		}
 		total := uint32(0)
-		for i, m := range msgs {
+		for i, m := range pieces {
 			if len(m) > v2TilePieceMax {
 				t.Fatalf("level %d piece %d is %d bytes, over %d", level, i, len(m), v2TilePieceMax)
 			}
@@ -667,7 +739,7 @@ func TestEncodeTilePiecesFitTheLimit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if piece.Offset != total || piece.Last != (i == len(msgs)-1) || !piece.Sealed || piece.Signal != 3 || piece.QID != 9 {
+			if piece.Offset != total || piece.Last != (i == len(pieces)-1) || !piece.Sealed || piece.Signal != 3 || piece.QID != 9 {
 				t.Fatalf("level %d piece %d = %+v", level, i, piece)
 			}
 			total += piece.N
@@ -676,7 +748,14 @@ func TestEncodeTilePiecesFitTheLimit(t *testing.T) {
 			t.Fatalf("level %d pieces hold %d samples, want %d", level, total, n)
 		}
 	}
-	empty := encodeTile(1, 1, false, &tileData{})
+	var empty [][]byte
+	eb := newTileBuilder(tileJob{qid: 1, signal: 1}, false, func(piece []byte, last bool) bool {
+		empty = append(empty, piece)
+		return true
+	})
+	if err := eb.end(); err != nil {
+		t.Fatal(err)
+	}
 	if len(empty) != 1 {
 		t.Fatalf("empty tile is %d pieces, want 1", len(empty))
 	}
@@ -699,15 +778,27 @@ func mapKeys(m map[string]string) []string {
 func TestTileAtRawLimitIsTileError(t *testing.T) {
 	signal, _ := plainSignal(t)
 	var body strings.Builder
+	body.WriteString("t_ns,v\n")
 	for i := 0; i < tileRawRows; i++ {
-		fmt.Fprintf(&body, "{\"t_ns\":%d,\"v\":1}\n", 1_700_000_000_000_000_000+int64(i))
+		fmt.Fprintf(&body, "%d,1\n", 1_700_000_000_000_000_000+int64(i))
 	}
 	rows := body.String()
 	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) { return http.StatusOK, rows }}
 	conn := tileConn(t, newTileHub(t, f, fixedLive(tileTestRun)))
 	requestTile(t, conn, 11, "run-old", signal, 0, pastIndex(0))
-	if msg := readTileError(t, conn, 11); !strings.Contains(msg, "more than") {
+	pieces, msg := readTileReply(t, conn, 11)
+	if !strings.Contains(msg, "more than") {
 		t.Fatalf("tile_error %q, want the raw limit named", msg)
+	}
+	// The error comes at the row that reaches the limit, so the samples before it were
+	// sent as whole pieces, and then the error.
+	if want := (tileRawRows - 1) / tilePieceSamples(0); len(pieces) != want {
+		t.Fatalf("%d pieces before the error, want %d", len(pieces), want)
+	}
+	for i, p := range pieces {
+		if p.N != uint32(tilePieceSamples(0)) || p.Last {
+			t.Fatalf("piece %d holds %d samples, want a whole piece", i, p.N)
+		}
 	}
 }
 
@@ -742,13 +833,13 @@ func TestTileScalesNegativeFactor(t *testing.T) {
 		t.Fatalf("level 0 values %v, want 10 9.5 9", raw.Raw)
 	}
 
-	index2 := pastIndex(2)
-	from2, _ := tileBounds(2, index2)
+	index2 := pastIndex(3)
+	from2, _ := tileBounds(3, index2)
 	f2 := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) {
-		return http.StatusOK, fmt.Sprintf(`{"t_ns":%d,"lo":2,"hi":8,"mean":5}`+"\n", from2)
+		return http.StatusOK, rollupReply(fmt.Sprintf("%d,2,8,5\n", from2))
 	}}
 	conn2 := tileConn(t, newTileHubOn(t, f2, fixedLive(tileTestRun), cat))
-	requestTile(t, conn2, 2, "run-old", signal, 2, index2)
+	requestTile(t, conn2, 2, "run-old", signal, 3, index2)
 	bucket := joinTile(t, readTile(t, conn2, 2))
 	if !slices.Equal(bucket.Min, []float64{6}) || !slices.Equal(bucket.Max, []float64{9}) || !slices.Equal(bucket.Mean, []float64{7.5}) {
 		t.Fatalf("level 2 min %v, max %v, mean %v; want 6, 9, 7.5", bucket.Min, bucket.Max, bucket.Mean)
@@ -772,6 +863,227 @@ func TestLiveRunTileCacheHoldsScaledValues(t *testing.T) {
 	second := joinTile(t, readTile(t, conn, 2))
 	if !slices.Equal(first.Raw, want) || !slices.Equal(second.Raw, want) {
 		t.Fatalf("values %v then %v, want %v both times", first.Raw, second.Raw, want)
+	}
+	if n := len(f.queries()); n != 1 {
+		t.Fatalf("%d queries, want 1: the second request should come from the cache", n)
+	}
+}
+
+// A tile is streamed: its first piece reaches the client while InfluxDB is still
+// writing the reply, not after the whole tile has been read.
+func TestTileStreamsBeforeTheQueryEnds(t *testing.T) {
+	signal, ts := plainSignal(t)
+	index := pastIndex(0)
+	from, _ := tileBounds(0, index)
+	const first, total = 5000, 9000
+	release := make(chan struct{})
+	unblock := once(func() { close(release) })
+	url, _ := newPausingQueryServer(t, "t_ns,v\n"+rawLines(from, 0, first), rawLines(from, first, total), release)
+	t.Cleanup(unblock)
+	conn := tileConn(t, newTileHubURL(t, url, fixedLive(tileTestRun), loadTestCatalog(t)))
+
+	requestTile(t, conn, 7, "run-old", signal, 0, index)
+	typ, data := readAny(t, conn) // read before the release, so the reply is not finished
+	if typ != wsBinary {
+		t.Fatalf("got text %s, want the first piece", data)
+	}
+	head, err := decodeTile(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.QID != 7 || head.Offset != 0 || head.N != uint32(tilePieceSamples(0)) || head.Last {
+		t.Fatalf("first piece %+v, want a whole piece with more to come", head)
+	}
+
+	unblock()
+	tile := joinTile(t, append([]v2Tile{head}, readTile(t, conn, 7)...))
+	if tile.N != total || !tile.Sealed {
+		t.Fatalf("tile holds %d samples, sealed %v; want %d, sealed", tile.N, tile.Sealed, total)
+	}
+	for k := range total {
+		if tile.TMS[k] != float64(from/nsPerMs+int64(k)) || tile.Raw[k] != physical(ts, float64(k)) {
+			t.Fatalf("sample %d = (%v, %v)", k, tile.TMS[k], tile.Raw[k])
+		}
+	}
+}
+
+// A bad row after some pieces were sent ends the tile with a tile_error behind them.
+// That tile is not cached, so the next request reads InfluxDB again.
+func TestTileBadRowMidReplyIsTileError(t *testing.T) {
+	signal, _ := plainSignal(t)
+	index := pastIndex(0)
+	from, _ := tileBounds(0, index)
+	var calls atomic.Int32
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) {
+		if calls.Add(1) > 1 {
+			return http.StatusOK, rawRows(3, from)
+		}
+		return http.StatusOK, "t_ns,v\n" + rawLines(from, 0, 5000) + fmt.Sprintf("%d,oops\n", from+5000*nsPerMs)
+	}}
+	conn := tileConn(t, newTileHub(t, f, fixedLive(tileTestRun)))
+
+	requestTile(t, conn, 1, tileTestRun, signal, 0, index)
+	pieces, msg := readTileReply(t, conn, 1)
+	if len(pieces) != 1 || !strings.Contains(msg, "bad value") {
+		t.Fatalf("%d pieces then error %q, want one piece then a bad value error", len(pieces), msg)
+	}
+	requestTile(t, conn, 2, tileTestRun, signal, 0, index)
+	if again := joinTile(t, readTile(t, conn, 2)); again.N != 3 || len(f.queries()) != 2 {
+		t.Fatalf("second request holds %d samples after %d queries; want 3 after 2", again.N, len(f.queries()))
+	}
+}
+
+// A connection that breaks mid-reply ends the tile with a tile_error behind the
+// pieces already sent, and the tile is not cached.
+func TestTileConnectionBreakMidReplyIsTileError(t *testing.T) {
+	signal, _ := plainSignal(t)
+	index := pastIndex(0)
+	from, _ := tileBounds(0, index)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if calls.Add(1) > 1 {
+			_, _ = io.WriteString(w, rawRows(3, from))
+			return
+		}
+		_, _ = io.WriteString(w, "t_ns,v\n"+rawLines(from, 0, 5000))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler) // the connection breaks before the reply ends
+	}))
+	t.Cleanup(srv.Close)
+	conn := tileConn(t, newTileHubURL(t, srv.URL, fixedLive(tileTestRun), loadTestCatalog(t)))
+
+	requestTile(t, conn, 1, tileTestRun, signal, 0, index)
+	pieces, msg := readTileReply(t, conn, 1)
+	if len(pieces) != 1 || msg == "" {
+		t.Fatalf("%d pieces then error %q, want one piece then an error", len(pieces), msg)
+	}
+	requestTile(t, conn, 2, tileTestRun, signal, 0, index)
+	if again := joinTile(t, readTile(t, conn, 2)); again.N != 3 || calls.Load() != 2 {
+		t.Fatalf("second request holds %d samples after %d queries; want 3 after 2", again.N, calls.Load())
+	}
+}
+
+// tile_cancel while the reply is still arriving stops the read: the query gives up,
+// and nothing more is sent for the request.
+func TestTileCancelMidReplyStopsTheRead(t *testing.T) {
+	signal, _ := plainSignal(t)
+	index := pastIndex(0)
+	from, _ := tileBounds(0, index)
+	release := make(chan struct{})
+	unblock := once(func() { close(release) })
+	url, stopped := newPausingQueryServer(t, "t_ns,v\n"+rawLines(from, 0, 5000), rawLines(from, 5000, 9000), release)
+	t.Cleanup(unblock)
+	conn := tileConn(t, newTileHubURL(t, url, fixedLive(tileTestRun), loadTestCatalog(t)))
+
+	requestTile(t, conn, 5, "run-old", signal, 0, index)
+	typ, data := readAny(t, conn)
+	if typ != wsBinary {
+		t.Fatalf("got text %s, want the first piece", data)
+	}
+	if piece, err := decodeTile(data); err != nil || piece.QID != 5 || piece.Last {
+		t.Fatalf("first piece %+v, %v", piece, err)
+	}
+	sendV2(t, conn, map[string]any{"type": "tile_cancel", "qid": 5})
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the query still reads after tile_cancel")
+	}
+	sendV2(t, conn, map[string]any{"type": "ping", "t_ms": 3})
+	var pong struct {
+		Type string `json:"type"`
+	}
+	readInto(t, conn, &pong)
+	if pong.Type != "pong" {
+		t.Fatalf("got %s after tile_cancel, want the pong and no more pieces", pong.Type)
+	}
+	expectNothingElse(t, conn)
+}
+
+// A row whose value is NULL, or not finite, is no sample, at raw level and in a
+// rollup; the other rows are kept, in order.
+func TestTileSkipsNULLAndNonFiniteRows(t *testing.T) {
+	signal, ts := plainSignal(t)
+	index := pastIndex(0)
+	from, _ := tileBounds(0, index)
+	raw := fmt.Sprintf("t_ns,v\n%d,1\n%d,\n%d,NaN\n%d,3\n", from, from+nsPerMs, from+2*nsPerMs, from+3*nsPerMs)
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) { return http.StatusOK, raw }}
+	conn := tileConn(t, newTileHub(t, f, fixedLive(tileTestRun)))
+	requestTile(t, conn, 1, "run-old", signal, 0, index)
+	tile := joinTile(t, readTile(t, conn, 1))
+	ms := from / nsPerMs
+	if !slices.Equal(tile.TMS, []float64{float64(ms), float64(ms + 3)}) ||
+		!slices.Equal(tile.Raw, []float64{physical(ts, 1), physical(ts, 3)}) {
+		t.Fatalf("samples %v at %v; want the rows with values 1 and 3", tile.Raw, tile.TMS)
+	}
+
+	index3 := pastIndex(3)
+	from3, _ := tileBounds(3, index3)
+	rollup := rollupReply(fmt.Sprintf("%d,1,2,1.5\n%d,,,\n%d,3,4,3.5\n",
+		from3, from3+1000*nsPerMs, from3+2000*nsPerMs))
+	f3 := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) { return http.StatusOK, rollup }}
+	conn3 := tileConn(t, newTileHub(t, f3, fixedLive(tileTestRun)))
+	requestTile(t, conn3, 2, "run-old", signal, 3, index3)
+	buckets := joinTile(t, readTile(t, conn3, 2))
+	min0, max0 := physicalRange(ts, 1, 2)
+	min1, max1 := physicalRange(ts, 3, 4)
+	mb := from3 / nsPerMs
+	if !slices.Equal(buckets.TMS, []float64{float64(mb), float64(mb + 2000)}) ||
+		!slices.Equal(buckets.Min, []float64{min0, min1}) || !slices.Equal(buckets.Max, []float64{max0, max1}) ||
+		!slices.Equal(buckets.Mean, []float64{physical(ts, 1.5), physical(ts, 3.5)}) {
+		t.Fatalf("buckets %+v, want the two whole buckets", buckets)
+	}
+}
+
+// A level 0 tile spans 10 s, and a level 1 bucket is 10 ms, so a level 1 tile spans
+// 1024 buckets of 10 ms, which is 10.24 s. Each query covers that window.
+func TestTileSpansAndTheTenMillisecondLevel(t *testing.T) {
+	signal, _ := plainSignal(t)
+	index := int64(123_456)
+	f := &fakeQueries{}
+	conn := tileConn(t, newTileHub(t, f, fixedLive(tileTestRun)))
+	requestTile(t, conn, 1, "run-old", signal, 0, index)
+	readTile(t, conn, 1)
+	requestTile(t, conn, 2, "run-old", signal, 1, index)
+	readTile(t, conn, 2)
+
+	qs := f.queries()
+	raw := index * 10_000 * nsPerMs
+	if want := fmt.Sprintf("time >= to_timestamp_nanos(%d) AND time < to_timestamp_nanos(%d)", raw, raw+10_000*nsPerMs); !strings.Contains(qs[0].SQL, want) {
+		t.Fatalf("level 0 SQL %s, want the window %q", qs[0].SQL, want)
+	}
+	ten := index * 10_240 * nsPerMs
+	want := fmt.Sprintf("time >= to_timestamp_nanos(%d) AND time < to_timestamp_nanos(%d)", ten, ten+10_240*nsPerMs)
+	if !strings.Contains(qs[1].SQL, "INTERVAL '10 milliseconds'") || !strings.Contains(qs[1].SQL, want) {
+		t.Fatalf("level 1 SQL %s, want 10 ms buckets over %q", qs[1].SQL, want)
+	}
+}
+
+// A sealed tile of the live run that takes several pieces is cached once, and the
+// second request replays the same pieces with its own qid.
+func TestLiveRunMultiPieceTileIsCachedOnce(t *testing.T) {
+	signal, _ := plainSignal(t)
+	index := pastIndex(0)
+	from, _ := tileBounds(0, index)
+	const n = 10000
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) { return http.StatusOK, rawRows(n, from) }}
+	conn := tileConn(t, newTileHub(t, f, fixedLive(tileTestRun)))
+
+	requestTile(t, conn, 1, tileTestRun, signal, 0, index)
+	first := readTile(t, conn, 1)
+	requestTile(t, conn, 2, tileTestRun, signal, 0, index)
+	second := readTile(t, conn, 2)
+
+	if len(first) != 3 || len(second) != len(first) {
+		t.Fatalf("%d and %d pieces, want 3 each", len(first), len(second))
+	}
+	for i := range first {
+		a, b := first[i], second[i]
+		if b.QID != 2 || b.Offset != a.Offset || b.N != a.N || b.Last != a.Last || b.Sealed != a.Sealed ||
+			!slices.Equal(b.TMS, a.TMS) || !slices.Equal(b.Raw, a.Raw) {
+			t.Fatalf("piece %d differs from the first request's: %+v, want %+v", i, b, a)
+		}
 	}
 	if n := len(f.queries()); n != 1 {
 		t.Fatalf("%d queries, want 1: the second request should come from the cache", n)
