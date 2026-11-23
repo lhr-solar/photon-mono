@@ -51,6 +51,8 @@ type Group struct {
 // It is built once from the DBCs at startup.
 type Catalog struct {
 	Messages []*Message
+	Buses    []string            // the bus names, sorted: one per DBC file
+	SHA      string              // SHA-1 hex of the DBC files' names and contents
 	standard [2048]*Message      // 11-bit IDs, indexed directly
 	extended map[uint32]*Message // 29-bit IDs, keyed with extendedFlag set
 }

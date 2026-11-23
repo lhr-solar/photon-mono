@@ -1,17 +1,21 @@
 package dbc
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
 
 // Load reads every *.dbc in dir into one Catalog. Each file is one bus, named
 // after the file: spec/dbc/MotorCAN.dbc defines the messages of bus "MotorCAN".
-// rates give the sample groups their timing.
+// rates give the sample groups their timing. The Catalog's Buses and SHA
+// describe the files, so a stored row can say which DBC it was decoded with.
 func Load(dir string, rates []SampleRate) (*Catalog, error) {
 	paths, err := filepath.Glob(filepath.Join(dir, "*.dbc"))
 	if err != nil {
@@ -20,13 +24,20 @@ func Load(dir string, rates []SampleRate) (*Catalog, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("no .dbc files in %s", dir)
 	}
+	slices.Sort(paths)
 	c := &Catalog{}
+	sum := sha1.New()
 	for _, path := range paths {
 		text, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
 		}
+		// Each file contributes its name, a 0 byte and its contents to the SHA.
+		sum.Write([]byte(filepath.Base(path)))
+		sum.Write([]byte{0})
+		sum.Write(text)
 		bus := strings.TrimSuffix(filepath.Base(path), ".dbc")
+		c.Buses = append(c.Buses, bus)
 		msgs, err := parse(bus, string(text))
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
@@ -37,6 +48,8 @@ func Load(dir string, rates []SampleRate) (*Catalog, error) {
 			}
 		}
 	}
+	slices.Sort(c.Buses)
+	c.SHA = hex.EncodeToString(sum.Sum(nil))
 	if err := applyRates(c, rates); err != nil {
 		return nil, err
 	}

@@ -16,22 +16,32 @@ import (
 // only that goroutine touches the Decoder.
 type canDecoder struct {
 	dec       *dbc.Decoder
-	published dbc.Stats // what decode has already added to canStats
+	catalog   *dbc.Catalog // the DBCs dec decodes with
+	published dbc.Stats    // what decode has already added to canStats
 
 	emit     func(id uint32, bus string, data []byte, tNS int64) // goodClock, bound once
 	maxNS    int64                                               // latest frame time accepted in this buffer
 	badClock uint64                                              // frames dropped for a bad car clock
+
+	// Frame rows go to session when it is not nil. defsSent is whether this
+	// decoder's signal_def rows are queued.
+	session  *frameSession
+	layouts  map[uint32]*frameLayout
+	defsSent bool
 }
 
-// newCANDecoder loads the DBCs in cfg. Rows have nowhere to go until the DB
-// writer exists; the Decoder's Stats count them.
-func newCANDecoder(cfg CANConfig) (*canDecoder, error) {
+// newCANDecoder loads the DBCs in cfg. The Decoder's rows still go nowhere; its
+// Stats count them. Frame rows go to session, when there is one.
+func newCANDecoder(cfg CANConfig, session *frameSession) (*canDecoder, error) {
 	catalog, err := dbc.Load(cfg.DBCDir, cfg.SampleRates)
 	if err != nil {
 		return nil, err
 	}
 	log.Printf("[photon-server] CAN decoding %d messages from %s", len(catalog.Messages), cfg.DBCDir)
-	c := &canDecoder{dec: dbc.NewDecoder(catalog, discardRows{})}
+	c := &canDecoder{dec: dbc.NewDecoder(catalog, discardRows{}), catalog: catalog, session: session}
+	if session != nil {
+		c.layouts = buildLayouts(catalog)
+	}
 	c.emit = c.goodClock
 	return c, nil
 }
@@ -39,11 +49,11 @@ func newCANDecoder(cfg CANConfig) (*canDecoder, error) {
 // startCANDecoder loads the DBCs when cfg.Decode is on. It returns nil, with a
 // log line, when decoding is off or the DBCs do not load; ingest carries on
 // either way.
-func startCANDecoder(cfg CANConfig) *canDecoder {
+func startCANDecoder(cfg CANConfig, session *frameSession) *canDecoder {
 	if !cfg.Decode {
 		return nil
 	}
-	can, err := newCANDecoder(cfg)
+	can, err := newCANDecoder(cfg, session)
 	if err != nil {
 		log.Printf("[photon-server] CAN decoding off: %v", err)
 		return nil
@@ -58,6 +68,9 @@ func startCANDecoder(cfg CANConfig) *canDecoder {
 func (c *canDecoder) decode(buf []byte) {
 	c.maxNS = time.Now().Add(frameMaxFuture).UnixNano()
 	walkCANP3(buf, c.emit)
+	if c.session != nil {
+		c.session.flush()
+	}
 	s, p := c.dec.Stats, c.published
 	canStats.frames.Add(s.Frames - p.Frames)
 	canStats.rows.Add(s.Rows - p.Rows)
@@ -88,21 +101,35 @@ func (c *canDecoder) goodClock(id uint32, bus string, data []byte, tNS int64) {
 		return
 	}
 	c.dec.Decode(id, bus, data, tNS)
+	if c.session == nil {
+		return
+	}
+	l := c.layouts[id]
+	if l == nil {
+		return
+	}
+	if !c.defsSent {
+		c.defsSent = true
+		c.session.appendSignalDefs(c.catalog, tNS/nsPerMs)
+	}
+	c.session.appendFrame(l, data, tNS)
 }
 
 // canSettings is the CAN configuration the running server uses. The observer
 // changes it; appendLoop picks up each new decoder between buffers.
 type canSettings struct {
-	mu   sync.Mutex
-	cfg  CANConfig
-	swap chan *canDecoder // the next decoder for appendLoop; nil turns decoding off
+	mu      sync.Mutex
+	cfg     CANConfig
+	session *frameSession    // frame rows for every decoder; nil when InfluxDB is off
+	swap    chan *canDecoder // the next decoder for appendLoop; nil turns decoding off
 }
 
-// newCANSettings starts from cfg and the decoder startCANDecoder made. When the
-// DBCs failed to load, decoding is reported as off.
-func newCANSettings(cfg CANConfig, running *canDecoder) *canSettings {
+// newCANSettings starts from cfg, the decoder startCANDecoder made and the
+// session the frame rows go to. When the DBCs failed to load, decoding is
+// reported as off.
+func newCANSettings(cfg CANConfig, running *canDecoder, session *frameSession) *canSettings {
 	cfg.Decode = running != nil
-	return &canSettings{cfg: cfg, swap: make(chan *canDecoder, 1)}
+	return &canSettings{cfg: cfg, session: session, swap: make(chan *canDecoder, 1)}
 }
 
 // canChange is a request to change some CAN settings; nil fields stay as they are.
@@ -138,7 +165,7 @@ func (s *canSettings) apply(change canChange) (CANConfig, error) {
 	var can *canDecoder
 	if next.Decode {
 		var err error
-		if can, err = newCANDecoder(next); err != nil {
+		if can, err = newCANDecoder(next, s.session); err != nil {
 			return s.cfg, err
 		}
 	}

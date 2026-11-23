@@ -9,10 +9,16 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+// influxWriter is the InfluxDB writer, or nil when InfluxDB writes are off. The
+// metadata reads it.
+var influxWriter atomic.Pointer[dbWriter]
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -151,9 +157,27 @@ func main() {
 	pool := newBatchPool(cfg.Ingest.count(), cfg.Ingest.bufferSize())
 	log.Printf("[photon-server] Ingest pool %s", cfg.Ingest)
 
-	decoder := startCANDecoder(cfg.CAN)
+	// Frame rows come from the decoder, so the InfluxDB writer runs only when
+	// decoding is on at startup.
+	var session *frameSession
+	if cfg.CAN.Decode && !strings.EqualFold(cfg.InfluxURL, "off") {
+		w, err := newDBWriter(cfg.InfluxURL, cfg.InfluxDB, cfg.InfluxToken,
+			dbWriterOptions{Flush: cfg.InfluxFlush, NoSync: cfg.InfluxNoSync})
+		if err != nil {
+			log.Printf("[photon-server] InfluxDB writes off: %v", err)
+		} else {
+			influxWriter.Store(w)
+			session = newFrameSession(startedAt, w)
+			log.Printf("[photon-server] Frames -> InfluxDB %s database %q, session %s", cfg.InfluxURL, cfg.InfluxDB, session.sid)
+			if cfg.InfluxToken == "" {
+				log.Printf("[photon-server] InfluxDB token not set (PHOTON_INFLUX_TOKEN); writes need a server started --without-auth")
+			}
+		}
+	}
+
+	decoder := startCANDecoder(cfg.CAN, session)
 	// The observer can change these while the server runs.
-	canConfig := newCANSettings(cfg.CAN, decoder)
+	canConfig := newCANSettings(cfg.CAN, decoder, session)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -165,6 +189,8 @@ func main() {
 	go func() {
 		defer wg.Done()
 		appendLoop(store, pool, decoder, canConfig.swap)
+		// appendLoop has returned, so nothing else writes to the session now.
+		session.Close(3 * time.Second)
 	}()
 
 	// Ingress listener & connection tracking

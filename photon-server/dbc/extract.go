@@ -54,6 +54,19 @@ func (s *Signal) Raw(data []byte) (uint64, bool) {
 	return raw, true
 }
 
+// RawInt is Raw as an integer: sign-extended when the signal is Signed. ok is
+// false when data is too short to hold the signal.
+func (s *Signal) RawInt(data []byte) (int64, bool) {
+	raw, ok := s.Raw(data)
+	if !ok {
+		return 0, false
+	}
+	if s.Signed {
+		return signExtend(raw, s.Bits), true
+	}
+	return int64(raw), true
+}
+
 func signExtend(raw uint64, bits uint8) int64 {
 	shift := 64 - bits
 	return int64(raw<<shift) >> shift

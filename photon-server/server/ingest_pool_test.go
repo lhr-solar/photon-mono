@@ -134,7 +134,7 @@ func TestCanpReaderSubmitsWhenFull(t *testing.T) {
 func TestCANDecoderDropsBadClock(t *testing.T) {
 	cfg := DefaultCANConfig()
 	cfg.DBCDir = "../" + cfg.DBCDir
-	c, err := newCANDecoder(cfg)
+	c, err := newCANDecoder(cfg, nil)
 	if err != nil {
 		t.Skip(err)
 	}

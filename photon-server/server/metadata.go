@@ -69,7 +69,28 @@ type ServerMetadata struct {
 	Storage     StorageMetadata `json:"storage"`
 	Video       VideoMetadata   `json:"video"`
 	CAN         CANMetadata     `json:"can"`
+	Influx      InfluxMetadata  `json:"influx"`
 	Config      ConfigMetadata  `json:"config"`
+}
+
+// InfluxMetadata counts what the InfluxDB writer has done since startup.
+type InfluxMetadata struct {
+	Enabled bool  `json:"enabled"` // a writer is running
+	Written int64 `json:"written"` // rows InfluxDB accepted
+	Dropped int64 `json:"dropped"` // rows given up on
+	Failing bool  `json:"failing"` // the last write failed
+}
+
+func influxMetadata(w *dbWriter) InfluxMetadata {
+	if w == nil {
+		return InfluxMetadata{}
+	}
+	return InfluxMetadata{
+		Enabled: true,
+		Written: w.written.Load(),
+		Dropped: w.dropped.Load(),
+		Failing: w.failing.Load(),
+	}
 }
 
 // CANMetadata counts what CAN decoding has done since startup.
@@ -280,6 +301,7 @@ func writeServerMetadata(
 				UnknownMux: canStats.unknownMux.Load(),
 				BadClock:   canStats.badClock.Load(),
 			},
+			Influx: influxMetadata(influxWriter.Load()),
 			Config: configMetadata(settings.current()),
 		}
 		if err := write(metadata); err != nil {
