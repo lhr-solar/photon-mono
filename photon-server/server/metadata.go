@@ -104,6 +104,12 @@ type V2Metadata struct {
 	LiveRingHead    uint64 `json:"live_ring_head"`   // sequence of the next frame the ring takes
 	LiveSubscribers int    `json:"live_subscribers"` // clients with at least one live ID
 	LiveGaps        uint64 `json:"live_gaps"`        // gap messages sent to clients that fell behind
+
+	TilesServed           uint64 `json:"tiles_served"`             // tile requests answered
+	TileCacheHits         uint64 `json:"tile_cache_hits"`          // tile requests answered from the live run's cache
+	TileCacheBytes        int64  `json:"tile_cache_bytes"`         // bytes of tiles in the cache
+	InfluxQueriesInFlight int    `json:"influx_queries_in_flight"` // history queries running now
+	InfluxQueryErrors     uint64 `json:"influx_query_errors"`      // history queries that failed
 }
 
 // v2Metadata reads the protocol v2 counts; h is nil when v2 is not running.
@@ -120,7 +126,7 @@ func v2Metadata(h *v2Hub) V2Metadata {
 	}
 	h.mu.Unlock()
 	frames, head := h.ring.stats()
-	return V2Metadata{
+	meta := V2Metadata{
 		LANListening:    h.lanListening.Load(),
 		CFListening:     h.cfListening.Load(),
 		Clients:         clients,
@@ -129,7 +135,14 @@ func v2Metadata(h *v2Hub) V2Metadata {
 		LiveRingHead:    head,
 		LiveSubscribers: subscribers,
 		LiveGaps:        h.gaps.Load(),
+		TilesServed:     h.tilesServed.Load(),
 	}
+	meta.TileCacheBytes, meta.TileCacheHits = h.tiles.stats()
+	if h.querier != nil {
+		meta.InfluxQueriesInFlight = len(h.querier.sem)
+		meta.InfluxQueryErrors = h.querier.failures.Load()
+	}
+	return meta
 }
 
 // CANMetadata counts what CAN decoding has done since startup.

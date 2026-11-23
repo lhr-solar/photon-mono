@@ -14,7 +14,7 @@ import (
 // newLiveHub returns a LAN hub whose live ring holds capacity frames.
 func newLiveHub(t *testing.T, capacity int) *v2Hub {
 	t.Helper()
-	return newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), func() string { return "run-test" }, newLiveRing(capacity))
+	return newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), func() string { return "run-test" }, newLiveRing(capacity), nil)
 }
 
 // liveConn dials h and completes hello. A catalog, if the hub has one, is still

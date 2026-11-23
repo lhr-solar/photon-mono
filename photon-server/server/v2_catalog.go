@@ -88,6 +88,18 @@ func catalogJSON(c *dbc.Catalog) []byte {
 	return out
 }
 
+// catalogSignals lists the signals of c in catalog index order: the order
+// catalogJSON gives them, so position i is the signal whose index is i.
+func catalogSignals(c *dbc.Catalog) []tileSignal {
+	var out []tileSignal
+	for _, m := range c.Messages {
+		for i := range m.Signals {
+			out = append(out, tileSignal{msg: m, sig: &m.Signals[i]})
+		}
+	}
+	return out
+}
+
 // busIndex is the position of bus in buses, or -1 when it is not there.
 func busIndex(buses []string, bus string) int {
 	for i, b := range buses {

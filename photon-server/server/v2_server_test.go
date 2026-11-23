@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -31,7 +32,7 @@ func loadTestCatalog(t *testing.T) *dbc.Catalog {
 // "run-test".
 func newTestHub(t *testing.T) *v2Hub {
 	t.Helper()
-	return newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), func() string { return "run-test" }, newLiveRing(liveRingMinFrames))
+	return newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), func() string { return "run-test" }, newLiveRing(liveRingMinFrames), nil)
 }
 
 // serveHub serves h on a test server and returns the WebSocket URL of /v2.
@@ -179,8 +180,9 @@ func TestV2HelloAckThenCatalog(t *testing.T) {
 	if ack.CatalogSHA != cat.SHA || ack.LiveRun != "run-test" || ack.ServerTimeNS == 0 {
 		t.Fatalf("hello_ack = %+v, want catalog_sha %q and live_run run-test", ack, cat.SHA)
 	}
-	if ack.Levels == nil || len(ack.Levels) != 0 || len(ack.Features) != 2 || ack.Features[0] != "catalog" || ack.Features[1] != "live" {
-		t.Fatalf("levels %v features %v, want [] and [catalog live]", ack.Levels, ack.Features)
+	wantFeatures := []string{"catalog", "live", "runs", "tiles"}
+	if !slices.Equal(ack.Levels, []int{0, 100, 1000, 10000, 60000, 600000}) || !slices.Equal(ack.Features, wantFeatures) {
+		t.Fatalf("levels %v features %v, want the tile levels and %v", ack.Levels, ack.Features, wantFeatures)
 	}
 
 	var msg wireCatalog
@@ -320,7 +322,7 @@ func TestV2UnknownTypeGetsError(t *testing.T) {
 	var ack helloAck
 	readInto(t, conn, &ack)
 
-	sendV2(t, conn, map[string]any{"type": "runs_list"})
+	sendV2(t, conn, map[string]any{"type": "video_subscribe"})
 	var e struct {
 		Type string `json:"type"`
 		Code string `json:"code"`

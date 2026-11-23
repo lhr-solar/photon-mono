@@ -188,7 +188,12 @@ func main() {
 		}
 		return session.sid
 	}
-	hub := newV2Hub(cfg, gate, liveRun, ring)
+	// History queries go to the InfluxDB the rows are written to.
+	var querier *influxQuerier
+	if !strings.EqualFold(cfg.InfluxURL, "off") {
+		querier = newInfluxQuerier(cfg.InfluxURL, cfg.InfluxDB, cfg.InfluxToken, cfg.InfluxQueries)
+	}
+	hub := newV2Hub(cfg, gate, liveRun, ring, querier)
 	v2Current.Store(hub)
 
 	decoder := startCANDecoder(cfg.CAN, session)

@@ -35,11 +35,14 @@ var v2Current atomic.Pointer[v2Hub]
 // v2Hub is the protocol v2 server: its listeners, the clients past hello, and
 // the catalog they are sent.
 type v2Hub struct {
-	gate     *ClientGate
-	verifier *accessVerifier // Cloudflare Access check; nil when that listener is off
-	webDir   string          // static bundle served at /; empty for none
-	liveRun  func() string   // the frame session ID, or "" when there is none
-	ring     *liveRing       // the recent CAN frames that live clients read
+	gate        *ClientGate
+	verifier    *accessVerifier // Cloudflare Access check; nil when that listener is off
+	webDir      string          // static bundle served at /; empty for none
+	liveRun     func() string   // the frame session ID, or "" when there is none
+	ring        *liveRing       // the recent CAN frames that live clients read
+	querier     *influxQuerier  // history queries; nil when InfluxDB is off
+	tiles       *tileCache      // the sealed tiles of the live run
+	tilesServed atomic.Uint64   // tile requests answered
 
 	helloTimeout time.Duration
 	idleTimeout  time.Duration
@@ -55,18 +58,22 @@ type v2Hub struct {
 	catalogSHA string
 	cat        *dbc.Catalog     // the catalog in use, or nil when decoding is off
 	busIdx     map[string]uint8 // bus name to its index in cat.Buses
+	signals    []tileSignal     // the signals of cat in catalog index order
 }
 
 // newV2Hub builds the protocol v2 hub. Its LAN login is the gate's password.
 // Cloudflare Access is checked only when both cfg.CFTeam and cfg.CFAud are set.
 // liveRun gives the frame session ID for hello_ack, or "" when there is none; nil
 // means "". ring is the live frame ring the clients read; it must not be nil.
-func newV2Hub(cfg *Config, gate *ClientGate, liveRun func() string, ring *liveRing) *v2Hub {
+// querier answers the history requests; nil means history is off.
+func newV2Hub(cfg *Config, gate *ClientGate, liveRun func() string, ring *liveRing, querier *influxQuerier) *v2Hub {
 	h := &v2Hub{
 		gate:         gate,
 		webDir:       cfg.WebDir,
 		liveRun:      liveRun,
 		ring:         ring,
+		querier:      querier,
+		tiles:        newTileCache(),
 		helloTimeout: v2HelloTimeout,
 		idleTimeout:  v2IdleTimeout,
 		clients:      make(map[*v2Client]struct{}),
@@ -96,7 +103,7 @@ func (h *v2Hub) SetCatalog(c *dbc.Catalog) {
 			}
 		}
 		h.catalog, h.catalogSHA = nil, ""
-		h.cat, h.busIdx = nil, nil
+		h.cat, h.busIdx, h.signals = nil, nil, nil
 		return
 	}
 	if h.catalog != nil && c.SHA == h.catalogSHA {
@@ -107,7 +114,7 @@ func (h *v2Hub) SetCatalog(c *dbc.Catalog) {
 		return
 	}
 	h.catalog, h.catalogSHA = msg, c.SHA
-	h.cat, h.busIdx = c, make(map[string]uint8, len(c.Buses))
+	h.cat, h.busIdx, h.signals = c, make(map[string]uint8, len(c.Buses)), catalogSignals(c)
 	for i, b := range c.Buses {
 		h.busIdx[b] = uint8(i)
 	}
@@ -162,6 +169,7 @@ func (h *v2Hub) serveWS(w http.ResponseWriter, r *http.Request, cf bool) {
 		return
 	}
 	c := newV2Client(conn)
+	c.hub = h
 	h.register(c, user)
 	go c.writeLoop()
 	go c.pushLive(h)
@@ -230,8 +238,8 @@ func (h *v2Hub) register(c *v2Client, user string) {
 		ServerTimeNS: time.Now().UnixNano(),
 		CatalogSHA:   h.catalogSHA,
 		LiveRun:      h.liveRun(),
-		Levels:       []int{},
-		Features:     []string{"catalog", "live"},
+		Levels:       tileLevelMS,
+		Features:     []string{"catalog", "live", "runs", "tiles"},
 	}))
 	if h.catalog != nil {
 		c.enqueue(h.catalog)
@@ -275,14 +283,18 @@ func (h *v2Hub) closeClients(ctx context.Context) {
 // goroutine writes to conn; everything else queues on one of the three queues.
 type v2Client struct {
 	conn    *wsConn
+	hub     *v2Hub        // the hub the client is on; set before its reader starts
 	control chan outMsg   // replies and catalogs; sent first
-	live    chan outMsg   // LiveFrames and Gap, from the pusher; the pusher waits when full
+	live    chan outMsg   // LiveFrames, Gap and tile pieces; the sender waits when full
 	bulk    chan outMsg   // bulk data such as video; sent when the others are empty
 	done    chan struct{} // closed when the connection's handler returns
 	closing sync.Once     // closes a client whose control queue is full, once
 
 	sub   atomic.Pointer[liveSub] // the message IDs the client subscribed to, or nil
 	resub chan struct{}           // says the subscription changed; cap 1
+
+	tileMu sync.Mutex
+	tiles  map[uint32]*tileRequest // tile requests in flight, by qid
 }
 
 // outMsg is one message waiting for the writer. For a binary message the writer
@@ -301,6 +313,7 @@ func newV2Client(conn *wsConn) *v2Client {
 		bulk:    make(chan outMsg, v2BulkQueue),
 		done:    make(chan struct{}),
 		resub:   make(chan struct{}, 1),
+		tiles:   make(map[uint32]*tileRequest),
 	}
 }
 
@@ -397,8 +410,8 @@ func (c *v2Client) readLoop(ctx context.Context, idle time.Duration) {
 	}
 }
 
-// handle answers one message from a client past hello. Only ping is supported
-// so far; any other type gets an error that says so.
+// handle answers one message from a client past hello. Unknown types get an error
+// that says so.
 func (c *v2Client) handle(typ wsMessageType, data []byte) {
 	if typ == wsBinary {
 		c.enqueueError("unexpected_binary", "binary messages are not supported yet")
@@ -417,6 +430,12 @@ func (c *v2Client) handle(typ wsMessageType, data []byte) {
 		c.enqueue(encodeV2(v2Pong{Type: "pong", TMS: msg.TMS}))
 	case "subscribe":
 		c.subscribe(data)
+	case "runs_list":
+		c.startRuns()
+	case "tile_request":
+		c.startTile(data)
+	case "tile_cancel":
+		c.cancelTile(data)
 	case "":
 		c.enqueueError("unknown_type", "message has no type")
 	default:
