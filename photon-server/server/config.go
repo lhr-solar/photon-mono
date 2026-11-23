@@ -22,6 +22,8 @@ const (
 	DefaultVideoIngressPort = 6200
 	DefaultVideoClientPort  = 6700
 	DefaultVideoUdpPort     = 6800
+	DefaultV2Port           = 6900
+	DefaultV2CFPort         = 6901
 	DefaultDataDir          = "./data"
 	DefaultInfluxURL        = "http://127.0.0.1:8181"
 	DefaultInfluxDB         = "photon_dev"
@@ -52,6 +54,11 @@ type Config struct {
 	VideoIngressPort int
 	VideoClientPort  int
 	VideoUdpPort     int
+	V2Port           int    // protocol v2 WebSocket port on the LAN; 0 = off
+	V2CFPort         int    // protocol v2 WebSocket port behind Cloudflare Access, 127.0.0.1 only; 0 = off
+	CFTeam           string // Cloudflare Access team name
+	CFAud            string // Cloudflare Access application AUD tag
+	WebDir           string // static web bundle served at /; empty = none
 	DataDir          string
 	TsdbDir          string
 	DbcPath          string
@@ -176,6 +183,18 @@ func (c *Config) Validate() error {
 			port int
 		}{"video-udp", c.VideoUdpPort})
 	}
+	if c.V2Port != 0 {
+		ports = append(ports, struct {
+			name string
+			port int
+		}{"v2", c.V2Port})
+	}
+	if c.V2CFPort != 0 {
+		ports = append(ports, struct {
+			name string
+			port int
+		}{"v2-cf", c.V2CFPort})
+	}
 	for _, p := range ports {
 		if p.port < 1 || p.port > 65535 {
 			return fmt.Errorf("invalid %s port: %d (must be between 1 and 65535)", p.name, p.port)
@@ -220,6 +239,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		VideoIngressPort: DefaultVideoIngressPort,
 		VideoClientPort:  DefaultVideoClientPort,
 		VideoUdpPort:     DefaultVideoUdpPort,
+		V2Port:           DefaultV2Port,
+		V2CFPort:         DefaultV2CFPort,
 		DataDir:          DefaultDataDir,
 		InfluxURL:        DefaultInfluxURL,
 		InfluxDB:         DefaultInfluxDB,
@@ -264,6 +285,25 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		if p, err := strconv.Atoi(portStr); err == nil {
 			cfg.VideoUdpPort = p
 		}
+	}
+	if portStr := getenvFirst(getenv, "PHOTON_V2_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			cfg.V2Port = p
+		}
+	}
+	if portStr := getenvFirst(getenv, "PHOTON_V2_CF_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			cfg.V2CFPort = p
+		}
+	}
+	if v := getenvFirst(getenv, "PHOTON_CF_TEAM"); v != "" {
+		cfg.CFTeam = v
+	}
+	if v := getenvFirst(getenv, "PHOTON_CF_AUD"); v != "" {
+		cfg.CFAud = v
+	}
+	if v := getenvFirst(getenv, "PHOTON_WEB_DIR"); v != "" {
+		cfg.WebDir = v
 	}
 	if dir := getenvFirst(getenv, "PHOTON_TSDB_DIR", "PHOTON_TSDB"); dir != "" {
 		cfg.TsdbDir = dir
@@ -323,6 +363,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var videoIngressPortFlag int
 	var videoClientPortFlag int
 	var videoUdpPortFlag int
+	var v2PortFlag, v2CFPortFlag int
+	var cfTeamFlag, cfAudFlag, webDirFlag string
 	var dataDirFlag string
 	var tsdbDirFlag string
 	var dbcPathFlag string
@@ -350,6 +392,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.IntVar(&videoClientPortFlag, "video-client", cfg.VideoClientPort, "Alias for -video-client-port")
 	fs.IntVar(&videoUdpPortFlag, "video-udp-port", cfg.VideoUdpPort, "UDP port for live video fan-out")
 	fs.IntVar(&videoUdpPortFlag, "video-udp", cfg.VideoUdpPort, "Alias for -video-udp-port")
+	fs.IntVar(&v2PortFlag, "v2-port", cfg.V2Port, "WebSocket port for protocol v2 on the LAN; 0 = off")
+	fs.IntVar(&v2CFPortFlag, "v2-cf-port", cfg.V2CFPort, "WebSocket port for protocol v2 behind Cloudflare Access (127.0.0.1); 0 = off")
+	fs.StringVar(&cfTeamFlag, "cf-team", cfg.CFTeam, "Cloudflare Access team name (issuer https://<team>.cloudflareaccess.com)")
+	fs.StringVar(&cfAudFlag, "cf-aud", cfg.CFAud, "Cloudflare Access application AUD tag")
+	fs.StringVar(&webDirFlag, "web-dir", cfg.WebDir, "static web bundle served at / (empty = none)")
 	fs.StringVar(&dataDirFlag, "data-dir", cfg.DataDir, "Directory path for persistent storage segments")
 	fs.StringVar(&dataDirFlag, "storage-path", cfg.DataDir, "Alias for -data-dir")
 	fs.StringVar(&tsdbDirFlag, "tsdb-dir", cfg.TsdbDir, "TSDB root (default: <data-dir>/tsdb)")
@@ -376,6 +423,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -video-ingress-port, -video-ingress int UDP+TCP RTP/H.264 ingress port (default %d, env: PHOTON_VIDEO_INGRESS_PORT)\n", DefaultVideoIngressPort)
 		fmt.Fprintf(output, "  -video-client-port, -video-client int TCP video live/replay port (default %d, env: PHOTON_VIDEO_CLIENT_PORT)\n", DefaultVideoClientPort)
 		fmt.Fprintf(output, "  -video-udp-port, -video-udp int UDP live video fan-out port (default %d, env: PHOTON_VIDEO_UDP_PORT)\n", DefaultVideoUdpPort)
+		fmt.Fprintf(output, "  -v2-port int                 WebSocket port for protocol v2 on the LAN (default %d, env: PHOTON_V2_PORT; 0 = off)\n", DefaultV2Port)
+		fmt.Fprintf(output, "  -v2-cf-port int              WebSocket port behind Cloudflare Access, 127.0.0.1 (default %d, env: PHOTON_V2_CF_PORT; 0 = off)\n", DefaultV2CFPort)
+		fmt.Fprintf(output, "  -cf-team string              Cloudflare Access team name (env: PHOTON_CF_TEAM)\n")
+		fmt.Fprintf(output, "  -cf-aud string               Cloudflare Access application AUD tag (env: PHOTON_CF_AUD)\n")
+		fmt.Fprintf(output, "  -web-dir string              static web bundle served at / (env: PHOTON_WEB_DIR; empty = none)\n")
 		fmt.Fprintf(output, "  -data-dir, -storage-path string Storage directory (default %q, env: PHOTON_DATA_DIR)\n", DefaultDataDir)
 		fmt.Fprintf(output, "  -tsdb-dir string             TSDB root (default <data-dir>/tsdb, env: PHOTON_TSDB_DIR)\n")
 		fmt.Fprintf(output, "  -dbc string                  DBC for the live TSDB writer (env: PHOTON_DBC)\n")
@@ -402,6 +454,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.VideoIngressPort = videoIngressPortFlag
 	cfg.VideoClientPort = videoClientPortFlag
 	cfg.VideoUdpPort = videoUdpPortFlag
+	cfg.V2Port = v2PortFlag
+	cfg.V2CFPort = v2CFPortFlag
+	cfg.CFTeam = cfTeamFlag
+	cfg.CFAud = cfAudFlag
+	cfg.WebDir = webDirFlag
 	cfg.DataDir = dataDirFlag
 	cfg.TsdbDir = tsdbDirFlag
 	cfg.DbcPath = dbcPathFlag

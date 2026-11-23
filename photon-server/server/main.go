@@ -175,12 +175,29 @@ func main() {
 		}
 	}
 
+	// Protocol v2 clients see the live run as the frame session ID.
+	liveRun := func() string {
+		if session == nil {
+			return ""
+		}
+		return session.sid
+	}
+	hub := newV2Hub(cfg, gate, liveRun)
+	v2Current.Store(hub)
+
 	decoder := startCANDecoder(cfg.CAN, session)
 	// The observer can change these while the server runs.
 	canConfig := newCANSettings(cfg.CAN, decoder, session)
+	// Protocol v2 clients get each catalog the decoder uses, and the observer's
+	// changes to it.
+	canConfig.onCatalog = hub.SetCatalog
+	if decoder != nil {
+		hub.SetCatalog(decoder.catalog)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	stopV2 := startV2(ctx, cfg, hub)
 
 	var wg sync.WaitGroup
 
@@ -281,6 +298,7 @@ func main() {
 		_ = videoRTCP.Close()
 	}
 	_ = videoClientListener.Close()
+	stopV2()
 
 	// Wait for existing ingress readers to finish reading and close ingress channel
 	ingressConnWg.Wait()

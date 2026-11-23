@@ -121,11 +121,20 @@ func isTrustedHopIP(ip string) bool {
 	return wgNet.Contains(parsed)
 }
 
+// Admit takes a connection slot for the peer of conn, or says why not.
 func (g *ClientGate) Admit(conn net.Conn) error {
 	if g == nil {
 		return nil
 	}
-	ip := peerIP(conn.RemoteAddr())
+	return g.AdmitIP(peerIP(conn.RemoteAddr()))
+}
+
+// AdmitIP takes a connection slot for ip, or says why not. The slot is given
+// back with ReleaseIP.
+func (g *ClientGate) AdmitIP(ip string) error {
+	if g == nil {
+		return nil
+	}
 	now := time.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -157,11 +166,19 @@ func (g *ClientGate) Admit(conn net.Conn) error {
 	return nil
 }
 
+// Release gives back the slot Admit took for the peer of conn.
 func (g *ClientGate) Release(conn net.Conn) {
 	if g == nil || conn == nil {
 		return
 	}
-	ip := peerIP(conn.RemoteAddr())
+	g.ReleaseIP(peerIP(conn.RemoteAddr()))
+}
+
+// ReleaseIP gives back the slot AdmitIP took for ip.
+func (g *ClientGate) ReleaseIP(ip string) {
+	if g == nil {
+		return
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.open > 0 {
@@ -182,12 +199,22 @@ func (g *ClientGate) Auth(conn net.Conn) error {
 	got, err := ReadClientAuth(conn)
 	_ = conn.SetReadDeadline(time.Time{})
 	ip := peerIP(conn.RemoteAddr())
-	if err != nil || subtle.ConstantTimeCompare(g.want, []byte(got)) != 1 {
+	if err != nil {
 		g.noteFail(ip)
-		if err == nil {
-			err = errAuthRejected
-		}
 		return err
+	}
+	return g.CheckToken(ip, got)
+}
+
+// CheckToken compares token with the password in constant time. A wrong token
+// counts as a failed attempt from ip; enough of them block ip for a while.
+func (g *ClientGate) CheckToken(ip, token string) error {
+	if g == nil {
+		return nil
+	}
+	if subtle.ConstantTimeCompare(g.want, []byte(token)) != 1 {
+		g.noteFail(ip)
+		return errAuthRejected
 	}
 	return nil
 }

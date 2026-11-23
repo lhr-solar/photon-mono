@@ -122,6 +122,9 @@ type canSettings struct {
 	cfg     CANConfig
 	session *frameSession    // frame rows for every decoder; nil when InfluxDB is off
 	swap    chan *canDecoder // the next decoder for appendLoop; nil turns decoding off
+
+	// onCatalog is told the catalog in use after each change: nil when decoding is off.
+	onCatalog func(*dbc.Catalog)
 }
 
 // newCANSettings starts from cfg, the decoder startCANDecoder made and the
@@ -178,6 +181,13 @@ func (s *canSettings) apply(change canChange) (CANConfig, error) {
 	s.cfg = next
 	canStats.enabled.Store(next.Decode)
 	log.Printf("[photon-server] CAN settings changed: decode=%v dbc_dir=%q", next.Decode, next.DBCDir)
+	if s.onCatalog != nil {
+		var cat *dbc.Catalog
+		if can != nil {
+			cat = can.catalog
+		}
+		s.onCatalog(cat)
+	}
 	return next, nil
 }
 

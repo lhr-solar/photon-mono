@@ -70,6 +70,7 @@ type ServerMetadata struct {
 	Video       VideoMetadata   `json:"video"`
 	CAN         CANMetadata     `json:"can"`
 	Influx      InfluxMetadata  `json:"influx"`
+	V2          V2Metadata      `json:"v2"`
 	Config      ConfigMetadata  `json:"config"`
 }
 
@@ -90,6 +91,30 @@ func influxMetadata(w *dbWriter) InfluxMetadata {
 		Written: w.written.Load(),
 		Dropped: w.dropped.Load(),
 		Failing: w.failing.Load(),
+	}
+}
+
+// V2Metadata is what the protocol v2 listeners report.
+type V2Metadata struct {
+	LANListening bool   `json:"lan_listening"`
+	CFListening  bool   `json:"cf_listening"`
+	Clients      int    `json:"clients"`       // connections past hello
+	AuthFailures uint64 `json:"auth_failures"` // hello, token and Access JWT rejections
+}
+
+// v2Metadata reads the protocol v2 counts; h is nil when v2 is not running.
+func v2Metadata(h *v2Hub) V2Metadata {
+	if h == nil {
+		return V2Metadata{}
+	}
+	h.mu.Lock()
+	clients := len(h.clients)
+	h.mu.Unlock()
+	return V2Metadata{
+		LANListening: h.lanListening.Load(),
+		CFListening:  h.cfListening.Load(),
+		Clients:      clients,
+		AuthFailures: h.authFailures.Load(),
 	}
 }
 
@@ -302,6 +327,7 @@ func writeServerMetadata(
 				BadClock:   canStats.badClock.Load(),
 			},
 			Influx: influxMetadata(influxWriter.Load()),
+			V2:     v2Metadata(v2Current.Load()),
 			Config: configMetadata(settings.current()),
 		}
 		if err := write(metadata); err != nil {
