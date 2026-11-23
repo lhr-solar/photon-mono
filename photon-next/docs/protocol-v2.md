@@ -65,6 +65,20 @@ One tile, or one piece of it (tiles are sent in pieces of at most 64 KiB, interl
 Values are in the signal's **unit**, scaled by the server like live samples (with a negative factor,
 the server swaps min and max so `min <= max`).
 
+The server streams a tile: it sends each piece as soon as it has read that many rows from InfluxDB, so
+the first piece arrives before the whole tile is read, and the server holds about one piece per query.
+If something fails after some pieces were sent, a `tile_error` with the same `qid` follows: drop the pieces
+received for that `qid`.
+
+**Levels and tiles.** `hello_ack.levels` lists the bucket width of each level in ms; today
+`[0, 10, 100, 1000, 10000, 60000, 600000]` (level 0 = raw samples). A level-0 tile covers **10 s**; a tile
+of level L > 0 covers `levels[L] × 1024` ms (1024 buckets). Tile `index` `i` covers `[i × span, (i+1) × span)`
+in Unix ms. Read the list from `hello_ack`; do not hard-code it.
+
+**Choosing a level.** For a plot `w` pixels wide showing `d` ms, use the **coarsest** level whose bucket is
+at most `d / w` ms (one bucket per pixel or finer). Use level 0 only when even the 10 ms level is coarser
+than a pixel (views shorter than ~10–20 s). Request the tiles of that level that overlap the view.
+
 ### `0x23` VideoChunk
 One piece of an Annex-B H.264 frame, at most 16 KiB. Sent only when nothing telemetry is queued.
 
