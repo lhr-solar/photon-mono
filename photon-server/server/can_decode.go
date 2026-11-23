@@ -38,7 +38,7 @@ func newCANDecoder(cfg CANConfig, session *frameSession) (*canDecoder, error) {
 		return nil, err
 	}
 	log.Printf("[photon-server] CAN decoding %d messages from %s", len(catalog.Messages), cfg.DBCDir)
-	c := &canDecoder{dec: dbc.NewDecoder(catalog, discardRows{}), catalog: catalog, session: session}
+	c := &canDecoder{dec: dbc.NewDecoder(catalog, newSOCSink(discardRows{})), catalog: catalog, session: session}
 	if session != nil {
 		c.layouts = buildLayouts(catalog)
 	}
