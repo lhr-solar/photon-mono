@@ -93,7 +93,7 @@ func TestCANDecodingOffByDefault(t *testing.T) {
 	if cfg.CAN.Decode {
 		t.Errorf("CAN decoding is on by default")
 	}
-	if startCANDecoder(cfg.CAN) != nil {
+	if startCANDecoder(cfg.CAN, nil) != nil {
 		t.Errorf("startCANDecoder returned a decoder with decoding off")
 	}
 	cfg.CAN.Decode, cfg.CAN.DBCDir = true, ""
@@ -105,7 +105,7 @@ func TestCANDecodingOffByDefault(t *testing.T) {
 func TestStartCANDecoderBadDir(t *testing.T) {
 	cfg := DefaultCANConfig()
 	cfg.Decode, cfg.DBCDir = true, filepath.Join(t.TempDir(), "missing")
-	if startCANDecoder(cfg) != nil {
+	if startCANDecoder(cfg, nil) != nil {
 		t.Errorf("startCANDecoder returned a decoder for a missing DBC directory")
 	}
 }
@@ -137,7 +137,7 @@ func TestDefaultSampleRatesCoverSpec(t *testing.T) {
 func TestCANDecoderCountsFrames(t *testing.T) {
 	cfg := DefaultCANConfig()
 	cfg.Decode, cfg.DBCDir = true, testDBCDir
-	can := startCANDecoder(cfg)
+	can := startCANDecoder(cfg, nil)
 	if can == nil {
 		t.Fatal("startCANDecoder returned nil for the spec")
 	}
