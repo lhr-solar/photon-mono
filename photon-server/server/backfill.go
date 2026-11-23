@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 )
@@ -41,67 +40,85 @@ type backfillResult struct {
 	Rows     int64 // rows handed to the sink
 }
 
-// sessionMap says which server run wrote each record, from the recorded starts.
-type sessionMap struct {
-	starts   []sessionStart // sorted by first ID
-	fallback string         // the run for records older than starts[0], named from the first of them
-}
-
-// sid returns the session of the record id, which was written at writeUnix.
-// Records older than the first recorded start (data from before sessions.log
-// existed) all go to one fallback session.
-func (m *sessionMap) sid(id MessageID, writeUnix uint32) string {
-	if i := sort.Search(len(m.starts), func(i int) bool { return m.starts[i].FirstID > id }); i > 0 {
-		return m.starts[i-1].SID
-	}
-	if m.fallback == "" {
-		m.fallback = sessionID(time.Unix(int64(writeUnix), 0))
-	}
-	return m.fallback
-}
-
-// scanSessions reads every record once and sums them up per session, in the
-// order the sessions first appear.
-func scanSessions(segmentsDir string) ([]sessionStart, []backfillSession, error) {
-	starts, err := readSessionStarts(segmentsDir)
+// listBackfillSessions lists the runs that have records, one per run folder, in
+// the order they were written. It reads manifests, not records, except for an
+// active chunk: its manifest has no counts until it is sealed, so it is read.
+func listBackfillSessions(segmentsDir string) ([]backfillSession, error) {
+	names, err := listRunFolders(segmentsDir)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	m := &sessionMap{starts: starts}
 	var sessions []backfillSession
-	index := make(map[string]int)
-	err = scanSegments(segmentsDir, func(id MessageID, writeUnix uint32, payload []byte) error {
-		sid := m.sid(id, writeUnix)
-		i, ok := index[sid]
-		if !ok {
-			i = len(sessions)
-			index[sid] = i
-			sessions = append(sessions, backfillSession{SID: sid, FirstID: id, FirstWrite: writeTime(writeUnix)})
+	for _, name := range names {
+		w := readRunManifest(segmentsDir, name)
+		if w == nil {
+			continue
 		}
-		s := &sessions[i]
-		s.LastID = id
-		s.LastWrite = writeTime(writeUnix)
-		s.Records++
-		s.Bytes += int64(frameHeaderBytes + len(payload))
+		s := backfillSession{SID: name}
+		for _, c := range w.chunks {
+			if !c.plain() {
+				log.Printf("[photon-server] backfill: skipping %s, which is %q, not a plain chunk", c.path, c.state)
+				continue
+			}
+			if _, err := os.Stat(c.path); err != nil {
+				log.Printf("[photon-server] backfill: skipping %s: %v", c.path, err)
+				continue
+			}
+			r := chunkCounts{
+				records: c.records, bytes: c.bytes,
+				firstID: c.firstID, lastID: c.lastID,
+				firstWrite: c.firstWrite, lastWrite: c.lastWrite,
+			}
+			if c.state == chunkStateActive {
+				counted, err := countChunk(c.path)
+				if err != nil {
+					return nil, err
+				}
+				r = counted
+			}
+			if r.records == 0 {
+				continue
+			}
+			if s.Records == 0 {
+				s.FirstID, s.FirstWrite = r.firstID, time.Unix(r.firstWrite, 0).UTC()
+			}
+			s.LastID, s.LastWrite = r.lastID, time.Unix(r.lastWrite, 0).UTC()
+			s.Records += r.records
+			s.Bytes += r.bytes
+		}
+		if s.Records > 0 {
+			sessions = append(sessions, s)
+		}
+	}
+	return sessions, nil
+}
+
+// chunkCounts is what a chunk holds: its records, their bytes, IDs and write
+// times (unix seconds).
+type chunkCounts struct {
+	records               int
+	bytes                 int64
+	firstID, lastID       MessageID
+	firstWrite, lastWrite int64
+}
+
+// countChunk reads an active chunk to count its whole records.
+func countChunk(path string) (chunkCounts, error) {
+	var r chunkCounts
+	_, err := scanRecordFile(path, 0, -1, scanBufferBytes, func(_ int64, id MessageID, writeUnix uint32, payload []byte) error {
+		if r.records == 0 {
+			r.firstID, r.firstWrite = id, int64(writeUnix)
+		}
+		r.lastID, r.lastWrite = id, int64(writeUnix)
+		r.records++
+		r.bytes += int64(frameHeaderBytes + len(payload))
 		return nil
 	})
-	return starts, sessions, err
-}
-
-// writeTime is a record's write time: the seconds the store stamped it with.
-func writeTime(writeUnix uint32) time.Time {
-	return time.Unix(int64(writeUnix), 0).UTC()
-}
-
-// listBackfillSessions lists the sessions that have records, in the order they
-// were written. It reads every record once.
-func listBackfillSessions(segmentsDir string) ([]backfillSession, error) {
-	_, sessions, err := scanSessions(segmentsDir)
-	return sessions, err
+	return r, err
 }
 
 // runBackfill replays the selected sessions into sink, and reports what each
-// one wrote. The segments are read twice. The first pass lists the sessions, so
+// one wrote. The run folders are read twice. The first pass lists the sessions, so
 // an unknown name, or a session skipped as recent, is settled before anything is
 // written. The second replays the selected records in one pass, with a fresh
 // decoder per session, as the live server starts one per run. The rows are the
@@ -115,7 +132,7 @@ func runBackfill(opts backfillOptions, sink lineSink) ([]backfillResult, error) 
 	// Every session replayed here gets this rev, so the runs list shows that its
 	// history changed. A later backfill has a later start, so its rev is higher.
 	rev := now().UnixMilli()
-	starts, sessions, err := scanSessions(opts.SegmentsDir)
+	sessions, err := listBackfillSessions(opts.SegmentsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +163,6 @@ func runBackfill(opts backfillOptions, sink lineSink) ([]backfillResult, error) 
 		return nil, nil
 	}
 
-	m := &sessionMap{starts: starts}
 	var (
 		fs  *frameSession // the session being replayed, nil between sessions
 		can *canDecoder   // its decoder
@@ -161,8 +177,8 @@ func runBackfill(opts backfillOptions, sink lineSink) ([]backfillResult, error) 
 		results[cur].BadClock = int64(can.badClock)
 		fs, can = nil, nil
 	}
-	err = scanSegments(opts.SegmentsDir, func(id MessageID, writeUnix uint32, payload []byte) error {
-		i, ok := selected[m.sid(id, writeUnix)]
+	err = scanRuns(opts.SegmentsDir, func(run string, id MessageID, writeUnix uint32, payload []byte) error {
+		i, ok := selected[run]
 		if !ok {
 			return nil
 		}

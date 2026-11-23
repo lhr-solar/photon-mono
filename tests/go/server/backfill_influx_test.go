@@ -77,9 +77,8 @@ func TestBackfillIntoRealInfluxDB(t *testing.T) {
 			canpTestFrame{id: in.msg.ID, data: dInt}))
 	}
 
-	dataDir, segDir := backfillDirs(t)
-	storeBuffers(t, dataDir, payloads...)
-	logSession(t, segDir, "S1", 1)
+	dataDir, _ := backfillDirs(t)
+	storeBuffers(t, dataDir, "S1", payloads...)
 
 	cfg, err := ParseConfigWithEnv(os.Getenv, nil, io.Discard)
 	if err != nil {

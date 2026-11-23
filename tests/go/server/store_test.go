@@ -13,7 +13,7 @@ func TestStreamStoreAppendReadAndRecover(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	store, err := OpenStreamStore(tempDir)
+	store, err := OpenStreamStore(tempDir, "S1")
 	if err != nil {
 		t.Fatalf("failed to open stream store: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestStreamStoreAppendReadAndRecover(t *testing.T) {
 	}
 
 	// Reopen store from same directory and verify recovery
-	reopenedStore, err := OpenStreamStore(tempDir)
+	reopenedStore, err := OpenStreamStore(tempDir, "S1")
 	if err != nil {
 		t.Fatalf("failed to reopen stream store: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestStreamStoreCloseUnblocks(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	store, err := OpenStreamStore(tempDir)
+	store, err := OpenStreamStore(tempDir, "S1")
 	if err != nil {
 		t.Fatalf("failed to open stream store: %v", err)
 	}

@@ -20,7 +20,7 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	store, err := OpenStreamStore(tempDir)
+	store, err := OpenStreamStore(tempDir, "S1")
 	if err != nil {
 		t.Fatalf("failed to open stream store: %v", err)
 	}

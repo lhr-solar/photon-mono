@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,21 +39,38 @@ func main() {
 	startedAt := time.Now()
 	log.Printf("[photon-server] Initializing storage at %s...", cfg.SegmentsDir())
 
-	store, err := OpenStreamStore(cfg.DataDir)
+	// Old-format segment files move into run folders before the store opens. If
+	// that fails they stay where they are, and new messages are numbered above
+	// them so that no ID is used twice.
+	var idFloor MessageID
+	migrated, err := migrateLegacySegments(cfg.SegmentsDir())
+	if err != nil {
+		log.Printf("[photon-server] Could not migrate the old segment files in %s; they stay where they are and migration is tried again next start: %v",
+			cfg.SegmentsDir(), err)
+		floor, ferr := legacyNextID(cfg.SegmentsDir())
+		if ferr != nil {
+			log.Fatalf("[photon-server] Cannot read the old segment files to number new messages above them: %v", ferr)
+		}
+		idFloor = floor
+	} else if migrated.Moved > 0 {
+		log.Printf("[photon-server] Migrated %d records (%.1f MiB) in %d runs from the old segment files to %s in %s; the old files are in %s",
+			migrated.Records, float64(migrated.Bytes)/(1<<20), migrated.Runs, cfg.SegmentsDir(),
+			migrated.Elapsed.Round(time.Millisecond), filepath.Join(cfg.SegmentsDir(), legacyFolder))
+	}
+
+	// The run's folder is named by its session ID, so backfill knows which run
+	// wrote each record.
+	store, err := OpenStreamStore(cfg.DataDir, sessionID(startedAt))
 	if err != nil {
 		log.Fatalf("[photon-server] Failed to open stream store: %v", err)
 	}
 	defer store.Close()
+	store.raiseNextID(idFloor)
+	store.SetMaxBytes(int64(cfg.StoreMaxGB) << 30)
 
 	stats := store.Stats()
 	log.Printf("[photon-server] Store initialized: %d segments recovered (oldest ID: %d, latest ID: %d, disk bytes: %d)",
 		stats.Segments, stats.OldestID, stats.LatestID, stats.DiskBytes)
-
-	// Backfill needs to know which run wrote each record. This run's records
-	// start at the next ID.
-	if err := appendSessionStart(cfg.SegmentsDir(), sessionID(startedAt), store.LatestID()+1); err != nil {
-		log.Printf("[photon-server] Could not record the session start in %s: %v", sessionLogName, err)
-	}
 
 	log.Printf("[photon-server] Initializing video storage at %s...", cfg.VideoSegmentsDir())
 	videoStore, err := OpenVideoStore(cfg.DataDir)

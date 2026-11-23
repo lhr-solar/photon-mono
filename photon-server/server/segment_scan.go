@@ -7,23 +7,66 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
 )
 
-// scanBufferBytes is the read buffer for each segment file.
+// scanBufferBytes is the read buffer for each chunk or segment file.
 const scanBufferBytes = 1 << 20
 
-// scanSegments calls fn for every good record in the segment files of dir, in
-// ID order. A file ends at its first short or bad record, so the half-written
-// tail of the active segment is left out, and the scan goes on to the next
-// file. The payload is only valid during the call.
+// openChunkFile opens the files the scans and reads take. It is a variable so a
+// test can make one of them fail.
+var openChunkFile = os.Open
+
+// scanRuns calls fn for every good record in the run folders under segmentsDir:
+// runs in folder-name order, chunks in number order, records in order. The
+// payload is only valid during the call.
 //
-// It never modifies anything: the files are opened read-only, and each is read
-// only up to the size it had when it was opened, so a server that is still
-// writing the active segment is fine. Unlike OpenStreamStore, it does not
-// index the records or truncate a tail.
+// It reads manifests to find the chunks and never modifies anything. A server
+// that is still writing its active chunk is fine: the chunk is read only up to
+// the size it has when the scan opens it. A chunk whose file is missing, or that
+// is in a state this version cannot read, is logged and skipped.
+func scanRuns(segmentsDir string, fn func(run string, id MessageID, writeUnix uint32, payload []byte) error) error {
+	names, err := listRunFolders(segmentsDir)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		w := readRunManifest(segmentsDir, name)
+		if w == nil {
+			continue
+		}
+		for _, c := range w.chunks {
+			if !c.plain() {
+				log.Printf("[photon-server] backfill: skipping %s, which is %q, not a plain chunk", c.path, c.state)
+				continue
+			}
+			if _, err := os.Stat(c.path); err != nil {
+				log.Printf("[photon-server] backfill: skipping %s: %v", c.path, err)
+				continue
+			}
+			limit := int64(-1)
+			if c.state == chunkStateSealed {
+				limit = c.bytes
+			}
+			run := name
+			_, err := scanRecordFile(c.path, 0, limit, scanBufferBytes, func(_ int64, id MessageID, writeUnix uint32, payload []byte) error {
+				return fn(run, id, writeUnix, payload)
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// scanSegments calls fn for every good record in the old-format segment files of
+// dir (%012d.log), in file order. A file ends at its first short or bad record,
+// and the scan goes on to the next file. The payload is only valid during the
+// call. It never modifies anything. It is used to migrate the old layout.
 func scanSegments(dir string, fn func(id MessageID, writeUnix uint32, payload []byte) error) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -34,8 +77,7 @@ func scanSegments(dir string, fn func(id MessageID, writeUnix uint32, payload []
 		if e.IsDir() {
 			continue
 		}
-		var n int
-		if _, err := fmt.Sscanf(e.Name(), "%012d.log", &n); err == nil && e.Name() == segmentFileName(n) {
+		if n, ok := legacySegmentNumber(e.Name()); ok {
 			nums = append(nums, n)
 		}
 	}
@@ -48,7 +90,17 @@ func scanSegments(dir string, fn func(id MessageID, writeUnix uint32, payload []
 	return nil
 }
 
-// segmentFileName is the name of the segment file that starts at id n.
+// legacySegmentNumber parses an old-format segment file name, reporting false for
+// any other name.
+func legacySegmentNumber(name string) (int, bool) {
+	var n int
+	if _, err := fmt.Sscanf(name, "%012d.log", &n); err != nil || name != segmentFileName(n) {
+		return 0, false
+	}
+	return n, true
+}
+
+// segmentFileName is the name of the old-format segment file numbered n.
 func segmentFileName(n int) string {
 	return fmt.Sprintf("%012d.log", n)
 }
@@ -56,45 +108,63 @@ func segmentFileName(n int) string {
 // scanSegmentFile calls fn for the good records of one segment file, and stops
 // at the first short or bad one.
 func scanSegmentFile(path string, fn func(id MessageID, writeUnix uint32, payload []byte) error) error {
-	f, err := os.Open(path)
+	_, err := scanRecordFile(path, 0, -1, scanBufferBytes, func(_ int64, id MessageID, writeUnix uint32, payload []byte) error {
+		return fn(id, writeUnix, payload)
+	})
+	return err
+}
+
+// scanRecordFile calls fn for the good records of one file, from offset start,
+// up to limit bytes; a negative limit means the file's size when it is opened.
+// It stops at the first short or bad record, and returns the offset where its
+// good records end. fn gets the record's offset; the payload is only valid during
+// the call. An error from fn stops the scan and is returned.
+func scanRecordFile(path string, start, limit int64, bufBytes int, fn func(off int64, id MessageID, writeUnix uint32, payload []byte) error) (int64, error) {
+	f, err := openChunkFile(path)
 	if err != nil {
-		return err
+		return start, err
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return err
+	if limit < 0 {
+		info, err := f.Stat()
+		if err != nil {
+			return start, err
+		}
+		limit = info.Size()
+	}
+	if start >= limit {
+		return start, nil
 	}
 
-	left := info.Size()
-	r := bufio.NewReaderSize(io.LimitReader(f, left), scanBufferBytes)
+	r := bufio.NewReaderSize(io.NewSectionReader(f, start, limit-start), bufBytes)
+	off := start
 	header := make([]byte, frameHeaderBytes)
 	var payload []byte
-	for left >= frameHeaderBytes {
+	for limit-off >= frameHeaderBytes {
 		if _, err := io.ReadFull(r, header); err != nil {
-			return endOfFile(err)
+			return off, endOfFile(err)
 		}
 		n := int64(binary.BigEndian.Uint32(header[4:8]))
-		if binary.BigEndian.Uint32(header[0:4]) != frameMagic || n > left-frameHeaderBytes {
-			return nil // bad magic, or a record that runs past the end of the file
+		if binary.BigEndian.Uint32(header[0:4]) != frameMagic || n > limit-off-frameHeaderBytes {
+			return off, nil // bad magic, or a record that runs past the end
 		}
 		if int64(cap(payload)) < n {
 			payload = make([]byte, n)
 		}
 		payload = payload[:n]
 		if _, err := io.ReadFull(r, payload); err != nil {
-			return endOfFile(err)
+			return off, endOfFile(err)
 		}
 		if crc32.ChecksumIEEE(payload) != binary.BigEndian.Uint32(header[20:24]) {
-			return nil // bad checksum
+			return off, nil // bad checksum
 		}
-		left -= frameHeaderBytes + n
 		id := MessageID(binary.BigEndian.Uint64(header[8:16]))
-		if err := fn(id, binary.BigEndian.Uint32(header[16:20]), payload); err != nil {
-			return err
+		if err := fn(off, id, binary.BigEndian.Uint32(header[16:20]), payload); err != nil {
+			return off, err
 		}
+		off += frameHeaderBytes + n
 	}
-	return nil
+	return off, nil
 }
 
 // endOfFile turns a short read into the end of the file's good records; any

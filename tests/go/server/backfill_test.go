@@ -28,11 +28,11 @@ func backfillDirs(t *testing.T) (dataDir, segDir string) {
 	return dataDir, segDir
 }
 
-// storeBuffers appends payloads to the store in dataDir the way the server does,
-// then closes it. The IDs go on from whatever the store already holds.
-func storeBuffers(t *testing.T, dataDir string, payloads ...[]byte) {
+// storeBuffers appends payloads to the store in dataDir for run runID, the way the
+// server does, then closes it. The IDs go on from whatever the store already holds.
+func storeBuffers(t *testing.T, dataDir, runID string, payloads ...[]byte) {
 	t.Helper()
-	store, err := OpenStreamStore(dataDir)
+	store, err := OpenStreamStore(dataDir, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,14 +42,6 @@ func storeBuffers(t *testing.T, dataDir string, payloads ...[]byte) {
 		}
 	}
 	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// logSession records a run in sessions.log.
-func logSession(t *testing.T, segDir, sid string, firstID MessageID) {
-	t.Helper()
-	if err := appendSessionStart(segDir, sid, firstID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -70,13 +62,11 @@ func writeTwoRuns(t *testing.T, segDir string) {
 	t.Helper()
 	w1 := uint32(time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC).Unix())
 	w2 := w1 + 3600
-	writeSegment(t, segDir, 1,
+	writeRun(t, segDir, "S1",
 		segmentRecord{id: 1, writeUnix: w1, payload: frameBatch(uint64(w1)*1000, testFrame{id: 100, data: plainData})},
 		segmentRecord{id: 2, writeUnix: w1, payload: frameBatch(uint64(w1)*1000+1000, testFrame{id: 100, data: plainData})})
-	writeSegment(t, segDir, 3,
+	writeRun(t, segDir, "S2",
 		segmentRecord{id: 3, writeUnix: w2, payload: frameBatch(uint64(w2)*1000, testFrame{id: 101, data: muxData(1)})})
-	logSession(t, segDir, "S1", 1)
-	logSession(t, segDir, "S2", 3)
 }
 
 // noEnvironment is an environment with nothing set.
@@ -111,8 +101,7 @@ func TestBackfillWritesSameRowsAsLive(t *testing.T) {
 	}
 
 	dataDir, segDir := backfillDirs(t)
-	storeBuffers(t, dataDir, bufs...)
-	logSession(t, segDir, "S1", 1)
+	storeBuffers(t, dataDir, "S1", bufs...)
 	replayed := &recordSink{}
 	results, err := runBackfill(backfillOptions{SegmentsDir: segDir, CAN: CANConfig{DBCDir: dir}, All: true}, replayed)
 	if err != nil {
@@ -153,12 +142,10 @@ func TestBackfillWritesSameRowsAsLive(t *testing.T) {
 func TestBackfillSessionRevIsItsStart(t *testing.T) {
 	dir := writeFrameTestDBC(t)
 	dataDir, segDir := backfillDirs(t)
-	storeBuffers(t, dataDir,
+	storeBuffers(t, dataDir, "S1",
 		frameBatch(testTSMS, testFrame{id: 100, data: plainData}),
 		frameBatch(testTSMS+1000, testFrame{id: 100, data: plainData}))
-	logSession(t, segDir, "S1", 1)
-	storeBuffers(t, dataDir, frameBatch(testTSMS+5000, testFrame{id: 101, data: muxData(1)}))
-	logSession(t, segDir, "S2", 3)
+	storeBuffers(t, dataDir, "S2", frameBatch(testTSMS+5000, testFrame{id: 101, data: muxData(1)}))
 
 	started := time.UnixMilli(1_700_000_123_456)
 	sink := &recordSink{}
@@ -186,14 +173,12 @@ func TestBackfillSessionRevIsItsStart(t *testing.T) {
 func TestBackfillSelectsSessions(t *testing.T) {
 	dir := writeFrameTestDBC(t)
 	dataDir, segDir := backfillDirs(t)
-	storeBuffers(t, dataDir,
+	storeBuffers(t, dataDir, "S1",
 		frameBatch(testTSMS, testFrame{id: 100, data: plainData}),
 		frameBatch(testTSMS+1000, testFrame{id: 100, data: plainData}))
-	logSession(t, segDir, "S1", 1)
-	storeBuffers(t, dataDir,
+	storeBuffers(t, dataDir, "S2",
 		frameBatch(testTSMS+5000, testFrame{id: 101, data: muxData(1)}),
 		frameBatch(testTSMS+6000, testFrame{id: 101, data: muxData(2)}))
-	logSession(t, segDir, "S2", 3)
 	opts := backfillOptions{SegmentsDir: segDir, CAN: CANConfig{DBCDir: dir}}
 
 	only := &recordSink{}
@@ -228,36 +213,36 @@ func TestBackfillSelectsSessions(t *testing.T) {
 	}
 }
 
-// Records written before sessions.log existed have no recorded run. They all go
-// to one session, named from the write time of the first of them.
-func TestBackfillFallbackSession(t *testing.T) {
+// Only run folders are sessions. The legacy folder, which holds the old files
+// after migration, is not read: not listed, and not replayed.
+func TestBackfillIgnoresLegacyFolder(t *testing.T) {
 	dir := writeFrameTestDBC(t)
 	_, segDir := backfillDirs(t)
-	old := uint32(time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC).Unix())
-	later := old + 3600
-	writeSegment(t, segDir, 1,
-		segmentRecord{id: 1, writeUnix: old, payload: frameBatch(uint64(old)*1000, testFrame{id: 100, data: plainData})},
-		segmentRecord{id: 2, writeUnix: old, payload: frameBatch(uint64(old)*1000+1, testFrame{id: 101, data: muxData(1)})})
-	writeSegment(t, segDir, 3,
-		segmentRecord{id: 3, writeUnix: later, payload: frameBatch(uint64(later)*1000, testFrame{id: 100, data: plainData})})
-	logSession(t, segDir, "S2", 3)
+	writeRun(t, segDir, "S2",
+		segmentRecord{id: 3, writeUnix: uint32(time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC).Unix()),
+			payload: frameBatch(uint64(time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC).UnixMilli()), testFrame{id: 100, data: plainData})})
+	legacy := filepath.Join(segDir, legacyFolder)
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSegment(t, legacy, 1, segmentRecord{id: 1, writeUnix: 1, payload: frameBatch(1000, testFrame{id: 100, data: plainData})})
+	if err := os.WriteFile(filepath.Join(legacy, "sessions.log"), []byte("S1 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	sessions, err := listBackfillSessions(segDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 2 || sessions[0].SID != "20240601T120000Z" || sessions[0].Records != 2 ||
-		sessions[0].FirstID != 1 || sessions[0].LastID != 2 || sessions[1].SID != "S2" || sessions[1].Records != 1 {
-		t.Fatalf("sessions %+v, want the fallback run with records 1-2, then S2", sessions)
+	if len(sessions) != 1 || sessions[0].SID != "S2" || sessions[0].Records != 1 || sessions[0].FirstID != 3 {
+		t.Fatalf("sessions %+v, want only S2 with record 3", sessions)
 	}
-
 	sink := &recordSink{}
 	if _, err := runBackfill(backfillOptions{SegmentsDir: segDir, CAN: CANConfig{DBCDir: dir}, All: true}, sink); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"20240601T120000Z", "20240601T120000Z", "S2"}
-	if got := frameSessions(sink.lines(t)); !slices.Equal(got, want) {
-		t.Fatalf("frame rows carry sessions %v, want %v", got, want)
+	if got := frameSessions(sink.lines(t)); !slices.Equal(got, []string{"S2"}) {
+		t.Fatalf("frame rows carry sessions %v, want [S2]", got)
 	}
 }
 
@@ -270,8 +255,7 @@ func TestBackfillBadClockUsesWriteTime(t *testing.T) {
 	written := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
 	buf := append(frameBatch(uint64(written.Add(30*time.Second).UnixMilli()), testFrame{id: 100, data: plainData}),
 		frameBatch(uint64(written.Add(120*time.Second).UnixMilli()), testFrame{id: 100, data: plainData})...)
-	writeSegment(t, segDir, 1, segmentRecord{id: 1, writeUnix: uint32(written.Unix()), payload: buf})
-	logSession(t, segDir, "S1", 1)
+	writeRun(t, segDir, "S1", segmentRecord{id: 1, writeUnix: uint32(written.Unix()), payload: buf})
 
 	sink := &recordSink{}
 	results, err := runBackfill(backfillOptions{SegmentsDir: segDir, CAN: CANConfig{DBCDir: dir}, All: true}, sink)
@@ -299,10 +283,8 @@ func TestBackfillSkipsRecentSession(t *testing.T) {
 	}
 	oldWrite, oldMS := at(10 * time.Minute)
 	newWrite, newMS := at(30 * time.Second)
-	writeSegment(t, segDir, 1, segmentRecord{id: 1, writeUnix: oldWrite, payload: frameBatch(oldMS, testFrame{id: 100, data: plainData})})
-	writeSegment(t, segDir, 2, segmentRecord{id: 2, writeUnix: newWrite, payload: frameBatch(newMS, testFrame{id: 100, data: plainData})})
-	logSession(t, segDir, "S1", 1)
-	logSession(t, segDir, "S2", 2)
+	writeRun(t, segDir, "S1", segmentRecord{id: 1, writeUnix: oldWrite, payload: frameBatch(oldMS, testFrame{id: 100, data: plainData})})
+	writeRun(t, segDir, "S2", segmentRecord{id: 2, writeUnix: newWrite, payload: frameBatch(newMS, testFrame{id: 100, data: plainData})})
 	opts := backfillOptions{
 		SegmentsDir: segDir,
 		CAN:         CANConfig{DBCDir: dir},

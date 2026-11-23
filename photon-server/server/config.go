@@ -53,6 +53,11 @@ const (
 	DefaultLiveSeconds = 5 * time.Second
 )
 
+// DefaultStoreMaxGB is how many GiB may be on disk under segments/ before appends
+// wait. A choice: the old fixed limit was 8 GiB, and 64 leaves room for a longer
+// recording.
+const DefaultStoreMaxGB = 64
+
 // Config holds runtime configuration for the photon server.
 type Config struct {
 	Host             string
@@ -68,6 +73,7 @@ type Config struct {
 	CFAud            string // Cloudflare Access application AUD tag
 	WebDir           string // static web bundle served at /; empty = none
 	DataDir          string
+	StoreMaxGB       int // GiB on disk under segments/ before appends wait, at least 1
 	TsdbDir          string
 	DbcPath          string
 	LiveWriter       string
@@ -222,6 +228,9 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.DataDir) == "" {
 		return fmt.Errorf("data directory cannot be empty")
 	}
+	if c.StoreMaxGB < 1 {
+		return fmt.Errorf("invalid store max: %d GiB (must be at least 1)", c.StoreMaxGB)
+	}
 	if c.InfluxFlush < 0 {
 		return fmt.Errorf("invalid influx flush interval: %s (must not be negative)", c.InfluxFlush)
 	}
@@ -259,6 +268,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		V2Port:           DefaultV2Port,
 		V2CFPort:         DefaultV2CFPort,
 		DataDir:          DefaultDataDir,
+		StoreMaxGB:       DefaultStoreMaxGB,
 		InfluxURL:        DefaultInfluxURL,
 		InfluxDB:         DefaultInfluxDB,
 		InfluxFlush:      DefaultInfluxFlush,
@@ -289,6 +299,13 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	}
 	if dir := getenvFirst(getenv, "PHOTON_STORAGE_PATH", "PHOTON_DATA_DIR"); dir != "" {
 		cfg.DataDir = dir
+	}
+	if v := getenvFirst(getenv, "PHOTON_STORE_MAX_GB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("PHOTON_STORE_MAX_GB: %w", err)
+		}
+		cfg.StoreMaxGB = n
 	}
 	if portStr := getenvFirst(getenv, "PHOTON_VIDEO_INGRESS_PORT"); portStr != "" {
 		if p, err := strconv.Atoi(portStr); err == nil {
@@ -398,6 +415,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var v2PortFlag, v2CFPortFlag int
 	var cfTeamFlag, cfAudFlag, webDirFlag string
 	var dataDirFlag string
+	var storeMaxGBFlag int
 	var tsdbDirFlag string
 	var dbcPathFlag string
 	var dbcDirFlag string
@@ -434,6 +452,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.StringVar(&webDirFlag, "web-dir", cfg.WebDir, "static web bundle served at / (empty = none)")
 	fs.StringVar(&dataDirFlag, "data-dir", cfg.DataDir, "Directory path for persistent storage segments")
 	fs.StringVar(&dataDirFlag, "storage-path", cfg.DataDir, "Alias for -data-dir")
+	fs.IntVar(&storeMaxGBFlag, "store-max-gb", cfg.StoreMaxGB, "GiB on disk under segments/ before appends wait, at least 1 (env PHOTON_STORE_MAX_GB)")
 	fs.StringVar(&tsdbDirFlag, "tsdb-dir", cfg.TsdbDir, "TSDB root (default: <data-dir>/tsdb)")
 	fs.StringVar(&dbcPathFlag, "dbc", cfg.DbcPath, "DBC file for the live TSDB writer")
 	fs.StringVar(&dbcDirFlag, "dbc-dir", cfg.CAN.DBCDir, "folder of *.dbc files the CAN decoder uses, one per bus: dbc/highnoon2026 (HighNoon 2026), dbc/spec/dbc or dbc/spec-cdr/dbc (HighNoon 2027)")
@@ -467,6 +486,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -cf-aud string               Cloudflare Access application AUD tag (env: PHOTON_CF_AUD)\n")
 		fmt.Fprintf(output, "  -web-dir string              static web bundle served at / (env: PHOTON_WEB_DIR; empty = none)\n")
 		fmt.Fprintf(output, "  -data-dir, -storage-path string Storage directory (default %q, env: PHOTON_DATA_DIR)\n", DefaultDataDir)
+		fmt.Fprintf(output, "  -store-max-gb int            GiB on disk under segments/ before appends wait (default %d, env: PHOTON_STORE_MAX_GB)\n", DefaultStoreMaxGB)
 		fmt.Fprintf(output, "  -tsdb-dir string             TSDB root (default <data-dir>/tsdb, env: PHOTON_TSDB_DIR)\n")
 		fmt.Fprintf(output, "  -dbc string                  DBC for the live TSDB writer (env: PHOTON_DBC)\n")
 		fmt.Fprintf(output, "  -dbc-dir string              DBC folder for the CAN decoder (default %q, env: PHOTON_DBC_DIR;\n", DefaultCANConfig().DBCDir)
@@ -502,6 +522,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.CFAud = cfAudFlag
 	cfg.WebDir = webDirFlag
 	cfg.DataDir = dataDirFlag
+	cfg.StoreMaxGB = storeMaxGBFlag
 	cfg.TsdbDir = tsdbDirFlag
 	cfg.DbcPath = dbcPathFlag
 	cfg.CAN.DBCDir = dbcDirFlag

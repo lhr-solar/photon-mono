@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -17,15 +16,14 @@ type segmentRecord struct {
 	payload   []byte
 }
 
-// writeSegment writes records as the segment file that starts at first, the way
-// the store lays them out, with the write times the test gives.
+// writeSegment writes records as the old-format segment file that is numbered
+// first, the way the server laid them out before run folders, with the write times
+// the test gives.
 func writeSegment(t *testing.T, segDir string, first MessageID, recs ...segmentRecord) string {
 	t.Helper()
 	var file []byte
 	for _, r := range recs {
-		frame := encodeFrame(r.id, r.payload)
-		binary.BigEndian.PutUint32(frame[16:20], r.writeUnix)
-		file = append(file, frame...)
+		file = append(file, encodeFrameAt(r.id, r.writeUnix, r.payload)...)
 	}
 	path := filepath.Join(segDir, segmentFileName(int(first)))
 	if err := os.WriteFile(path, file, 0o644); err != nil {
@@ -34,7 +32,7 @@ func writeSegment(t *testing.T, segDir string, first MessageID, recs ...segmentR
 	return path
 }
 
-// scanned is one record as scanSegments delivered it. The payload is copied.
+// scanned is one record as the scans delivered it. The payload is copied.
 type scanned struct {
 	id        MessageID
 	writeUnix uint32
@@ -77,74 +75,25 @@ func snapshotTree(t *testing.T, dir string) map[string]string {
 	return files
 }
 
-// Records the store wrote, across two segment files, come back in ID order with
-// their payloads and write times.
-func TestScanSegmentsReadsRecordsInOrder(t *testing.T) {
-	dataDir := t.TempDir()
-	segDir := filepath.Join(dataDir, "segments")
-	store, err := OpenStreamStore(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := time.Now().Unix()
-	for _, p := range []string{"one", "two", "three"} {
-		if _, err := store.Append([]byte(p)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	after := time.Now().Unix()
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	// The second file, as if the store had rotated: IDs 4 and 5 with fixed write
-	// times. The second record has an empty payload.
-	writeSegment(t, segDir, 4,
-		segmentRecord{id: 4, writeUnix: 1_700_000_000, payload: []byte("four")},
-		segmentRecord{id: 5, writeUnix: 1_700_000_100})
+// The old-format reader still reads the old files in file order, with their
+// payloads and write times. The migration depends on it.
+func TestScanSegmentsReadsOldRecordsInOrder(t *testing.T) {
+	segDir := t.TempDir()
+	writeSegment(t, segDir, 1,
+		segmentRecord{id: 1, writeUnix: 1_700_000_000, payload: []byte("one")},
+		segmentRecord{id: 2, writeUnix: 1_700_000_010, payload: []byte("two")})
+	writeSegment(t, segDir, 2,
+		segmentRecord{id: 3, writeUnix: 1_700_000_100, payload: []byte("three")},
+		segmentRecord{id: 4, writeUnix: 1_700_000_110})
 
-	got := collectSegments(t, segDir)
-	if len(got) != 5 {
-		t.Fatalf("got %d records, want 5: %+v", len(got), got)
+	want := []scanned{
+		{1, 1_700_000_000, "one"},
+		{2, 1_700_000_010, "two"},
+		{3, 1_700_000_100, "three"},
+		{4, 1_700_000_110, ""},
 	}
-	for i, want := range []string{"one", "two", "three"} {
-		r := got[i]
-		if r.id != MessageID(i+1) || r.payload != want {
-			t.Fatalf("record %d = %+v, want id %d payload %q", i, r, i+1, want)
-		}
-		if int64(r.writeUnix) < before || int64(r.writeUnix) > after {
-			t.Fatalf("record %d write time %d outside [%d, %d]", i, r.writeUnix, before, after)
-		}
-	}
-	if want := (scanned{4, 1_700_000_000, "four"}); got[3] != want {
-		t.Fatalf("record 4 = %+v, want %+v", got[3], want)
-	}
-	if want := (scanned{5, 1_700_000_100, ""}); got[4] != want {
-		t.Fatalf("record 5 = %+v, want %+v", got[4], want)
-	}
-}
-
-// The server keeps the active segment open and writes to it. A scan sees the
-// records on disk when it runs.
-func TestScanSegmentsSeesActiveSegment(t *testing.T) {
-	dataDir := t.TempDir()
-	store, err := OpenStreamStore(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	for _, p := range []string{"a", "b"} {
-		if _, err := store.Append([]byte(p)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := collectSegments(t, filepath.Join(dataDir, "segments")); len(got) != 2 {
-		t.Fatalf("scan while open saw %d records, want 2", len(got))
-	}
-	if _, err := store.Append([]byte("c")); err != nil {
-		t.Fatal(err)
-	}
-	if got := collectSegments(t, filepath.Join(dataDir, "segments")); len(got) != 3 || got[2].payload != "c" {
-		t.Fatalf("scan after another write saw %+v, want 3 records ending in c", got)
+	if got := collectSegments(t, segDir); !slices.Equal(got, want) {
+		t.Fatalf("scanned %+v, want %+v", got, want)
 	}
 }
 
@@ -219,6 +168,51 @@ func TestScanSegmentsLeavesDataDirAlone(t *testing.T) {
 		t.Fatalf("scanned IDs %v, want %v", ids, want)
 	}
 	assertSameTree(t, before, snapshotTree(t, dataDir))
+}
+
+// Records the store wrote into a run folder, and a run written by hand after it,
+// come back run by run in folder order, with their payloads and write times.
+func TestScanRunsReadsRecordsInOrder(t *testing.T) {
+	setStoreSizes(t, 32<<20, 1<<20, 8<<20)
+	dataDir := t.TempDir()
+	segDir := filepath.Join(dataDir, "segments")
+	store, err := OpenStreamStore(dataDir, "S1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().Unix()
+	for _, p := range []string{"one", "two", "three"} {
+		if _, err := store.Append([]byte(p)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := time.Now().Unix()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeRun(t, segDir, "S2",
+		segmentRecord{id: 4, writeUnix: 1_700_000_000, payload: []byte("four")},
+		segmentRecord{id: 5, writeUnix: 1_700_000_100})
+
+	got := collectRuns(t, segDir)
+	if len(got) != 5 {
+		t.Fatalf("got %d records, want 5: %+v", len(got), got)
+	}
+	for i, want := range []string{"one", "two", "three"} {
+		r := got[i]
+		if r.run != "S1" || r.id != MessageID(i+1) || r.payload != want {
+			t.Fatalf("record %d = %+v, want run S1 id %d payload %q", i, r, i+1, want)
+		}
+		if int64(r.writeUnix) < before || int64(r.writeUnix) > after {
+			t.Fatalf("record %d write time %d outside [%d, %d]", i, r.writeUnix, before, after)
+		}
+	}
+	if want := (runRecord{"S2", scanned{4, 1_700_000_000, "four"}}); got[3] != want {
+		t.Fatalf("record 4 = %+v, want %+v", got[3], want)
+	}
+	if want := (runRecord{"S2", scanned{5, 1_700_000_100, ""}}); got[4] != want {
+		t.Fatalf("record 5 = %+v, want %+v", got[4], want)
+	}
 }
 
 // assertSameTree fails the test if the files in after are not the files in
