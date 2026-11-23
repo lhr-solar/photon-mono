@@ -186,6 +186,9 @@ func (d *Decoder) time(m *Message, tNS int64) int64 {
 // older time is left alone, so a clock that steps back is not dragged forward.
 const sameTimeWindow = 1_000_000
 
+// SameTimeWindow is sameTimeWindow for other writers of per-frame points.
+const SameTimeWindow = sameTimeWindow
+
 func bump[K comparable](last map[K]int64, key K, tNS int64) int64 {
 	if prev, ok := last[key]; ok && tNS <= prev && tNS > prev-sameTimeWindow {
 		tNS = prev + 1

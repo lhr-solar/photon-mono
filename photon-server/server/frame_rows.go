@@ -38,6 +38,23 @@ type frameLayout struct {
 	msgTag string       // ",msg=<message name>"
 	sel    *dbc.Signal  // the mux selector, written as the tap tag; nil when there is none
 	fields []frameField // the integer signals other than the selector, sorted by name
+
+	// last is the time of the last row per mux page (-1: no tap). Each page is
+	// its own InfluxDB series, which keeps one point per time, so rows of a
+	// page within dbc.SameTimeWindow are moved apart (see bump).
+	last map[int16]int64
+}
+
+// bump moves tNS to 1 ns after the page's last row when it falls within
+// dbc.SameTimeWindow of it, as the dbc Decoder does: CANP v3 stamps whole
+// milliseconds, and two frames of a series in the same millisecond would
+// otherwise overwrite each other. An older time is left alone.
+func (l *frameLayout) bump(page int16, tNS int64) int64 {
+	if prev, ok := l.last[page]; ok && tNS <= prev && tNS > prev-dbc.SameTimeWindow {
+		tNS = prev + 1
+	}
+	l.last[page] = tNS
+	return tNS
 }
 
 // frameField is one integer signal, written as a field.
@@ -56,12 +73,15 @@ func buildLayouts(c *dbc.Catalog) map[uint32]*frameLayout {
 }
 
 func newFrameLayout(m *dbc.Message) *frameLayout {
-	l := &frameLayout{msgTag: ",msg=" + tagEscaper.Replace(m.Name)}
+	l := &frameLayout{msgTag: ",msg=" + tagEscaper.Replace(m.Name), last: map[int16]int64{-1: 0}}
 	if m.Selector >= 0 {
 		l.sel = &m.Signals[m.Selector]
 	}
 	for i := range m.Signals {
 		sig := &m.Signals[i]
+		if sig.Mux >= 0 {
+			l.last[sig.Mux] = 0 // every known page has its slot, so bump does not allocate
+		}
 		if i == m.Selector || sig.Kind != dbc.Integer {
 			continue
 		}
@@ -154,7 +174,7 @@ func (s *frameSession) appendFrame(l *frameLayout, data []byte, tNS int64) {
 		return
 	}
 	b = append(b, ' ')
-	b = strconv.AppendInt(b, tNS, 10)
+	b = strconv.AppendInt(b, l.bump(page, tNS), 10)
 	b = append(b, '\n')
 	s.buf = b
 	s.n++

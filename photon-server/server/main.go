@@ -157,10 +157,10 @@ func main() {
 	pool := newBatchPool(cfg.Ingest.count(), cfg.Ingest.bufferSize())
 	log.Printf("[photon-server] Ingest pool %s", cfg.Ingest)
 
-	// Frame rows come from the decoder, so the InfluxDB writer runs only when
-	// decoding is on at startup.
+	// Frame rows come from the decoder. The writer runs whenever InfluxDB is not
+	// off, so turning decoding on from the observer later also starts rows.
 	var session *frameSession
-	if cfg.CAN.Decode && !strings.EqualFold(cfg.InfluxURL, "off") {
+	if !strings.EqualFold(cfg.InfluxURL, "off") {
 		w, err := newDBWriter(cfg.InfluxURL, cfg.InfluxDB, cfg.InfluxToken,
 			dbWriterOptions{Flush: cfg.InfluxFlush, NoSync: cfg.InfluxNoSync})
 		if err != nil {

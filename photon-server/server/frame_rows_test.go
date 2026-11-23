@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -410,6 +411,48 @@ func TestAppendFrameDoesNotAllocate(t *testing.T) {
 		})
 		if allocs != 0 {
 			t.Fatalf("appendFrame allocates %v times per row (ID %d), want 0", allocs, f.id)
+		}
+	}
+}
+
+// TestFrameRowsSameMillisecond checks that two frames of one series in the same
+// millisecond get distinct times (InfluxDB keeps one point per series and time),
+// that different mux pages are separate series, and that an older time is kept.
+func TestFrameRowsSameMillisecond(t *testing.T) {
+	sink := &recordSink{}
+	now := testNow
+	s := newTestSession(sink, &now)
+	c := newTestDecoder(t, writeFrameTestDBC(t), s)
+
+	c.decode(frameBatch(testTSMS,
+		testFrame{id: 100, data: plainData},
+		testFrame{id: 100, data: plainData},
+		testFrame{id: 101, data: muxData(1)},
+		testFrame{id: 101, data: muxData(2)},
+	))
+	c.decode(frameBatch(testTSMS-2, testFrame{id: 100, data: plainData})) // 2 ms back: a real older time
+
+	t0 := int64(testTSMS) * nsPerMs
+	want := []struct {
+		prefix string
+		ns     int64
+	}{
+		{",msg=Plain ", t0},
+		{",msg=Plain ", t0 + 1},
+		{",msg=Muxed,tap=1 ", t0},
+		{",msg=Muxed,tap=2 ", t0},
+		{",msg=Plain ", t0 - 2*nsPerMs},
+	}
+	rows := rowsWithPrefix(sink.lines(t), "frame,")
+	if len(rows) != len(want) {
+		t.Fatalf("got %d frame rows, want %d:\n%s", len(rows), len(want), strings.Join(rows, "\n"))
+	}
+	for i, w := range want {
+		if !strings.Contains(rows[i], w.prefix) {
+			t.Fatalf("row %d = %q, want it to contain %q", i, rows[i], w.prefix)
+		}
+		if got := rows[i][strings.LastIndexByte(rows[i], ' ')+1:]; got != strconv.FormatInt(w.ns, 10) {
+			t.Fatalf("row %d time = %s, want %d", i, got, w.ns)
 		}
 	}
 }
