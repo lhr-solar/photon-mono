@@ -139,13 +139,16 @@ func (c *Catalog) set(m *Message) {
 }
 
 // sameLayout reports whether a and b decode a frame identically. Bus is left
-// out; it is the one thing a duplicate is expected to differ in.
+// out; it is the one thing a duplicate is expected to differ in. So is a
+// signal's [min|max]: it only sets a plot's default range, not the decoding.
 func sameLayout(a, b *Message) bool {
 	if a.Name != b.Name || a.Length != b.Length || a.Selector != b.Selector || len(a.Signals) != len(b.Signals) {
 		return false
 	}
 	for i := range a.Signals {
-		if a.Signals[i] != b.Signals[i] {
+		x, y := a.Signals[i], b.Signals[i]
+		x.Min, x.Max, y.Min, y.Max = 0, 0, 0, 0
+		if x != y {
 			return false
 		}
 	}

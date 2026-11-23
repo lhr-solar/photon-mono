@@ -144,3 +144,17 @@ func TestLookupWire(t *testing.T) {
 		t.Errorf("an extended ID with bit 12 fell back to %s", m.Name)
 	}
 }
+
+// The same message on two buses may differ in a signal's [min|max]: that is only
+// a plot range, so it still loads as one message.
+func TestDuplicateIgnoresRange(t *testing.T) {
+	a := "BO_ 100 Dup: 8 Node\n SG_ A : 0|8@1+ (1,0) [0|255] \"\" Node\n\n"
+	b := "BO_ 100 Dup: 8 Node\n SG_ A : 0|8@1+ (1,0) [0|100] \"\" Node\n\n"
+	c, err := Load(writeDBCs(t, map[string]string{"CarCAN.dbc": a, "ChargerCAN.dbc": b}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Lookup(100) == nil {
+		t.Fatal("Dup missing")
+	}
+}
