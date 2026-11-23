@@ -31,7 +31,7 @@ func loadTestCatalog(t *testing.T) *dbc.Catalog {
 // "run-test".
 func newTestHub(t *testing.T) *v2Hub {
 	t.Helper()
-	return newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), func() string { return "run-test" })
+	return newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), func() string { return "run-test" }, newLiveRing(liveRingMinFrames))
 }
 
 // serveHub serves h on a test server and returns the WebSocket URL of /v2.
@@ -179,8 +179,8 @@ func TestV2HelloAckThenCatalog(t *testing.T) {
 	if ack.CatalogSHA != cat.SHA || ack.LiveRun != "run-test" || ack.ServerTimeNS == 0 {
 		t.Fatalf("hello_ack = %+v, want catalog_sha %q and live_run run-test", ack, cat.SHA)
 	}
-	if ack.Levels == nil || len(ack.Levels) != 0 || len(ack.Features) != 1 || ack.Features[0] != "catalog" {
-		t.Fatalf("levels %v features %v, want [] and [catalog]", ack.Levels, ack.Features)
+	if ack.Levels == nil || len(ack.Levels) != 0 || len(ack.Features) != 2 || ack.Features[0] != "catalog" || ack.Features[1] != "live" {
+		t.Fatalf("levels %v features %v, want [] and [catalog live]", ack.Levels, ack.Features)
 	}
 
 	var msg wireCatalog

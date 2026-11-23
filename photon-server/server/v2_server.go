@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"log"
@@ -19,7 +20,9 @@ const (
 	v2Protocol     = 2
 	v2ReadLimit    = 64 << 10 // largest message a client may send
 	v2WriteTimeout = 5 * time.Second
-	v2SendQueue    = 64 // messages queued for a client before it is too slow
+	v2SendQueue    = 64 // control messages queued for a client before it is too slow
+	v2LiveQueue    = 4  // live messages queued for a client; the pusher waits when full
+	v2BulkQueue    = 16 // bulk messages queued for a client (video, later)
 	v2HelloTimeout = 5 * time.Second
 	v2IdleTimeout  = 5 * time.Second // a client silent this long is dropped
 	v2StopTimeout  = 2 * time.Second
@@ -36,6 +39,7 @@ type v2Hub struct {
 	verifier *accessVerifier // Cloudflare Access check; nil when that listener is off
 	webDir   string          // static bundle served at /; empty for none
 	liveRun  func() string   // the frame session ID, or "" when there is none
+	ring     *liveRing       // the recent CAN frames that live clients read
 
 	helloTimeout time.Duration
 	idleTimeout  time.Duration
@@ -43,22 +47,26 @@ type v2Hub struct {
 	lanListening atomic.Bool
 	cfListening  atomic.Bool
 	authFailures atomic.Uint64 // hello, token and Access JWT rejections
+	gaps         atomic.Uint64 // gap messages sent to live clients that fell behind
 
 	mu         sync.Mutex
 	clients    map[*v2Client]struct{} // clients past hello
 	catalog    []byte                 // the current catalog message, or nil
 	catalogSHA string
+	cat        *dbc.Catalog     // the catalog in use, or nil when decoding is off
+	busIdx     map[string]uint8 // bus name to its index in cat.Buses
 }
 
 // newV2Hub builds the protocol v2 hub. Its LAN login is the gate's password.
 // Cloudflare Access is checked only when both cfg.CFTeam and cfg.CFAud are set.
 // liveRun gives the frame session ID for hello_ack, or "" when there is none; nil
-// means "".
-func newV2Hub(cfg *Config, gate *ClientGate, liveRun func() string) *v2Hub {
+// means "". ring is the live frame ring the clients read; it must not be nil.
+func newV2Hub(cfg *Config, gate *ClientGate, liveRun func() string, ring *liveRing) *v2Hub {
 	h := &v2Hub{
 		gate:         gate,
 		webDir:       cfg.WebDir,
 		liveRun:      liveRun,
+		ring:         ring,
 		helloTimeout: v2HelloTimeout,
 		idleTimeout:  v2IdleTimeout,
 		clients:      make(map[*v2Client]struct{}),
@@ -88,6 +96,7 @@ func (h *v2Hub) SetCatalog(c *dbc.Catalog) {
 			}
 		}
 		h.catalog, h.catalogSHA = nil, ""
+		h.cat, h.busIdx = nil, nil
 		return
 	}
 	if h.catalog != nil && c.SHA == h.catalogSHA {
@@ -98,6 +107,10 @@ func (h *v2Hub) SetCatalog(c *dbc.Catalog) {
 		return
 	}
 	h.catalog, h.catalogSHA = msg, c.SHA
+	h.cat, h.busIdx = c, make(map[string]uint8, len(c.Buses))
+	for i, b := range c.Buses {
+		h.busIdx[b] = uint8(i)
+	}
 	for cl := range h.clients {
 		cl.enqueue(msg)
 	}
@@ -148,9 +161,10 @@ func (h *v2Hub) serveWS(w http.ResponseWriter, r *http.Request, cf bool) {
 	if !ok {
 		return
 	}
-	c := &v2Client{conn: conn, send: make(chan []byte, v2SendQueue), done: make(chan struct{})}
+	c := newV2Client(conn)
 	h.register(c, user)
 	go c.writeLoop()
+	go c.pushLive(h)
 	defer close(c.done)
 	defer h.unregister(c)
 	c.readLoop(r.Context(), h.idleTimeout)
@@ -217,7 +231,7 @@ func (h *v2Hub) register(c *v2Client, user string) {
 		CatalogSHA:   h.catalogSHA,
 		LiveRun:      h.liveRun(),
 		Levels:       []int{},
-		Features:     []string{"catalog"},
+		Features:     []string{"catalog", "live"},
 	}))
 	if h.catalog != nil {
 		c.enqueue(h.catalog)
@@ -258,26 +272,61 @@ func (h *v2Hub) closeClients(ctx context.Context) {
 }
 
 // v2Client is one connection past hello. From registration on, only its writer
-// goroutine writes to conn; everything else queues on send.
+// goroutine writes to conn; everything else queues on one of the three queues.
 type v2Client struct {
 	conn    *wsConn
-	send    chan []byte   // text messages waiting for the writer
+	control chan outMsg   // replies and catalogs; sent first
+	live    chan outMsg   // LiveFrames and Gap, from the pusher; the pusher waits when full
+	bulk    chan outMsg   // bulk data such as video; sent when the others are empty
 	done    chan struct{} // closed when the connection's handler returns
-	closing sync.Once     // closes a client that fell behind, once
+	closing sync.Once     // closes a client whose control queue is full, once
+
+	sub   atomic.Pointer[liveSub] // the message IDs the client subscribed to, or nil
+	resub chan struct{}           // says the subscription changed; cap 1
 }
 
-// enqueue queues msg for the writer. A client whose queue is full cannot keep
-// up, so it is closed, and nothing waits for that to finish.
+// outMsg is one message waiting for the writer. For a binary message the writer
+// stamps the seq field of the header, so data must be a whole message.
+type outMsg struct {
+	typ  wsMessageType
+	data []byte
+}
+
+// newV2Client wraps a connection that has passed hello. Nothing is queued yet.
+func newV2Client(conn *wsConn) *v2Client {
+	return &v2Client{
+		conn:    conn,
+		control: make(chan outMsg, v2SendQueue),
+		live:    make(chan outMsg, v2LiveQueue),
+		bulk:    make(chan outMsg, v2BulkQueue),
+		done:    make(chan struct{}),
+		resub:   make(chan struct{}, 1),
+	}
+}
+
+// enqueue queues a text message on the control queue. A client whose queue is
+// full cannot keep up, so it is closed, and nothing waits for that to finish.
 func (c *v2Client) enqueue(msg []byte) {
 	if msg == nil {
 		return
 	}
 	select {
-	case c.send <- msg:
+	case c.control <- outMsg{typ: wsText, data: msg}:
 	default:
 		c.closing.Do(func() {
 			go func() { _ = c.conn.Close(wsStatusPolicyViolation, "too slow") }()
 		})
+	}
+}
+
+// enqueueLive queues a live message, waiting for room in the live queue. It
+// returns false, without queueing, once the client is done.
+func (c *v2Client) enqueueLive(m outMsg) bool {
+	select {
+	case c.live <- m:
+		return true
+	case <-c.done:
+		return false
 	}
 }
 
@@ -286,18 +335,50 @@ func (c *v2Client) enqueueError(code, message string) {
 	c.enqueue(encodeV2(v2Error{Type: "error", Code: code, Message: message}))
 }
 
-// writeLoop sends queued messages until the handler returns. A failed write means
-// the connection is gone, so it is closed, which also ends the reads.
+// next returns the message to send next: control first, then live, then bulk.
+// It waits while all three are empty, and returns false once the client is done.
+func (c *v2Client) next() (outMsg, bool) {
+	select {
+	case m := <-c.control:
+		return m, true
+	default:
+	}
+	select {
+	case m := <-c.control:
+		return m, true
+	case m := <-c.live:
+		return m, true
+	default:
+	}
+	select {
+	case m := <-c.control:
+		return m, true
+	case m := <-c.live:
+		return m, true
+	case m := <-c.bulk:
+		return m, true
+	case <-c.done:
+		return outMsg{}, false
+	}
+}
+
+// writeLoop sends queued messages until the handler returns. Each binary message
+// gets the next seq, in the order the messages go out. A failed write means the
+// connection is gone, so it is closed, which also ends the reads.
 func (c *v2Client) writeLoop() {
+	var seq uint32
 	for {
-		select {
-		case <-c.done:
+		m, ok := c.next()
+		if !ok {
 			return
-		case msg := <-c.send:
-			if err := writeV2(c.conn, msg); err != nil {
-				_ = c.conn.CloseNow()
-				return
-			}
+		}
+		if m.typ == wsBinary {
+			binary.LittleEndian.PutUint32(m.data[4:8], seq)
+			seq++
+		}
+		if err := writeWS(c.conn, m.typ, m.data); err != nil {
+			_ = c.conn.CloseNow()
+			return
 		}
 	}
 }
@@ -334,6 +415,8 @@ func (c *v2Client) handle(typ wsMessageType, data []byte) {
 	switch msg.Type {
 	case "ping":
 		c.enqueue(encodeV2(v2Pong{Type: "pong", TMS: msg.TMS}))
+	case "subscribe":
+		c.subscribe(data)
 	case "":
 		c.enqueueError("unknown_type", "message has no type")
 	default:
@@ -379,9 +462,14 @@ func encodeV2(v any) []byte {
 
 // writeV2 sends one text message on conn, giving up after v2WriteTimeout.
 func writeV2(conn *wsConn, msg []byte) error {
+	return writeWS(conn, wsText, msg)
+}
+
+// writeWS sends one message of type typ on conn, giving up after v2WriteTimeout.
+func writeWS(conn *wsConn, typ wsMessageType, msg []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), v2WriteTimeout)
 	defer cancel()
-	return conn.Write(ctx, wsText, msg)
+	return conn.Write(ctx, typ, msg)
 }
 
 // startV2 opens the protocol v2 listeners: the LAN one on cfg.Host:cfg.V2Port,

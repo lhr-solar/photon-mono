@@ -157,6 +157,12 @@ func main() {
 	pool := newBatchPool(cfg.Ingest.count(), cfg.Ingest.bufferSize())
 	log.Printf("[photon-server] Ingest pool %s", cfg.Ingest)
 
+	// The live ring keeps the recent frames for protocol v2 clients.
+	ring := newLiveRing(liveRingFrames(cfg))
+	ringFrames, _ := ring.stats()
+	log.Printf("[photon-server] Live ring %d frames (%.1f MiB, %s at peak)",
+		ringFrames, float64(ring.bytes())/(1<<20), cfg.LiveSeconds)
+
 	// Frame rows come from the decoder. The writer runs whenever InfluxDB is not
 	// off, so turning decoding on from the observer later also starts rows.
 	var session *frameSession
@@ -182,7 +188,7 @@ func main() {
 		}
 		return session.sid
 	}
-	hub := newV2Hub(cfg, gate, liveRun)
+	hub := newV2Hub(cfg, gate, liveRun, ring)
 	v2Current.Store(hub)
 
 	decoder := startCANDecoder(cfg.CAN, session)
@@ -205,7 +211,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		appendLoop(store, pool, decoder, canConfig.swap)
+		appendLoop(store, pool, decoder, canConfig.swap, ring)
 		// appendLoop has returned, so nothing else writes to the session now.
 		session.Close(3 * time.Second)
 	}()
@@ -327,10 +333,11 @@ func main() {
 	}
 }
 
-// appendLoop stores each submitted buffer, decodes its CAN frames when decoder
-// is not nil, and returns the buffer to the pool. A decoder sent on swap
-// replaces the current one between buffers; nil turns decoding off.
-func appendLoop(store *StreamStore, pool *batchPool, decoder *canDecoder, swap <-chan *canDecoder) {
+// appendLoop stores each submitted buffer, adds its frames to the live ring,
+// decodes its CAN frames when decoder is not nil, and returns the buffer to the
+// pool. A decoder sent on swap replaces the current one between buffers; nil
+// turns decoding off.
+func appendLoop(store *StreamStore, pool *batchPool, decoder *canDecoder, swap <-chan *canDecoder, ring *liveRing) {
 	for {
 		var batch []byte
 		select {
@@ -354,6 +361,7 @@ func appendLoop(store *StreamStore, pool *batchPool, decoder *canDecoder, swap <
 		if _, err := store.Append(batch); err != nil {
 			// Append error during store closure or write failure
 		}
+		ring.appendBuffer(batch)
 		if decoder != nil {
 			decoder.decode(batch)
 		}

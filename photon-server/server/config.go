@@ -43,6 +43,11 @@ const (
 	// DefaultIngestStall is a choice: how long the decoder may stall (disk
 	// append, GC) before readers stop and TCP pushes back on the car.
 	DefaultIngestStall = 10 * time.Second
+	// DefaultLiveSeconds is how far back the live ring reaches. It covers
+	// InfluxDB's ~0.5 s write delay, so a client that joins live loses no frames
+	// to that delay, plus slack for a client that reads slowly. A choice: a
+	// longer window costs memory, a shorter one gives gaps sooner.
+	DefaultLiveSeconds = 5 * time.Second
 )
 
 // Config holds runtime configuration for the photon server.
@@ -71,7 +76,8 @@ type Config struct {
 	InfluxFlush      time.Duration // send buffered rows this long after the first; 0 sends each Write at once
 	InfluxNoSync     bool          // ask InfluxDB to acknowledge before its WAL is saved (no_sync=true)
 	CAN              CANConfig
-	Ingest           poolSizing // sizes the ingest buffer pool
+	Ingest           poolSizing    // sizes the ingest buffer pool
+	LiveSeconds      time.Duration // how far back the live ring for protocol v2 clients reaches
 }
 
 // CANConfig is how the server decodes the car's CAN frames. It is set here, not
@@ -218,6 +224,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid ingest pool: rate %d B/s, latency %s, stall %s (need rate and latency above zero, stall at least latency)",
 			c.Ingest.Rate, c.Ingest.Latency, c.Ingest.Stall)
 	}
+	if c.LiveSeconds <= 0 {
+		return fmt.Errorf("invalid live window: %s (must be above zero)", c.LiveSeconds)
+	}
 	if c.CAN.Decode && strings.TrimSpace(c.CAN.DBCDir) == "" {
 		return fmt.Errorf("CAN decoding is on but no DBC directory is set")
 	}
@@ -247,6 +256,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		InfluxFlush:      DefaultInfluxFlush,
 		CAN:              DefaultCANConfig(),
 		Ingest:           poolSizing{Rate: DefaultIngestRate, Latency: DefaultIngestLatency, Stall: DefaultIngestStall},
+		LiveSeconds:      DefaultLiveSeconds,
 	}
 
 	// Environment variable fallbacks
@@ -352,6 +362,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 			cfg.Ingest.Stall = d
 		}
 	}
+	if v := getenvFirst(getenv, "PHOTON_LIVE_SECONDS"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.LiveSeconds = d
+		}
+	}
 
 	fs := flag.NewFlagSet("photon-server", flag.ContinueOnError)
 	fs.SetOutput(output)
@@ -377,6 +392,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var influxNoSyncFlag bool
 	var ingestRateFlag int
 	var ingestLatencyFlag, ingestStallFlag time.Duration
+	var liveSecondsFlag time.Duration
 
 	fs.StringVar(&hostFlag, "host", cfg.Host, "Bind host/IP address (e.g. 0.0.0.0 for all interfaces, 127.0.0.1 for local only)")
 	fs.StringVar(&hostFlag, "bind", cfg.Host, "Alias for -host")
@@ -411,6 +427,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.IntVar(&ingestRateFlag, "ingest-rate", cfg.Ingest.Rate, "peak CAN ingest in bytes/s; sizes the ingest pool")
 	fs.DurationVar(&ingestLatencyFlag, "ingest-latency", cfg.Ingest.Latency, "hand a buffer to the decoder at most this long after its first batch")
 	fs.DurationVar(&ingestStallFlag, "ingest-stall", cfg.Ingest.Stall, "decoder stall the ingest pool absorbs before TCP pushes back")
+	fs.DurationVar(&liveSecondsFlag, "live-seconds", cfg.LiveSeconds, "how far back the live ring for protocol v2 clients reaches; a client that falls further behind gets a gap")
 
 	fs.Usage = func() {
 		fmt.Fprintf(output, "Usage of photon-server:\n")
@@ -440,6 +457,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -ingest-rate int             peak CAN bytes/s for pool sizing (default %d, env: PHOTON_INGEST_RATE)\n", DefaultIngestRate)
 		fmt.Fprintf(output, "  -ingest-latency duration     max wait before a buffer goes to the decoder (default %s, env: PHOTON_INGEST_LATENCY)\n", DefaultIngestLatency)
 		fmt.Fprintf(output, "  -ingest-stall duration       decoder stall the pool absorbs (default %s, env: PHOTON_INGEST_STALL)\n", DefaultIngestStall)
+		fmt.Fprintf(output, "  -live-seconds duration       live ring window for protocol v2 clients (default %s, env: PHOTON_LIVE_SECONDS)\n", DefaultLiveSeconds)
 		fmt.Fprintf(output, "\nPHOTON_NO_BROWSER=1 starts the local UI without opening a browser.\n")
 	}
 
@@ -470,6 +488,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.InfluxFlush = influxFlushFlag
 	cfg.InfluxNoSync = influxNoSyncFlag
 	cfg.Ingest = poolSizing{Rate: ingestRateFlag, Latency: ingestLatencyFlag, Stall: ingestStallFlag}
+	cfg.LiveSeconds = liveSecondsFlag
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err

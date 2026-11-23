@@ -96,10 +96,14 @@ func influxMetadata(w *dbWriter) InfluxMetadata {
 
 // V2Metadata is what the protocol v2 listeners report.
 type V2Metadata struct {
-	LANListening bool   `json:"lan_listening"`
-	CFListening  bool   `json:"cf_listening"`
-	Clients      int    `json:"clients"`       // connections past hello
-	AuthFailures uint64 `json:"auth_failures"` // hello, token and Access JWT rejections
+	LANListening    bool   `json:"lan_listening"`
+	CFListening     bool   `json:"cf_listening"`
+	Clients         int    `json:"clients"`          // connections past hello
+	AuthFailures    uint64 `json:"auth_failures"`    // hello, token and Access JWT rejections
+	LiveRingFrames  int    `json:"live_ring_frames"` // frames the live ring holds
+	LiveRingHead    uint64 `json:"live_ring_head"`   // sequence of the next frame the ring takes
+	LiveSubscribers int    `json:"live_subscribers"` // clients with at least one live ID
+	LiveGaps        uint64 `json:"live_gaps"`        // gap messages sent to clients that fell behind
 }
 
 // v2Metadata reads the protocol v2 counts; h is nil when v2 is not running.
@@ -108,13 +112,23 @@ func v2Metadata(h *v2Hub) V2Metadata {
 		return V2Metadata{}
 	}
 	h.mu.Lock()
-	clients := len(h.clients)
+	clients, subscribers := len(h.clients), 0
+	for c := range h.clients {
+		if sub := c.sub.Load(); sub != nil && sub.any {
+			subscribers++
+		}
+	}
 	h.mu.Unlock()
+	frames, head := h.ring.stats()
 	return V2Metadata{
-		LANListening: h.lanListening.Load(),
-		CFListening:  h.cfListening.Load(),
-		Clients:      clients,
-		AuthFailures: h.authFailures.Load(),
+		LANListening:    h.lanListening.Load(),
+		CFListening:     h.cfListening.Load(),
+		Clients:         clients,
+		AuthFailures:    h.authFailures.Load(),
+		LiveRingFrames:  frames,
+		LiveRingHead:    head,
+		LiveSubscribers: subscribers,
+		LiveGaps:        h.gaps.Load(),
 	}
 }
 
