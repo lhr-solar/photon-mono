@@ -143,7 +143,8 @@ func TestCANDecoderCountsFrames(t *testing.T) {
 	}
 	before := canStats.frames.Load()
 	imu := make([]byte, 32)
-	buf := canp3Batch(1_000,
+	// A real car time: the decoder drops frames stamped before 2020 (bad clock).
+	buf := canp3Batch(1_700_000_000_000,
 		canpTestFrame{id: 0x061 | canpBus0Bit, data: make([]byte, 6)}, // PedalsStatus: one row
 		canpTestFrame{id: 0x640, data: imu[:8]},                       // UprightFRAccelerationData, short: v3 carries 8 of its 32 bytes
 		canpTestFrame{id: 0x7FD | canpBus0Bit, data: make([]byte, 8)}, // Sig_Wave
