@@ -14,16 +14,32 @@ import (
 )
 
 const (
-	// dbFlushRows and dbFlushAfter: buffer A goes to InfluxDB at 10K rows or
-	// 250 ms after its first row (about 250 ms of rows at 1 MiB/s).
-	dbFlushRows  = 10_000
-	dbFlushAfter = 250 * time.Millisecond
-	// dbBufferBytes preallocates each of A and B for a full flush.
+	// dbFlushRows: the InfluxDB 3 Core docs give 10,000 lines (or 10 MB) as
+	// the optimal write batch. At peak ingest, 250 ms of rows is about that
+	// many, so the row and timer limits trigger at about the same time.
+	dbFlushRows = 10_000
+	// dbBufferBytes is what each buffer starts with: about one 10,000-row
+	// flush. A buffer grows past it only while the other one is still sending.
 	dbBufferBytes = 1 << 20
+	// dbMaxBatchBytes caps the filling buffer while the other one is still
+	// sending: the 10 MB upper end of the docs' optimal batch. Rows past it
+	// are dropped; raw segments keep every frame for backfill.
+	dbMaxBatchBytes = 10_000_000
 
 	influxMaxAttempts = 5
 	influxTimeout     = 10 * time.Second
 )
+
+// dbWriterOptions tunes how the writer talks to InfluxDB.
+type dbWriterOptions struct {
+	// Flush sends the filling buffer this long after its first row. Zero
+	// sends each Write as soon as the other buffer is free.
+	Flush time.Duration
+	// NoSync asks InfluxDB to acknowledge before its WAL is saved. The ack
+	// comes sooner, but a crash can lose the last WAL interval and some write
+	// errors (bad lines, type conflicts) are no longer reported.
+	NoSync bool
+}
 
 // rowBuf is one of the writer's two buffers: line protocol, one row per line.
 type rowBuf struct {
@@ -32,11 +48,14 @@ type rowBuf struct {
 	started time.Time // when the first row arrived
 }
 
-// dbWriter aggregates rows and posts them to InfluxDB 3 Core
-// (/api/v3/write_lp), one request per buffer. Rows fill buffer A; at
-// dbFlushRows or dbFlushAfter, A goes to the sender and B becomes the one
-// filling. If A fills again while B is still sending, Send waits. That pushes
-// back through the decoder into the buffer pool.
+// dbWriter is the one InfluxDB writer. It batches rows and posts them to
+// InfluxDB 3 Core (/api/v3/write_lp), one request per buffer. Rows fill
+// buffer A; at dbFlushRows or Flush after A's first row, A goes to the sender
+// and B becomes the one filling.
+//
+// Write never blocks the decoder. While B is still sending (a slow or down
+// InfluxDB, or retries), A keeps filling up to dbMaxBatchBytes and then drops
+// rows. Raw segments keep every frame, so dropped rows can be backfilled.
 type dbWriter struct {
 	writeURL   string
 	token      string
@@ -44,55 +63,60 @@ type dbWriter struct {
 	backoff    func(attempt int) time.Duration
 	flushRows  int
 	flushAfter time.Duration
+	maxBytes   int
 
-	mu     sync.Mutex
-	fill   *rowBuf     // A: rows collect here
-	timer  *time.Timer // flushes fill dbFlushAfter after its first row
-	closed bool
-
-	spare   chan *rowBuf // B while it is not sending
-	sending chan *rowBuf // the full buffer, for the sender
+	mu      sync.Mutex
+	idle    *sync.Cond  // signalled when the sender hands its buffer back
+	fill    *rowBuf     // A: rows collect here
+	spare   *rowBuf     // B, or nil while it is sending
+	timer   *time.Timer // sends fill flushAfter after its first row
+	closed  bool
+	sending chan *rowBuf // holds at most the one buffer being sent
 	done    chan struct{}
 
-	written atomic.Int64 // rows InfluxDB accepted
-	dropped atomic.Int64 // rows given up on (retries spent, rejected, or sent after Close)
-	failing atomic.Bool
+	written  atomic.Int64 // rows InfluxDB accepted
+	dropped  atomic.Int64 // rows given up on (buffer full, retries spent, rejected, or after Close)
+	failing  atomic.Bool
+	dropping atomic.Bool // logged that rows are being dropped for lack of room
 }
 
-func newDBWriter(baseURL, db, token string) (*dbWriter, error) {
+func newDBWriter(baseURL, db, token string, opts dbWriterOptions) (*dbWriter, error) {
 	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("bad InfluxDB URL %q", baseURL)
 	}
 	u.Path += "/api/v3/write_lp"
-	u.RawQuery = url.Values{"db": {db}, "precision": {"nanosecond"}}.Encode()
+	q := url.Values{"db": {db}, "precision": {"nanosecond"}}
+	if opts.NoSync {
+		q.Set("no_sync", "true")
+	}
+	u.RawQuery = q.Encode()
 
 	w := &dbWriter{
 		writeURL:   u.String(),
 		token:      token,
 		client:     &http.Client{Timeout: influxTimeout},
 		flushRows:  dbFlushRows,
-		flushAfter: dbFlushAfter,
+		flushAfter: opts.Flush,
+		maxBytes:   dbMaxBatchBytes,
 		fill:       &rowBuf{body: make([]byte, 0, dbBufferBytes)},
-		spare:      make(chan *rowBuf, 1),
+		spare:      &rowBuf{body: make([]byte, 0, dbBufferBytes)},
 		sending:    make(chan *rowBuf, 1),
 		done:       make(chan struct{}),
 		backoff: func(attempt int) time.Duration {
 			return time.Duration(1<<attempt) * time.Second // 2, 4, 8, 16 s
 		},
 	}
-	w.spare <- &rowBuf{body: make([]byte, 0, dbBufferBytes)}
+	w.idle = sync.NewCond(&w.mu)
 	w.timer = time.AfterFunc(time.Hour, w.flushTimer)
 	w.timer.Stop()
 	go w.run()
 	return w, nil
 }
 
-// Write adds n rows, already formatted, to buffer A in one copy. It does not
-// keep rows. It blocks only while A is full and B is still being sent.
-//
-// A Write is one pool buffer's worth of rows (at most ~570), and it is never
-// split, so A can pass dbFlushRows by that much before it is sent.
+// Write adds n rows, already formatted and each ending in '\n', to buffer A
+// in one copy. It does not keep rows and never blocks on InfluxDB. When A is
+// at dbMaxBatchBytes because B is still sending, the rows are dropped.
 func (w *dbWriter) Write(rows []byte, n int) {
 	if n == 0 {
 		return
@@ -103,19 +127,34 @@ func (w *dbWriter) Write(rows []byte, n int) {
 		w.dropped.Add(int64(n))
 		return
 	}
+	if len(w.fill.body)+len(rows) > w.maxBytes {
+		w.dropped.Add(int64(n))
+		if !w.dropping.Swap(true) {
+			log.Printf("[photon-server] InfluxDB is behind; dropping rows until it catches up (raw segments keep them)")
+		}
+		return
+	}
 	if w.fill.rows == 0 {
 		w.fill.started = time.Now()
-		w.timer.Reset(w.flushAfter)
+		if w.flushAfter > 0 {
+			w.timer.Reset(w.flushAfter)
+		}
 	}
 	w.fill.body = append(w.fill.body, rows...)
 	w.fill.rows += n
-	if w.fill.rows >= w.flushRows {
+	if w.dueLocked() {
 		w.swapLocked()
 	}
 }
 
-// flushTimer sends A once its first row is dbFlushAfter old. A swap by row
-// count may have started a newer A; then it waits out that one's time.
+// dueLocked reports whether A should go to the sender now.
+func (w *dbWriter) dueLocked() bool {
+	return w.fill.rows > 0 &&
+		(w.fill.rows >= w.flushRows || time.Since(w.fill.started) >= w.flushAfter)
+}
+
+// flushTimer sends A once its first row is flushAfter old. If B is still
+// sending, the sender swaps A in when it is done.
 func (w *dbWriter) flushTimer() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -129,15 +168,17 @@ func (w *dbWriter) flushTimer() {
 	w.swapLocked()
 }
 
-// swapLocked hands A to the sender and makes B the buffer that fills. It waits
-// for B while B is still sending.
+// swapLocked hands A to the sender and makes B the buffer that fills. It does
+// nothing while B is still sending, so it never waits.
 func (w *dbWriter) swapLocked() {
-	if w.fill.rows == 0 {
+	if w.fill.rows == 0 || w.spare == nil {
 		return
 	}
-	next := <-w.spare
-	w.sending <- w.fill
-	w.fill = next
+	w.sending <- w.fill // room for one, and the sender is idle
+	w.fill, w.spare = w.spare, nil
+	if w.dropping.Swap(false) {
+		log.Printf("[photon-server] InfluxDB caught up; rows are written again")
+	}
 }
 
 // Close sends what is buffered, waiting at most wait.
@@ -147,6 +188,9 @@ func (w *dbWriter) Close(wait time.Duration) {
 		defer w.mu.Unlock()
 		w.closed = true
 		w.timer.Stop()
+		for w.spare == nil {
+			w.idle.Wait()
+		}
 		w.swapLocked()
 		close(w.sending)
 	}()
@@ -160,17 +204,25 @@ func (w *dbWriter) Close(wait time.Duration) {
 	}
 }
 
+// run is the sender. After each buffer it takes B back and, if A is already
+// due (it filled up while B was sending), sends A straight away.
 func (w *dbWriter) run() {
 	defer close(w.done)
 	for b := range w.sending {
 		w.deliver(b)
+		w.mu.Lock()
 		b.body, b.rows = b.body[:0], 0
-		w.spare <- b
+		w.spare = b
+		if !w.closed && w.dueLocked() {
+			w.swapLocked()
+		}
+		w.idle.Broadcast()
+		w.mu.Unlock()
 	}
 }
 
 // deliver posts one buffer, retrying temporary failures. Retries hold B, so
-// a long outage backs up ingest; after influxMaxAttempts the rows are dropped.
+// A fills meanwhile; after influxMaxAttempts the rows are dropped.
 func (w *dbWriter) deliver(b *rowBuf) {
 	for attempt := 1; ; attempt++ {
 		retry, err := w.post(b.body)
