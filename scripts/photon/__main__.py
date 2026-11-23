@@ -13,7 +13,7 @@ if sys.version_info < (3, 9):
 # Run as a folder (python scripts/photon), so make the package importable by name.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from photon import build_cmd, clean_cmd, run_cmd, setup_cmd, test_cmd  # noqa: E402
+from photon import build_cmd, clean_cmd, influx_cmd, run_cmd, setup_cmd, test_cmd  # noqa: E402
 from photon.common import state  # noqa: E402
 from photon.usage import USE  # noqa: E402
 
@@ -25,6 +25,7 @@ COMMANDS = {
     "server": lambda words: run_cmd.server(words, with_ui=False),
     "station": lambda words: run_cmd.server(words, with_ui=True),
     "client": run_cmd.client,
+    "influx": influx_cmd.main,
 }
 
 

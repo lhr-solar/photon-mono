@@ -49,6 +49,12 @@ USE = f"""Photon is two programs. Run the one you need, and name the use case.
       Video comes from the same host, TCP :6700 and UDP :6800.
       --ui picks the desktop window or the page; desktop when both are built.
 
+  photon influx [--auth] [--bind HOST:PORT]
+      InfluxDB 3 Core for photon-server's frame rows: file storage in {os.path.join("<data>", "influxdb3")},
+      WAL flushed every 250 ms (matching -influx-flush), on 127.0.0.1:8181, no auth unless --auth.
+      Install it by hand: unpack the influxdb3-core zip from dl.influxdata.com into
+      {os.path.join("%LOCALAPPDATA%", "influxdb3", "<version>")} (Windows), or put influxdb3 on PATH, or set PHOTON_INFLUXDB3.
+
 Flags after that are passed through to photon-server or photon-backend (--password, -ingress, ...).
 PHOTON_PASSWORD defaults to laptop. PHOTON_DATA_DIR defaults to <repo>/data.
 --dry-run on any command prints what it would run instead of running it.
