@@ -115,7 +115,10 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check ninja "cmake>=3.25"
-          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) { choco install llvm -y --no-progress }
+          # MSVC STL 14.52 (Visual Studio 18) needs clang 22 or newer (STL1000).
+          $clang = "C:\Program Files\LLVM\bin\clang.exe"
+          $major = if (Test-Path $clang) { [int]((& $clang --version | Select-Object -First 1) -replace '.*version (\d+).*', '$1') } else { 0 }
+          if ($major -lt 22) { choco upgrade llvm -y --no-progress }
           "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Versions
         run: |
@@ -163,8 +166,11 @@ jobs:
       - name: Toolchain
         run: |
           python -m pip install --disable-pip-version-check ninja
-          # The runner image ships LLVM; install it if this image does not.
-          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) { choco install llvm -y --no-progress }
+          # The runner image ships LLVM, but the MSVC STL in Visual Studio 18 (14.52) refuses
+          # clang older than 22 (STL1000), so upgrade when it is missing or older.
+          $clang = "C:\Program Files\LLVM\bin\clang.exe"
+          $major = if (Test-Path $clang) { [int]((& $clang --version | Select-Object -First 1) -replace '.*version (\d+).*', '$1') } else { 0 }
+          if ($major -lt 22) { choco upgrade llvm -y --no-progress }
           # Put clang ahead of anything else named clang.
           "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Versions
