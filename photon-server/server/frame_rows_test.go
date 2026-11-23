@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"math"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -188,8 +189,13 @@ func TestFrameRowCases(t *testing.T) {
 		want  string // the row after the session tag; "" means no frame row
 	}{
 		{
-			name:  "every integer signal, signed one negative, float left out",
+			name:  "every signal, signed one negative, float32 as a float",
 			frame: testFrame{id: 100, data: plainData},
+			want:  ",msg=Plain Alpha=-5i,Mid=4660i,Speed=1.5399896e-36,Zeta=200i",
+		},
+		{
+			name:  "a NaN float is left out",
+			frame: testFrame{id: 100, data: []byte{0xC8, 0xFB, 0x12, 0x34, 0x00, 0x00, 0xC0, 0x7F}},
 			want:  ",msg=Plain Alpha=-5i,Mid=4660i,Zeta=200i",
 		},
 		{
@@ -272,25 +278,29 @@ func TestSignalDefsAndSessionRows(t *testing.T) {
 	}
 	lines := sink.lines(t)
 
-	// Seven integer signals (Speed is a float), so seven rows per decoder.
+	// Eight signals (Speed is a float32 and has a row too), so eight rows per decoder.
 	defs := rowsWithPrefix(lines, "signal_def,")
-	if len(defs) != 14 {
-		t.Fatalf("%d signal_def rows, want 14 (7 for each of two decoders)", len(defs))
+	if len(defs) != 16 {
+		t.Fatalf("%d signal_def rows, want 16 (8 for each of two decoders)", len(defs))
+	}
+	if i := slices.IndexFunc(defs, func(d string) bool { return strings.Contains(d, "signal=Plain.Speed ") }); i < 0 ||
+		!strings.Contains(defs[i], `kind="f32"`) {
+		t.Fatalf("Plain.Speed signal_def missing or not kind f32: %q", defs)
 	}
 	// Each decoder stamps its signal_def rows with its own first frame's time.
 	for i, d := range defs {
 		first := t0
-		if i >= 7 {
+		if i >= 8 {
 			first = t0 + 4000 // c2's first frame
 		}
 		if want := fmt.Sprintf(" %d", int64(first)*nsPerMs); !strings.HasSuffix(d, want) {
 			t.Fatalf("signal_def %q not stamped %s", d, want)
 		}
 	}
-	// The first decoder's seven signal_def rows come straight before its first frame row.
+	// The first decoder's eight signal_def rows come straight before its first frame row.
 	firstFrame := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "frame,") })
-	if firstFrame != 7 {
-		t.Fatalf("first frame row at line %d, want 7 (after the seven signal_def rows)", firstFrame)
+	if firstFrame != 8 {
+		t.Fatalf("first frame row at line %d, want 8 (after the eight signal_def rows)", firstFrame)
 	}
 	for _, l := range lines[:firstFrame] {
 		if !strings.HasPrefix(l, "signal_def,") {
@@ -461,4 +471,42 @@ func TestFrameRowsSameMillisecond(t *testing.T) {
 func TestNilSessionCloseIsNoop(t *testing.T) {
 	var s *frameSession
 	s.Close(time.Second)
+}
+
+// The motor controller's IEEE float signals reach the frame row as floats.
+func TestFrameRowsMotorControllerFloats(t *testing.T) {
+	cat, err := dbc.Load("../dbc/spec/dbc", DefaultCANConfig().SampleRates)
+	if err != nil {
+		t.Skip(err)
+	}
+	var m *dbc.Message
+	for _, msg := range cat.Messages {
+		if msg.Name == "MC_VelocityMeasurement" {
+			m = msg
+		}
+	}
+	if m == nil {
+		t.Skip("MC_VelocityMeasurement not in the spec")
+	}
+	// Both signals are float32: put 12.5 in bytes 0-3 and 34.25 in bytes 4-7, little-endian.
+	data := binary.LittleEndian.AppendUint32(nil, math.Float32bits(12.5))
+	data = binary.LittleEndian.AppendUint32(data, math.Float32bits(34.25))
+	sink := &recordSink{}
+	now := testNow
+	s := newTestSession(sink, &now)
+	s.appendFrame(buildLayouts(cat)[m.ID], data, int64(testTSMS)*nsPerMs)
+	s.flush()
+	rows := rowsWithPrefix(sink.lines(t), "frame,")
+	if len(rows) != 1 {
+		t.Fatalf("got %d frame rows, want 1", len(rows))
+	}
+	for _, sig := range m.Signals {
+		v := 12.5
+		if sig.Start >= 32 {
+			v = 34.25
+		}
+		if want := sig.Name + "=" + strconv.FormatFloat(v, 'g', -1, 32); !strings.Contains(rows[0], want) {
+			t.Fatalf("row %q lacks %q", rows[0], want)
+		}
+	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -57,7 +58,8 @@ func (l *frameLayout) bump(page int16, tNS int64) int64 {
 	return tNS
 }
 
-// frameField is one integer signal, written as a field.
+// frameField is one signal, written as a field: integers as raw integers
+// ("...i"), IEEE floats as floats.
 type frameField struct {
 	sig *dbc.Signal
 	key string // "<signal name>="
@@ -82,7 +84,7 @@ func newFrameLayout(m *dbc.Message) *frameLayout {
 		if sig.Mux >= 0 {
 			l.last[sig.Mux] = 0 // every known page has its slot, so bump does not allocate
 		}
-		if i == m.Selector || sig.Kind != dbc.Integer {
+		if i == m.Selector {
 			continue
 		}
 		l.fields = append(l.fields, frameField{sig: sig, key: tagEscaper.Replace(sig.Name) + "="})
@@ -129,8 +131,10 @@ func newFrameSession(startedAt time.Time, sink lineSink) *frameSession {
 
 // appendFrame adds one row for a frame to the buffer, and widens the session's
 // span to the frame's time. The row has the message as a tag, the mux page as
-// the tap tag, and every integer signal on that page as a raw field. No row is
-// written when no signal is left. Once buf has room, it does not allocate.
+// the tap tag, and every signal on that page as a field: integer signals raw,
+// IEEE float signals as floats (a NaN or infinity is left out, since line
+// protocol cannot carry it). No row is written when no signal is left. Once buf
+// has room, it does not allocate.
 func (s *frameSession) appendFrame(l *frameLayout, data []byte, tNS int64) {
 	ms := tNS / nsPerMs
 	if s.startMs == 0 || ms < s.startMs {
@@ -159,15 +163,33 @@ func (s *frameSession) appendFrame(l *frameLayout, data []byte, tNS int64) {
 		if f.sig.Mux >= 0 && f.sig.Mux != page {
 			continue
 		}
-		v, ok := f.sig.RawInt(data)
+		if f.sig.Kind == dbc.Integer {
+			v, ok := f.sig.RawInt(data)
+			if !ok {
+				continue
+			}
+			b = append(b, sep)
+			sep = ','
+			b = append(b, f.key...)
+			b = strconv.AppendInt(b, v, 10)
+			b = append(b, 'i')
+			continue
+		}
+		raw, ok := f.sig.Raw(data)
 		if !ok {
+			continue
+		}
+		v, bits := math.Float64frombits(raw), 64
+		if f.sig.Kind == dbc.Float32 {
+			v, bits = float64(math.Float32frombits(uint32(raw))), 32
+		}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
 			continue
 		}
 		b = append(b, sep)
 		sep = ','
 		b = append(b, f.key...)
-		b = strconv.AppendInt(b, v, 10)
-		b = append(b, 'i')
+		b = strconv.AppendFloat(b, v, 'g', -1, bits)
 	}
 	if sep == ' ' {
 		s.buf = b[:start]
@@ -180,8 +202,8 @@ func (s *frameSession) appendFrame(l *frameLayout, data []byte, tNS int64) {
 	s.n++
 }
 
-// appendSignalDefs queues one signal_def row for every integer signal in c, so
-// the stored raw integers can be scaled later. startMs is the frame time, in ms,
+// appendSignalDefs queues one signal_def row for every signal in c, so the
+// stored raw values can be scaled later; kind says int, f32 or f64. startMs is the frame time, in ms,
 // of the decoder's first frame, and the rows carry it. It also makes c the DBC
 // that the session row names.
 func (s *frameSession) appendSignalDefs(c *dbc.Catalog, startMs int64) {
@@ -195,18 +217,16 @@ func (s *frameSession) appendSignalDefs(c *dbc.Catalog, startMs int64) {
 	var defs []signalDef
 	for _, m := range c.Messages {
 		for i := range m.Signals {
-			if sig := &m.Signals[i]; sig.Kind == dbc.Integer {
-				defs = append(defs, signalDef{name: m.Name + "." + sig.Name, sig: sig})
-			}
+			defs = append(defs, signalDef{name: m.Name + "." + m.Signals[i].Name, sig: &m.Signals[i]})
 		}
 	}
 	slices.SortStableFunc(defs, func(a, b signalDef) int { return strings.Compare(a.name, b.name) })
 
 	for _, d := range defs {
-		s.buf = fmt.Appendf(s.buf, "signal_def,dbc_sha=%s,signal=%s factor=%s,offset=%s,unit=\"%s\" %d\n",
+		s.buf = fmt.Appendf(s.buf, "signal_def,dbc_sha=%s,signal=%s factor=%s,offset=%s,unit=\"%s\",kind=\"%s\" %d\n",
 			tagEscaper.Replace(c.SHA), tagEscaper.Replace(d.name),
 			strconv.FormatFloat(d.sig.Factor, 'g', -1, 64), strconv.FormatFloat(d.sig.Offset, 'g', -1, 64),
-			strEscaper.Replace(d.sig.Unit), startMs*nsPerMs)
+			strEscaper.Replace(d.sig.Unit), signalKind(d.sig.Kind), startMs*nsPerMs)
 		s.n++
 	}
 }
@@ -249,4 +269,15 @@ func (s *frameSession) Close(wait time.Duration) {
 	}
 	s.flush()
 	s.sink.Close(wait)
+}
+
+// signalKind names a signal's encoding for signal_def rows.
+func signalKind(k dbc.Kind) string {
+	switch k {
+	case dbc.Float32:
+		return "f32"
+	case dbc.Float64:
+		return "f64"
+	}
+	return "int"
 }
