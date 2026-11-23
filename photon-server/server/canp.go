@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"errors"
 	"io"
+	"os"
 	"time"
 )
 
@@ -44,20 +46,29 @@ each buffer's whole batches to the parser, so every byte is copied once.
 	cur: [ whole batches | read, not checked yet | free         ]
 	     0             keep    scan            fill       len(cur)
 
-Bytes between keep and scan were skipped. After each read, cur[:keep] is
-submitted and the batch still arriving at cur[scan:fill] moves to the front
-of a fresh buffer.*/
+Bytes between keep and scan were skipped. cur[:keep] is submitted when the
+buffer is full or latency after its first whole batch, whichever comes first;
+the batch still arriving at cur[scan:fill] moves to the front of a fresh
+buffer.*/
 type canpReader struct {
-	r    io.Reader
-	pool *batchPool
-	cur  []byte
-	keep int
-	scan int
-	fill int
+	r       io.Reader
+	pool    *batchPool
+	latency time.Duration // longest a whole batch waits in cur before it is submitted
+	cur     []byte
+	keep    int
+	scan    int
+	fill    int
+	due     time.Time // when cur must be submitted; zero while it holds no whole batch
 }
 
-func newCanpReader(r io.Reader, pool *batchPool) *canpReader {
-	return &canpReader{r: r, pool: pool}
+// readDeadliner is a connection the reader can wake from when latency is up
+// and no more bytes arrive. Without one, a batch waits for the next read.
+type readDeadliner interface {
+	SetReadDeadline(time.Time) error
+}
+
+func newCanpReader(r io.Reader, pool *batchPool, latency time.Duration) *canpReader {
+	return &canpReader{r: r, pool: pool, latency: latency}
 }
 
 // run reads until the connection ends or ctx is done, and returns why.
@@ -75,13 +86,24 @@ func (c *canpReader) run(ctx context.Context) error {
 			ingressStats.reads.Add(1)
 			ingressStats.lastReceiveMS.Store(time.Now().UnixMilli())
 			c.check()
+			if c.keep > 0 && c.due.IsZero() {
+				c.setDue(time.Now().Add(c.latency))
+			}
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
 			return err
 		}
 		if err := c.flush(ctx); err != nil {
 			return err
 		}
+	}
+}
+
+// setDue arms (or, with zero, disarms) the submit deadline on the connection.
+func (c *canpReader) setDue(t time.Time) {
+	c.due = t
+	if d, ok := c.r.(readDeadliner); ok {
+		_ = d.SetReadDeadline(t)
 	}
 }
 
@@ -134,10 +156,13 @@ func (c *canpReader) skip(n int) {
 	c.scan += n
 }
 
-// flush submits the whole batches after a read and leaves room for the next one
+// flush submits the whole batches once the buffer is full or they are due,
+// and leaves room for the next read.
 func (c *canpReader) flush(ctx context.Context) error {
-	if c.keep == 0 && c.fill < len(c.cur) {
-		return nil // nothing to submit yet and room to read more
+	full := c.fill == len(c.cur)
+	timeUp := c.keep > 0 && !time.Now().Before(c.due)
+	if !full && !timeUp {
+		return nil // room to read more, and nothing due yet
 	}
 	if c.keep == 0 && c.scan > 0 { // Full of skipped bytes ahead of a batch still arriving
 		c.fill = copy(c.cur, c.cur[c.scan:c.fill])
@@ -167,6 +192,7 @@ func (c *canpReader) flush(ctx context.Context) error {
 		c.pool.put(c.cur)
 	}
 	c.cur, c.keep, c.scan, c.fill = next, 0, 0, n
+	c.setDue(time.Time{})
 	return nil
 }
 
@@ -184,6 +210,7 @@ func (c *canpReader) split(next []byte) {
 	ingressStats.batches.Add(1)
 	c.submit()
 	c.cur, c.keep, c.scan, c.fill = next, 0, 0, canpHeaderSize+n
+	c.setDue(time.Time{})
 }
 
 // submit hands cur[:keep] to the parser, which puts the buffer back when done.

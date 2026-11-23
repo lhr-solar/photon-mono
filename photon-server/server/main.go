@@ -148,7 +148,8 @@ func main() {
 
 	clients := NewClientTracker()
 	
-	pool := newBatchPool(128, 4<<10)
+	pool := newBatchPool(cfg.Ingest.count(), cfg.Ingest.bufferSize())
+	log.Printf("[photon-server] Ingest pool %s", cfg.Ingest)
 
 	decoder := startCANDecoder(cfg.CAN)
 	// The observer can change these while the server runs.
@@ -171,7 +172,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		listenForIngress(ctx, ingressListener, &ingressConnWg, pool)
+		listenForIngress(ctx, ingressListener, &ingressConnWg, pool, cfg.Ingest.Latency)
 	}()
 
 	// Client fan-out listener & connection tracking
@@ -322,6 +323,7 @@ func listenForIngress(
 	listener net.Listener,
 	connWg *sync.WaitGroup, 
 	pool *batchPool,
+	latency time.Duration,
 ) {
 	ingressStats.listening.Store(true)
 	defer ingressStats.listening.Store(false)
@@ -343,12 +345,12 @@ func listenForIngress(
 		connWg.Add(1)
 		go func(c net.Conn) {
 			defer connWg.Done()
-			readIngressConnection(ctx, c, pool)
+			readIngressConnection(ctx, c, pool, latency)
 		}(conn)
 	}
 }
 
-func readIngressConnection(ctx context.Context, conn net.Conn, pool *batchPool) {
+func readIngressConnection(ctx context.Context, conn net.Conn, pool *batchPool, latency time.Duration) {
 	// This reader owns the connection and its active-connection count.
 	defer conn.Close()
 	defer ingressStats.active.Add(-1)
@@ -366,7 +368,7 @@ func readIngressConnection(ctx context.Context, conn net.Conn, pool *batchPool) 
 	}()
 
 	// The reader submits batches to the parser itself, and returns when the connection ends.
-	err := newCanpReader(conn, pool).run(ctx)
+	err := newCanpReader(conn, pool, latency).run(ctx)
 	if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && ctx.Err() == nil {
 		ingressStats.readFailures.Add(1)
 		log.Printf("[photon-server] ingress %s: %v; closing", conn.RemoteAddr(), err)

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"server/dbc"
 )
@@ -16,6 +17,10 @@ import (
 type canDecoder struct {
 	dec       *dbc.Decoder
 	published dbc.Stats // what decode has already added to canStats
+
+	emit     func(id uint32, bus string, data []byte, tNS int64) // goodClock, bound once
+	maxNS    int64                                               // latest frame time accepted in this buffer
+	badClock uint64                                              // frames dropped for a bad car clock
 }
 
 // newCANDecoder loads the DBCs in cfg. Rows have nowhere to go until the DB
@@ -26,7 +31,9 @@ func newCANDecoder(cfg CANConfig) (*canDecoder, error) {
 		return nil, err
 	}
 	log.Printf("[photon-server] CAN decoding %d messages from %s", len(catalog.Messages), cfg.DBCDir)
-	return &canDecoder{dec: dbc.NewDecoder(catalog, discardRows{})}, nil
+	c := &canDecoder{dec: dbc.NewDecoder(catalog, discardRows{})}
+	c.emit = c.goodClock
+	return c, nil
 }
 
 // startCANDecoder loads the DBCs when cfg.Decode is on. It returns nil, with a
@@ -49,7 +56,8 @@ func startCANDecoder(cfg CANConfig) *canDecoder {
 // canStats. They add up across decoders, so turning decoding off and on again
 // keeps the totals.
 func (c *canDecoder) decode(buf []byte) {
-	walkCANP3(buf, c.dec.Decode)
+	c.maxNS = time.Now().Add(frameMaxFuture).UnixNano()
+	walkCANP3(buf, c.emit)
 	s, p := c.dec.Stats, c.published
 	canStats.frames.Add(s.Frames - p.Frames)
 	canStats.rows.Add(s.Rows - p.Rows)
@@ -57,6 +65,29 @@ func (c *canDecoder) decode(buf []byte) {
 	canStats.short.Add(s.Short - p.Short)
 	canStats.unknownMux.Add(s.UnknownMux - p.UnknownMux)
 	c.published = s
+}
+
+const (
+	// frameMinValidNS (2020-01-01) drops frames sent before the car's clock
+	// was set, which would otherwise be stored near 1970.
+	frameMinValidNS = int64(1577836800) * 1_000_000_000
+	// frameMaxFuture drops frames this far ahead of the server clock.
+	frameMaxFuture = 60 * time.Second
+)
+
+// goodClock decodes a frame unless its car timestamp is before the car's
+// clock was set or too far in the future. The first bad one is logged.
+func (c *canDecoder) goodClock(id uint32, bus string, data []byte, tNS int64) {
+	if tNS < frameMinValidNS || tNS > c.maxNS {
+		if c.badClock == 0 {
+			log.Printf("[photon-server] CAN decode: skipping frames with a bad car clock (first at %s)",
+				time.Unix(0, tNS).UTC().Format(time.RFC3339))
+		}
+		c.badClock++
+		canStats.badClock.Add(1)
+		return
+	}
+	c.dec.Decode(id, bus, data, tNS)
 }
 
 // canSettings is the CAN configuration the running server uses. The observer
@@ -132,6 +163,7 @@ var canStats struct {
 	unknownID  atomic.Uint64
 	short      atomic.Uint64
 	unknownMux atomic.Uint64
+	badClock   atomic.Uint64 // frames dropped for a bad car clock
 }
 
 const (
