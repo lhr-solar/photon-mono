@@ -80,6 +80,7 @@ type CANMetadata struct {
 	UnknownID  uint64 `json:"unknown_id"`  // frames no DBC defines, saved raw
 	Short      uint64 `json:"short"`       // frames too short for some signals
 	UnknownMux uint64 `json:"unknown_mux"` // frames naming an undefined mux page
+	BadClock   uint64 `json:"bad_clock"`   // frames dropped: car clock unset or too far ahead
 }
 
 type QueueMetadata struct {
@@ -87,6 +88,13 @@ type QueueMetadata struct {
 	Capacity  int    `json:"capacity"`
 	PeakDepth uint64 `json:"peak_depth"`
 	BlockedMS int64  `json:"blocked_ms"`
+	// The ingest pool: its size, buffers in flight now and at most, and the
+	// longest a reader waited for a free buffer.
+	PoolBuffers     int     `json:"pool_buffers"`
+	PoolBufferBytes int     `json:"pool_buffer_bytes"`
+	PoolInUse       int     `json:"pool_in_use"`
+	PoolHighWater   int64   `json:"pool_high_water"`
+	PoolLongestWait float64 `json:"pool_longest_wait_ms"`
 }
 
 type StoredChunkMetadata struct {
@@ -254,6 +262,12 @@ func writeServerMetadata(
 				Capacity:  cap(pool.ready),
 				PeakDepth: queueStats.peakDepth.Load(),
 				BlockedMS: blockedNS / int64(time.Millisecond),
+
+				PoolBuffers:     cap(pool.free),
+				PoolBufferBytes: pool.size,
+				PoolInUse:       pool.inUse(),
+				PoolHighWater:   pool.highWater.Load(),
+				PoolLongestWait: float64(pool.longestNS.Load()) / 1e6,
 			},
 			Storage: storageMetadata(storage),
 			Video:   videoMetadata(video),
@@ -264,6 +278,7 @@ func writeServerMetadata(
 				UnknownID:  canStats.unknownID.Load(),
 				Short:      canStats.short.Load(),
 				UnknownMux: canStats.unknownMux.Load(),
+				BadClock:   canStats.badClock.Load(),
 			},
 			Config: configMetadata(settings.current()),
 		}

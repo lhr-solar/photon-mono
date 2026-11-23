@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"server/dbc"
 )
@@ -24,6 +25,17 @@ const (
 	DefaultDataDir          = "./data"
 	DefaultInfluxURL        = "http://127.0.0.1:8181"
 	DefaultInfluxDB         = "photon_dev"
+
+	// Ingest pool inputs; batch_pool.go derives the pool from them.
+	// DefaultIngestRate is the upper bound from dbc/spec/topology.yaml: 8 buses,
+	// 4.5 Mbit/s total; an 8-byte classic frame is ~111 bits, so ~40k frames/s
+	// at 100% bus load, x 29 B per CANP v3 record.
+	DefaultIngestRate = 40_000 * canpFrameSize
+	// DefaultIngestLatency is half the car's own 20 ms batching (FLUSH_INTERVAL_US).
+	DefaultIngestLatency = 10 * time.Millisecond
+	// DefaultIngestStall is a choice: how long the decoder may stall (disk
+	// append, GC) before readers stop and TCP pushes back on the car.
+	DefaultIngestStall = 10 * time.Second
 )
 
 // Config holds runtime configuration for the photon server.
@@ -45,6 +57,7 @@ type Config struct {
 	InfluxDB         string
 	InfluxToken      string // env only, so it stays out of process listings
 	CAN              CANConfig
+	Ingest           poolSizing // sizes the ingest buffer pool
 }
 
 // CANConfig is how the server decodes the car's CAN frames. It is set here, not
@@ -172,6 +185,10 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.DataDir) == "" {
 		return fmt.Errorf("data directory cannot be empty")
 	}
+	if c.Ingest.Rate <= 0 || c.Ingest.Latency <= 0 || c.Ingest.Stall < c.Ingest.Latency {
+		return fmt.Errorf("invalid ingest pool: rate %d B/s, latency %s, stall %s (need rate and latency above zero, stall at least latency)",
+			c.Ingest.Rate, c.Ingest.Latency, c.Ingest.Stall)
+	}
 	if c.CAN.Decode && strings.TrimSpace(c.CAN.DBCDir) == "" {
 		return fmt.Errorf("CAN decoding is on but no DBC directory is set")
 	}
@@ -197,6 +214,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		InfluxURL:        DefaultInfluxURL,
 		InfluxDB:         DefaultInfluxDB,
 		CAN:              DefaultCANConfig(),
+		Ingest:           poolSizing{Rate: DefaultIngestRate, Latency: DefaultIngestLatency, Stall: DefaultIngestStall},
 	}
 
 	// Environment variable fallbacks
@@ -258,6 +276,21 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		cfg.InfluxDB = db
 	}
 	cfg.InfluxToken = getenvFirst(getenv, "PHOTON_INFLUX_TOKEN", "INFLUXDB3_AUTH_TOKEN")
+	if v := getenvFirst(getenv, "PHOTON_INGEST_RATE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Ingest.Rate = n
+		}
+	}
+	if v := getenvFirst(getenv, "PHOTON_INGEST_LATENCY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Ingest.Latency = d
+		}
+	}
+	if v := getenvFirst(getenv, "PHOTON_INGEST_STALL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Ingest.Stall = d
+		}
+	}
 
 	fs := flag.NewFlagSet("photon-server", flag.ContinueOnError)
 	fs.SetOutput(output)
@@ -277,6 +310,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var passwordFlag string
 	var influxURLFlag string
 	var influxDBFlag string
+	var ingestRateFlag int
+	var ingestLatencyFlag, ingestStallFlag time.Duration
 
 	fs.StringVar(&hostFlag, "host", cfg.Host, "Bind host/IP address (e.g. 0.0.0.0 for all interfaces, 127.0.0.1 for local only)")
 	fs.StringVar(&hostFlag, "bind", cfg.Host, "Alias for -host")
@@ -301,6 +336,9 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.StringVar(&passwordFlag, "password", cfg.Password, "shared client password (env: PHOTON_PASSWORD)")
 	fs.StringVar(&influxURLFlag, "influx-url", cfg.InfluxURL, "InfluxDB 3 URL for per-frame rows, or 'off'")
 	fs.StringVar(&influxDBFlag, "influx-db", cfg.InfluxDB, "InfluxDB database for per-frame rows")
+	fs.IntVar(&ingestRateFlag, "ingest-rate", cfg.Ingest.Rate, "peak CAN ingest in bytes/s; sizes the ingest pool")
+	fs.DurationVar(&ingestLatencyFlag, "ingest-latency", cfg.Ingest.Latency, "hand a buffer to the decoder at most this long after its first batch")
+	fs.DurationVar(&ingestStallFlag, "ingest-stall", cfg.Ingest.Stall, "decoder stall the ingest pool absorbs before TCP pushes back")
 
 	fs.Usage = func() {
 		fmt.Fprintf(output, "Usage of photon-server:\n")
@@ -322,6 +360,9 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -influx-url string           InfluxDB 3 URL for per-frame rows, or off (default %q, env: PHOTON_INFLUX_URL)\n", DefaultInfluxURL)
 		fmt.Fprintf(output, "  -influx-db string            InfluxDB database (default %q, env: PHOTON_INFLUX_DB)\n", DefaultInfluxDB)
 		fmt.Fprintf(output, "                               token: env PHOTON_INFLUX_TOKEN or INFLUXDB3_AUTH_TOKEN\n")
+		fmt.Fprintf(output, "  -ingest-rate int             peak CAN bytes/s for pool sizing (default %d, env: PHOTON_INGEST_RATE)\n", DefaultIngestRate)
+		fmt.Fprintf(output, "  -ingest-latency duration     max wait before a buffer goes to the decoder (default %s, env: PHOTON_INGEST_LATENCY)\n", DefaultIngestLatency)
+		fmt.Fprintf(output, "  -ingest-stall duration       decoder stall the pool absorbs (default %s, env: PHOTON_INGEST_STALL)\n", DefaultIngestStall)
 		fmt.Fprintf(output, "\nPHOTON_NO_BROWSER=1 starts the local UI without opening a browser.\n")
 	}
 
@@ -344,6 +385,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.Password = passwordFlag
 	cfg.InfluxURL = influxURLFlag
 	cfg.InfluxDB = influxDBFlag
+	cfg.Ingest = poolSizing{Rate: ingestRateFlag, Latency: ingestLatencyFlag, Stall: ingestStallFlag}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
