@@ -477,3 +477,20 @@ func TestEmptySubscribeStopsLiveData(t *testing.T) {
 		t.Fatalf("%d live messages after the stop, want %d or %d", got, v2LiveQueue+1, v2LiveQueue+2)
 	}
 }
+
+// A subscriber to a rare ID still gets it promptly when it sits behind more
+// than liveScanMax other frames and nothing is appended after it.
+func TestLiveRareIDBehindScanCap(t *testing.T) {
+	h := newLiveHub(t, 1<<15)
+	for i := 0; i < 20000/64; i++ {
+		h.ring.appendBuffer(liveBatch(nowMS(), repeatID(0x200, 64)))
+	}
+	h.ring.appendBuffer(liveBatch(nowMS(), []uint32{0x300}))
+
+	conn := liveConn(t, h)
+	subscribeTo(t, conn, 0x300)
+	got := recordIDs(collectLive(t, conn, 1))
+	if len(got) != 1 || got[0] != 0x300 {
+		t.Fatalf("got %x, want [300]", got)
+	}
+}

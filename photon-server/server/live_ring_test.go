@@ -166,3 +166,32 @@ func TestLiveRingFramesFromConfig(t *testing.T) {
 		t.Fatalf("liveRingFrames = %d, want the minimum %d", got, liveRingMinFrames)
 	}
 }
+
+// A rare ID behind more than liveScanMax other frames: each read stops at the
+// scan cap with no wait channel, and reading on finds the frame.
+func TestLiveRingScanIsBounded(t *testing.T) {
+	r := newLiveRing(1 << 15)
+	for i := 0; i < 20000/64; i++ {
+		r.appendBuffer(liveBatch(nowMS(), repeatID(0x200, 64)))
+	}
+	r.appendBuffer(liveBatch(nowMS(), []uint32{0x300}))
+	rare := func(id uint32) bool { return id == 0x300 }
+
+	buf := make([]liveFrame, 0, 1300)
+	frames, next, _, wait := r.read(0, buf, rare)
+	if len(frames) != 0 || next != liveScanMax || wait != nil {
+		t.Fatalf("first read: %d frames, next %d, wait nil=%v; want 0, %d, true", len(frames), next, wait == nil, liveScanMax)
+	}
+	for reads := 1; ; reads++ {
+		if reads > 10 {
+			t.Fatal("rare frame not found")
+		}
+		frames, next, _, wait = r.read(next, buf, rare)
+		if len(frames) == 1 && frames[0].id == 0x300 {
+			break
+		}
+		if wait != nil {
+			t.Fatal("read reached the head without finding the rare frame")
+		}
+	}
+}

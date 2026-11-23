@@ -162,9 +162,12 @@ func (c *v2Client) pushLive(h *v2Hub) {
 			continue
 		}
 
+		cursor = next
+		if wait == nil {
+			continue // the scan stopped at liveScanMax before the head
+		}
 		// Nothing new: next is the head. Wait for an append, a new subscription or
 		// the end of the client.
-		cursor = next
 		select {
 		case <-wait:
 		case <-c.resub:

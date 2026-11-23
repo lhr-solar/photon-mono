@@ -65,13 +65,18 @@ func (r *liveRing) appendBuffer(buf []byte) {
 	}
 }
 
+// liveScanMax bounds the slots one read looks at, so a subscription to a rare
+// ID never holds the read lock (and so appendLoop) for a whole-ring scan.
+const liveScanMax = 8192
+
 // read copies the frames from sequence from onward into dst[:0], keeping those
-// whose ID keep accepts, and stops when dst is full or the ring has no more.
+// whose ID keep accepts, and stops when dst is full, liveScanMax slots have been
+// looked at, or the ring has no more.
 // next is the sequence after the last frame looked at, so a caller resumes there
 // whether or not it kept the frame. oldest is the oldest sequence still in the
 // ring. If from is older than that, the caller fell behind: no frames come back
 // and next is from. wait is the notify channel, which closes on the next append;
-// it is only meaningful when no frames came back, since then next is the head.
+// it is nil when the scan stopped before the head, so the caller reads again.
 func (r *liveRing) read(from uint64, dst []liveFrame, keep func(id uint32) bool) (frames []liveFrame, next, oldest uint64, wait <-chan struct{}) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -82,12 +87,15 @@ func (r *liveRing) read(from uint64, dst []liveFrame, keep func(id uint32) bool)
 	}
 	next = from
 	frames = dst[:0]
-	for s := from; s < r.head && len(frames) < cap(frames); s++ {
+	for s := from; s < r.head && s < from+liveScanMax && len(frames) < cap(frames); s++ {
 		f := &r.slots[s%uint64(len(r.slots))]
 		if keep(f.id) {
 			frames = append(frames, *f)
 		}
 		next = s + 1
+	}
+	if next < r.head {
+		wait = nil // more to scan: the caller reads again instead of waiting
 	}
 	return frames, next, oldest, wait
 }
