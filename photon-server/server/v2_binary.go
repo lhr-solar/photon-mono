@@ -13,13 +13,12 @@ const (
 	v2Version    = 2
 	v2HeaderSize = 12
 
-	v2MsgLiveFrames = 0x20
-	v2MsgGap        = 0x21
-	v2MsgTile       = 0x22
+	v2MsgLiveSamples = 0x20
+	v2MsgGap         = 0x21
+	v2MsgTile        = 0x22
 
-	// v2BusUnknown is the bus of a frame whose ID no DBC defines, or of every
-	// frame when there is no catalog.
-	v2BusUnknown = 0xFF
+	// v2LiveSamplesMax is the most records in one LiveSamples message: 64 KiB of them.
+	v2LiveSamplesMax = 4096
 )
 
 // v2Header is a binary message's header, as the tests read it.
@@ -38,41 +37,53 @@ func appendV2Header(b []byte, typ byte, n int) []byte {
 	return binary.LittleEndian.AppendUint32(b, uint32(n))
 }
 
-// liveSpanFrames is how many leading frames fit in one LiveFrames message. The
-// message holds each frame's time as microseconds after the earliest one in it,
-// in 32 bits, so the times must span less than 2^32 µs. The result is at least 1.
-func liveSpanFrames(frames []liveFrame) int {
-	lo, hi := frames[0].tNS, frames[0].tNS
-	for i, f := range frames {
-		lo, hi = min(lo, f.tNS), max(hi, f.tNS)
-		if (hi-lo)/1000 > math.MaxUint32 {
-			return i
-		}
-	}
-	return len(frames)
+// liveSample is one decoded value in a LiveSamples message, with its time made
+// absolute. Signal is the catalog signal index.
+type liveSample struct {
+	TNS    int64
+	Signal uint32
+	Value  float64
 }
 
-// encodeLiveFrames returns a LiveFrames message holding frames, which must not be
-// empty and must pass liveSpanFrames. The base time is the earliest frame's, not
-// the first one's: the ring holds arrival order, and car times can go backwards.
-// busOf gives each frame's bus index in the catalog, or v2BusUnknown.
-func encodeLiveFrames(frames []liveFrame, busOf func(id uint32) uint8) []byte {
-	base := frames[0].tNS
-	size := v2HeaderSize + 12 // header, then base_ns, count and reserved
-	for _, f := range frames {
-		base = min(base, f.tNS)
-		size += 10 + int(f.n) // dt_us, can_id, bus, len, data
+// liveSampleSize is the bytes one record of a LiveSamples message takes.
+const liveSampleSize = 16
+
+// liveSampleMessages returns the LiveSamples messages that carry recs, in order. A
+// message ends when it holds v2LiveSamplesMax records, and before a record that is
+// earlier than the message's base time or more than 2^32 µs after it, since dt_us
+// cannot say that. The result is empty for no records.
+func liveSampleMessages(recs []liveSample) [][]byte {
+	var msgs [][]byte
+	for start := 0; start < len(recs); {
+		base := recs[start].TNS
+		end := start
+		for end < len(recs) && end-start < v2LiveSamplesMax {
+			dt := recs[end].TNS - base
+			if dt < 0 || dt/1000 > math.MaxUint32 {
+				break
+			}
+			end++
+		}
+		msgs = append(msgs, encodeLiveSamples(base, recs[start:end]))
+		start = end
 	}
+	return msgs
+}
+
+// encodeLiveSamples returns a LiveSamples message holding recs, which must be
+// within the limits liveSampleMessages keeps: at or after baseNS, at most 2^32 µs
+// after it, and at most v2LiveSamplesMax of them.
+func encodeLiveSamples(baseNS int64, recs []liveSample) []byte {
+	size := v2HeaderSize + 12 + liveSampleSize*len(recs) // header, then base_ns, count and reserved
 	b := make([]byte, 0, size)
-	b = appendV2Header(b, v2MsgLiveFrames, size-v2HeaderSize)
-	b = binary.LittleEndian.AppendUint64(b, uint64(base))
-	b = binary.LittleEndian.AppendUint16(b, uint16(len(frames)))
+	b = appendV2Header(b, v2MsgLiveSamples, size-v2HeaderSize)
+	b = binary.LittleEndian.AppendUint64(b, uint64(baseNS))
+	b = binary.LittleEndian.AppendUint16(b, uint16(len(recs)))
 	b = binary.LittleEndian.AppendUint16(b, 0)
-	for _, f := range frames {
-		b = binary.LittleEndian.AppendUint32(b, uint32((f.tNS-base)/1000))
-		b = binary.LittleEndian.AppendUint32(b, f.id)
-		b = append(b, busOf(f.id), f.n)
-		b = append(b, f.data[:f.n]...)
+	for _, r := range recs {
+		b = binary.LittleEndian.AppendUint32(b, uint32((r.TNS-baseNS)/1000))
+		b = binary.LittleEndian.AppendUint32(b, r.Signal)
+		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(r.Value))
 	}
 	return b
 }
@@ -179,43 +190,28 @@ func decodeV2Header(b []byte) (v2Header, error) {
 	return h, nil
 }
 
-// liveRecord is one frame of a LiveFrames message, with its time made absolute.
-type liveRecord struct {
-	TNS  int64
-	ID   uint32
-	Bus  uint8
-	Data []byte
-}
-
-// decodeLiveFrames reads a LiveFrames message back into its frames.
-func decodeLiveFrames(b []byte) ([]liveRecord, error) {
+// decodeLiveSamples reads a LiveSamples message back into its records, with their
+// times made absolute.
+func decodeLiveSamples(b []byte) ([]liveSample, error) {
 	h, err := decodeV2Header(b)
-	if err != nil || h.Type != v2MsgLiveFrames || h.Len < 12 {
+	if err != nil || h.Type != v2MsgLiveSamples || h.Len < 12 {
 		return nil, errV2Message
 	}
 	p := b[v2HeaderSize:]
 	base := int64(binary.LittleEndian.Uint64(p[0:8]))
 	count := int(binary.LittleEndian.Uint16(p[8:10]))
 	p = p[12:]
-	recs := make([]liveRecord, 0, count)
-	for range count {
-		if len(p) < 10 {
-			return nil, errV2Message
-		}
-		n := int(p[9])
-		if n > 64 || len(p) < 10+n {
-			return nil, errV2Message
-		}
-		recs = append(recs, liveRecord{
-			TNS:  base + int64(binary.LittleEndian.Uint32(p[0:4]))*1000,
-			ID:   binary.LittleEndian.Uint32(p[4:8]),
-			Bus:  p[8],
-			Data: p[10 : 10+n],
-		})
-		p = p[10+n:]
-	}
-	if len(p) != 0 {
+	if len(p) != count*liveSampleSize {
 		return nil, errV2Message
+	}
+	recs := make([]liveSample, 0, count)
+	for range count {
+		recs = append(recs, liveSample{
+			TNS:    base + int64(binary.LittleEndian.Uint32(p[0:4]))*1000,
+			Signal: binary.LittleEndian.Uint32(p[4:8]),
+			Value:  math.Float64frombits(binary.LittleEndian.Uint64(p[8:16])),
+		})
+		p = p[liveSampleSize:]
 	}
 	return recs, nil
 }

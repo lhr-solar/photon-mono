@@ -92,3 +92,55 @@ func TestCan0BitIDs(t *testing.T) {
 		t.Fatalf("a 14-bit standard ID loaded")
 	}
 }
+
+// A signal's [min|max] range is kept, with negative and decimal bounds.
+func TestSignalRangeKept(t *testing.T) {
+	c, err := Load(writeDBCs(t, map[string]string{"Car.dbc": "BO_ 100 R: 8 Node\n" +
+		" SG_ Neg : 0|8@1- (1,0) [-655.36|-0.5] \"\" Node\n" +
+		" SG_ Dec : 8|16@1+ (0.01,0) [0.0|655.35] \"V\" Node\n" +
+		" SG_ Whole : 24|8@1+ (1,0) [0|255] \"\" Node\n\n"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]float64{"Neg": {-655.36, -0.5}, "Dec": {0, 655.35}, "Whole": {0, 255}}
+	m := c.Lookup(100)
+	if m == nil || len(m.Signals) != len(want) {
+		t.Fatalf("message = %+v, want 3 signals", m)
+	}
+	for _, s := range m.Signals {
+		if r := want[s.Name]; s.Min != r[0] || s.Max != r[1] {
+			t.Errorf("%s range [%v|%v], want [%v|%v]", s.Name, s.Min, s.Max, r[0], r[1])
+		}
+	}
+	if unit := m.Signals[1].Unit; unit != "V" {
+		t.Errorf("unit %q after the range, want V", unit)
+	}
+}
+
+// LookupWire falls back to the ID without the can0 bit when the DBC does not
+// define the ID with it, and prefers the exact ID when it does.
+func TestLookupWire(t *testing.T) {
+	only, err := Load(writeDBCs(t, map[string]string{"Car.dbc": oneMessage(0x123, "A")}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	both, err := Load(writeDBCs(t, map[string]string{"Car.dbc": oneMessage(0x123, "A") + oneMessage(0x1123, "B")}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := only.LookupWire(0x1123); m == nil || m.ID != 0x123 {
+		t.Errorf("LookupWire(0x1123) without 0x1123 defined = %+v, want 0x123", m)
+	}
+	if m := both.LookupWire(0x1123); m == nil || m.ID != 0x1123 {
+		t.Errorf("LookupWire(0x1123) with 0x1123 defined = %+v, want 0x1123", m)
+	}
+	if m := both.LookupWire(0x123); m == nil || m.ID != 0x123 {
+		t.Errorf("LookupWire(0x123) = %+v, want 0x123", m)
+	}
+	if m := only.LookupWire(0x1124); m != nil {
+		t.Errorf("LookupWire(0x1124) = %s, want nil", m.Name)
+	}
+	if m := only.LookupWire(0x80000000 | 0x1123); m != nil {
+		t.Errorf("an extended ID with bit 12 fell back to %s", m.Name)
+	}
+}

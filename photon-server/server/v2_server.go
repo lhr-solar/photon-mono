@@ -51,14 +51,14 @@ type v2Hub struct {
 	cfListening  atomic.Bool
 	authFailures atomic.Uint64 // hello, token and Access JWT rejections
 	gaps         atomic.Uint64 // gap messages sent to live clients that fell behind
+	liveSamples  atomic.Uint64 // decoded samples sent to live clients
 
 	mu         sync.Mutex
 	clients    map[*v2Client]struct{} // clients past hello
 	catalog    []byte                 // the current catalog message, or nil
 	catalogSHA string
-	cat        *dbc.Catalog     // the catalog in use, or nil when decoding is off
-	busIdx     map[string]uint8 // bus name to its index in cat.Buses
-	signals    []tileSignal     // the signals of cat in catalog index order
+	cat        *dbc.Catalog // the catalog in use, or nil when decoding is off
+	signals    []tileSignal // the signals of cat in catalog index order
 }
 
 // newV2Hub builds the protocol v2 hub. Its LAN login is the gate's password.
@@ -92,7 +92,8 @@ var emptyCatalog = []byte(`{"type":"catalog","sha":"","buses":[],"messages":[]}`
 
 // SetCatalog makes c the catalog that clients get. Every client past hello is
 // sent it when its SHA is new. A nil c means decoding is off: clients that had
-// a catalog get an empty one, and later hellos get none.
+// a catalog get an empty one, and later hellos get none. A new catalog clears
+// every client's subscription, since its signal indexes change meaning.
 func (h *v2Hub) SetCatalog(c *dbc.Catalog) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -103,7 +104,8 @@ func (h *v2Hub) SetCatalog(c *dbc.Catalog) {
 			}
 		}
 		h.catalog, h.catalogSHA = nil, ""
-		h.cat, h.busIdx, h.signals = nil, nil, nil
+		h.cat, h.signals = nil, nil
+		h.dropSubscriptions()
 		return
 	}
 	if h.catalog != nil && c.SHA == h.catalogSHA {
@@ -114,10 +116,8 @@ func (h *v2Hub) SetCatalog(c *dbc.Catalog) {
 		return
 	}
 	h.catalog, h.catalogSHA = msg, c.SHA
-	h.cat, h.busIdx, h.signals = c, make(map[string]uint8, len(c.Buses)), catalogSignals(c)
-	for i, b := range c.Buses {
-		h.busIdx[b] = uint8(i)
-	}
+	h.cat, h.signals = c, catalogSignals(c)
+	h.dropSubscriptions()
 	for cl := range h.clients {
 		cl.enqueue(msg)
 	}
@@ -285,7 +285,7 @@ type v2Client struct {
 	conn    *wsConn
 	hub     *v2Hub        // the hub the client is on; set before its reader starts
 	control chan outMsg   // replies and catalogs; sent first
-	live    chan outMsg   // LiveFrames, Gap and tile pieces; the sender waits when full
+	live    chan outMsg   // LiveSamples, Gap and tile pieces; the sender waits when full
 	bulk    chan outMsg   // bulk data such as video; sent when the others are empty
 	done    chan struct{} // closed when the connection's handler returns
 	closing sync.Once     // closes a client whose control queue is full, once

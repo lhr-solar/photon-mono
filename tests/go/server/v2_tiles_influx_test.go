@@ -122,14 +122,14 @@ func TestHistoryFromRealInfluxDB(t *testing.T) {
 		d = make([]byte, 8)
 		setSignalRaw(d, in.sig, uint64(k))
 		v, _ := in.sig.RawInt(d)
-		wantIn = append(wantIn, float64(v))
+		wantIn = append(wantIn, physical(in, float64(v)))
 		s.appendFrame(layouts[in.msg.ID], d, tNS)
 
 		d = make([]byte, 8)
 		setSignalRaw(d, sel, uint64(mx.sig.Mux))
 		setSignalRaw(d, mx.sig, uint64(k))
 		v, _ = mx.sig.RawInt(d)
-		wantMux = append(wantMux, float64(v))
+		wantMux = append(wantMux, physical(mx, float64(v)))
 		s.appendFrame(layouts[mx.msg.ID], d, tNS)
 	}
 	s.Close(5 * time.Second)
@@ -186,7 +186,7 @@ func TestHistoryFromRealInfluxDB(t *testing.T) {
 	}
 	wantFloat := make([]float64, 50)
 	for k := range wantFloat {
-		wantFloat[k] = float64(k) * 0.25
+		wantFloat[k] = physical(fl, float64(k)*0.25)
 	}
 	checkRaw("float", fetch(fi, 0, t0/tileSpanMS(0)), fi, wantFloat)
 	checkRaw("integer", fetch(ii, 0, t0/tileSpanMS(0)), ii, wantIn)
@@ -199,9 +199,11 @@ func TestHistoryFromRealInfluxDB(t *testing.T) {
 	}
 	for b := range 5 {
 		lo := float64(b) * 2.5
-		if tile.TMS[b] != float64(t0+int64(b)*100) || tile.Min[b] != lo || tile.Max[b] != lo+2.25 || tile.Mean[b] != lo+1.125 {
+		minV, maxV := physicalRange(fl, lo, lo+2.25)
+		mean := physical(fl, lo+1.125)
+		if tile.TMS[b] != float64(t0+int64(b)*100) || tile.Min[b] != minV || tile.Max[b] != maxV || tile.Mean[b] != mean {
 			t.Fatalf("bucket %d = (%v, %v, %v, %v), want (%d, %v, %v, %v)", b,
-				tile.TMS[b], tile.Min[b], tile.Max[b], tile.Mean[b], t0+int64(b)*100, lo, lo+2.25, lo+1.125)
+				tile.TMS[b], tile.Min[b], tile.Max[b], tile.Mean[b], t0+int64(b)*100, minV, maxV, mean)
 		}
 	}
 }

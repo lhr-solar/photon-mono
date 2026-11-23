@@ -22,9 +22,15 @@ const tileTestRun = "run-test"
 // live as its live run.
 func newTileHub(t *testing.T, fake *fakeQueries, live func() string) *v2Hub {
 	t.Helper()
+	return newTileHubOn(t, fake, live, loadTestCatalog(t))
+}
+
+// newTileHubOn is newTileHub on the catalog cat.
+func newTileHubOn(t *testing.T, fake *fakeQueries, live func() string, cat *dbc.Catalog) *v2Hub {
+	t.Helper()
 	q := newInfluxQuerier(newFakeQueryServer(t, fake), "photon_test", "", 6)
 	h := newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), live, newLiveRing(liveRingMinFrames), q)
-	h.SetCatalog(loadTestCatalog(t))
+	h.SetCatalog(cat)
 	return h
 }
 
@@ -292,8 +298,8 @@ func TestTileRawSamplesOfAPlainSignal(t *testing.T) {
 	if !slices.Equal(tile.TMS, []float64{float64(base / nsPerMs), float64(base/nsPerMs) + 1, float64(base/nsPerMs) + 2}) {
 		t.Fatalf("t_ms %v", tile.TMS)
 	}
-	if !slices.Equal(tile.Raw, []float64{0, 1, 2}) {
-		t.Fatalf("raw %v, want 0 1 2", tile.Raw)
+	if !slices.Equal(tile.Raw, []float64{physical(ts, 0), physical(ts, 1), physical(ts, 2)}) {
+		t.Fatalf("values %v, want the raw 0 1 2 scaled", tile.Raw)
 	}
 }
 
@@ -319,8 +325,11 @@ func TestTileRollupOfAMuxedSignal(t *testing.T) {
 	if q.Params["tap"] != strconv.Itoa(int(ts.sig.Mux)) {
 		t.Fatalf("tap %q, want %d", q.Params["tap"], ts.sig.Mux)
 	}
-	if tile.Level != 2 || tile.Index != index || !tile.Sealed || !slices.Equal(tile.Min, []float64{1, 2}) ||
-		!slices.Equal(tile.Max, []float64{9, 8}) || !slices.Equal(tile.Mean, []float64{5.5, 5}) {
+	min0, max0 := physicalRange(ts, 1, 9)
+	min1, max1 := physicalRange(ts, 2, 8)
+	if tile.Level != 2 || tile.Index != index || !tile.Sealed ||
+		!slices.Equal(tile.Min, []float64{min0, min1}) || !slices.Equal(tile.Max, []float64{max0, max1}) ||
+		!slices.Equal(tile.Mean, []float64{physical(ts, 5.5), physical(ts, 5)}) {
 		t.Fatalf("tile %+v", tile)
 	}
 	// Level 2 buckets are 1000 ms apart.
@@ -332,7 +341,7 @@ func TestTileRollupOfAMuxedSignal(t *testing.T) {
 // A tile of many samples arrives in pieces, each sample run starting where the
 // last one ended, and the last flag only on the last.
 func TestTileLargeLevel0ArrivesInPieces(t *testing.T) {
-	signal, _ := plainSignal(t)
+	signal, ts := plainSignal(t)
 	index := pastIndex(0)
 	from, _ := tileBounds(0, index)
 	const n = 10000
@@ -352,7 +361,7 @@ func TestTileLargeLevel0ArrivesInPieces(t *testing.T) {
 		}
 	}
 	tile := joinTile(t, pieces)
-	if tile.N != n || len(tile.Raw) != n || tile.Raw[n-1] != n-1 || tile.TMS[n-1] != float64(from/nsPerMs+1000+n-1) {
+	if tile.N != n || len(tile.Raw) != n || tile.Raw[n-1] != physical(ts, n-1) || tile.TMS[n-1] != float64(from/nsPerMs+1000+n-1) {
 		t.Fatalf("joined tile holds %d samples, want %d", tile.N, n)
 	}
 }
@@ -699,6 +708,73 @@ func TestTileAtRawLimitIsTileError(t *testing.T) {
 	requestTile(t, conn, 11, "run-old", signal, 0, pastIndex(0))
 	if msg := readTileError(t, conn, 11); !strings.Contains(msg, "more than") {
 		t.Fatalf("tile_error %q, want the raw limit named", msg)
+	}
+}
+
+// physical is a raw value of ts in the signal's unit, as the server sends it.
+func physical(ts tileSignal, raw float64) float64 {
+	return raw*ts.sig.Factor + ts.sig.Offset
+}
+
+// physicalRange is the min and max, in the signal's unit, of a bucket whose raw min
+// and max are lo and hi. A negative factor swaps them.
+func physicalRange(ts tileSignal, lo, hi float64) (float64, float64) {
+	a, b := physical(ts, lo), physical(ts, hi)
+	if ts.sig.Factor < 0 {
+		return b, a
+	}
+	return a, b
+}
+
+// A signal with a negative factor is scaled, and at level 2 its min and max trade
+// places, so min is the lower one. Neg is raw * -0.5 + 10: raw 0, 1 and 2 are 10,
+// 9.5 and 9, and a bucket of raw 2 to 8 with mean 5 is min 6, max 9, mean 7.5.
+func TestTileScalesNegativeFactor(t *testing.T) {
+	cat := liveCatalog(t)
+	signal, _ := signalAt(t, cat, "Std101", "Neg")
+
+	index := pastIndex(0)
+	from, _ := tileBounds(0, index)
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) { return http.StatusOK, rawRows(3, from) }}
+	conn := tileConn(t, newTileHubOn(t, f, fixedLive(tileTestRun), cat))
+	requestTile(t, conn, 1, "run-old", signal, 0, index)
+	if raw := joinTile(t, readTile(t, conn, 1)); !slices.Equal(raw.Raw, []float64{10, 9.5, 9}) {
+		t.Fatalf("level 0 values %v, want 10 9.5 9", raw.Raw)
+	}
+
+	index2 := pastIndex(2)
+	from2, _ := tileBounds(2, index2)
+	f2 := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) {
+		return http.StatusOK, fmt.Sprintf(`{"t_ns":%d,"lo":2,"hi":8,"mean":5}`+"\n", from2)
+	}}
+	conn2 := tileConn(t, newTileHubOn(t, f2, fixedLive(tileTestRun), cat))
+	requestTile(t, conn2, 2, "run-old", signal, 2, index2)
+	bucket := joinTile(t, readTile(t, conn2, 2))
+	if !slices.Equal(bucket.Min, []float64{6}) || !slices.Equal(bucket.Max, []float64{9}) || !slices.Equal(bucket.Mean, []float64{7.5}) {
+		t.Fatalf("level 2 min %v, max %v, mean %v; want 6, 9, 7.5", bucket.Min, bucket.Max, bucket.Mean)
+	}
+}
+
+// A sealed tile of the live run is cached with its values already scaled, so the
+// second request, answered from the cache, has the same physical values.
+func TestLiveRunTileCacheHoldsScaledValues(t *testing.T) {
+	cat := liveCatalog(t)
+	signal, _ := signalAt(t, cat, "Std101", "Neg")
+	index := pastIndex(0)
+	from, _ := tileBounds(0, index)
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) { return http.StatusOK, rawRows(3, from) }}
+	conn := tileConn(t, newTileHubOn(t, f, fixedLive(tileTestRun), cat))
+	want := []float64{10, 9.5, 9}
+
+	requestTile(t, conn, 1, tileTestRun, signal, 0, index)
+	first := joinTile(t, readTile(t, conn, 1))
+	requestTile(t, conn, 2, tileTestRun, signal, 0, index)
+	second := joinTile(t, readTile(t, conn, 2))
+	if !slices.Equal(first.Raw, want) || !slices.Equal(second.Raw, want) {
+		t.Fatalf("values %v then %v, want %v both times", first.Raw, second.Raw, want)
+	}
+	if n := len(f.queries()); n != 1 {
+		t.Fatalf("%d queries, want 1: the second request should come from the cache", n)
 	}
 }
 

@@ -2,88 +2,107 @@ package main
 
 import (
 	"encoding/binary"
+	"math"
 	"reflect"
+	"slices"
 	"testing"
 )
 
-// The LiveFrames round trip keeps every field, including extended IDs, empty
-// data and the bus byte.
-func TestV2LiveFramesRoundTrip(t *testing.T) {
+// The LiveSamples round trip keeps every field: times, signal indexes and values,
+// including negative and fractional ones. The header and the first record sit at
+// the offsets the protocol gives.
+func TestV2LiveSamplesRoundTrip(t *testing.T) {
 	const base = int64(1_700_000_000_000_000_000)
-	frames := []liveFrame{
-		{tNS: base + 2_000_000, id: 0x100, n: 8, data: [8]byte{1, 2, 3, 4, 5, 6, 7, 8}},
-		{tNS: base + 1_000_000_000, id: canpExtended | 0x18FEF100, n: 3, data: [8]byte{9, 8, 7}},
-		{tNS: base, id: 0x7FF, n: 0},
+	recs := []liveSample{
+		{TNS: base + 2_000_000, Signal: 0, Value: 12.34},
+		{TNS: base + 1_000_000_000, Signal: 17, Value: -0.5},
+		{TNS: base, Signal: 3, Value: 0},
 	}
-	buses := map[uint32]uint8{0x100: 2, canpExtended | 0x18FEF100: 0}
-	b := encodeLiveFrames(frames, func(id uint32) uint8 {
-		if bus, ok := buses[id]; ok {
-			return bus
-		}
-		return v2BusUnknown
-	})
+	b := encodeLiveSamples(base, recs)
 
-	if b[0] != 'P' || b[1] != '2' || b[2] != 2 || b[3] != v2MsgLiveFrames {
+	if b[0] != 'P' || b[1] != '2' || b[2] != 2 || b[3] != v2MsgLiveSamples {
 		t.Fatalf("header bytes %x, want \"P2\", version 2, type 0x20", b[:4])
 	}
 	h, err := decodeV2Header(b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.Seq != 0 || h.Len != uint32(len(b)-v2HeaderSize) {
-		t.Fatalf("header %+v, want seq 0 and len %d", h, len(b)-v2HeaderSize)
+	if h.Seq != 0 || h.Len != uint32(12+liveSampleSize*len(recs)) {
+		t.Fatalf("header %+v, want seq 0 and 12 + 16 bytes per record", h)
+	}
+	if got := int64(binary.LittleEndian.Uint64(b[12:20])); got != base {
+		t.Fatalf("base_ns = %d, want %d", got, base)
 	}
 	if count := binary.LittleEndian.Uint16(b[20:22]); count != 3 {
 		t.Fatalf("count = %d, want 3", count)
 	}
+	// The first record: dt_us 2000, signal 0, then its value as a float64.
+	if dt := binary.LittleEndian.Uint32(b[24:28]); dt != 2000 {
+		t.Fatalf("first dt_us = %d, want 2000", dt)
+	}
+	if v := math.Float64frombits(binary.LittleEndian.Uint64(b[32:40])); v != 12.34 {
+		t.Fatalf("first value = %v, want 12.34", v)
+	}
 
-	recs, err := decodeLiveFrames(b)
+	back, err := decodeLiveSamples(b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []liveRecord{
-		{TNS: base + 2_000_000, ID: 0x100, Bus: 2, Data: []byte{1, 2, 3, 4, 5, 6, 7, 8}},
-		{TNS: base + 1_000_000_000, ID: canpExtended | 0x18FEF100, Bus: 0, Data: []byte{9, 8, 7}},
-		{TNS: base, ID: 0x7FF, Bus: v2BusUnknown, Data: []byte{}},
-	}
-	if !reflect.DeepEqual(recs, want) {
-		t.Fatalf("decoded %+v\nwant    %+v", recs, want)
+	if !reflect.DeepEqual(back, recs) {
+		t.Fatalf("decoded %+v\nwant    %+v", back, recs)
 	}
 }
 
-// base_ns is the earliest time in the message, because car times can go
-// backwards in arrival order, and every dt_us is after it.
-func TestV2LiveFramesBaseIsMinimum(t *testing.T) {
+// A message holds at most v2LiveSamplesMax records. It also ends before a record
+// earlier than its first, and before one more than 2^32 µs after it: dt_us cannot
+// say either.
+func TestV2LiveSamplesSplits(t *testing.T) {
 	const base = int64(1_700_000_000_000_000_000)
-	frames := []liveFrame{
-		{tNS: base + 5_000_000, id: 0x100, n: 1},
-		{tNS: base + 3_000_000, id: 0x101, n: 1},
-		{tNS: base + 4_000_000, id: 0x102, n: 1},
-	}
-	b := encodeLiveFrames(frames, func(uint32) uint8 { return 0 })
-	if got := int64(binary.LittleEndian.Uint64(b[12:20])); got != base+3_000_000 {
-		t.Fatalf("base_ns = %d, want the earliest frame %d", got, base+3_000_000)
-	}
-	recs, err := decodeLiveFrames(b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range frames {
-		if recs[i].TNS != frames[i].tNS {
-			t.Fatalf("frame %d time %d, want %d", i, recs[i].TNS, frames[i].tNS)
+	sizes := func(recs []liveSample) []int {
+		var out []int
+		for _, m := range liveSampleMessages(recs) {
+			got, err := decodeLiveSamples(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, len(got))
 		}
+		return out
 	}
-}
 
-func TestV2LiveSpanFrames(t *testing.T) {
-	const base = int64(1_700_000_000_000_000_000)
-	near := []liveFrame{{tNS: base}, {tNS: base + 4_000_000_000_000}} // 4000 s: fits in 2^32 µs
-	if got := liveSpanFrames(near); got != 2 {
-		t.Fatalf("liveSpanFrames(4000 s apart) = %d, want 2", got)
+	many := make([]liveSample, v2LiveSamplesMax+5)
+	for i := range many {
+		many[i] = liveSample{TNS: base + int64(i)*1000, Signal: 1, Value: float64(i)}
 	}
-	far := []liveFrame{{tNS: base}, {tNS: base + 1_000_000_000}, {tNS: base + 5_000_000_000_000}} // 5000 s
-	if got := liveSpanFrames(far); got != 2 {
-		t.Fatalf("liveSpanFrames(5000 s apart) = %d, want the first two frames", got)
+	if got := sizes(many); !slices.Equal(got, []int{v2LiveSamplesMax, 5}) {
+		t.Fatalf("%d records split into %v, want 4096 and 5", len(many), got)
+	}
+	if n := len(encodeLiveSamples(base, many[:v2LiveSamplesMax])); n != v2HeaderSize+12+16*v2LiveSamplesMax {
+		t.Fatalf("a full message is %d bytes, want 65560", n)
+	}
+
+	// The last record is exactly 2^32 µs after the first, which fits; the next one
+	// is past it.
+	edge := []liveSample{{TNS: base}, {TNS: base + int64(math.MaxUint32)*1000}, {TNS: base + int64(math.MaxUint32+1)*1000}}
+	if got := sizes(edge); !slices.Equal(got, []int{2, 1}) {
+		t.Fatalf("records at the 2^32 µs limit split into %v, want 2 and 1", got)
+	}
+
+	// A record before the first starts a message of its own, based on its time.
+	back := []liveSample{{TNS: base + 5_000_000}, {TNS: base + 3_000_000}}
+	if got := sizes(back); !slices.Equal(got, []int{1, 1}) {
+		t.Fatalf("records out of order split into %v, want 1 and 1", got)
+	}
+	second, err := decodeLiveSamples(liveSampleMessages(back)[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second[0].TNS != base+3_000_000 {
+		t.Fatalf("second message at %d, want %d", second[0].TNS, base+3_000_000)
+	}
+
+	if msgs := liveSampleMessages(nil); len(msgs) != 0 {
+		t.Fatalf("no records made %d messages", len(msgs))
 	}
 }
 
@@ -119,11 +138,11 @@ func TestV2BinaryRejectsMalformed(t *testing.T) {
 	if _, _, err := decodeGap(gap[:27]); err == nil {
 		t.Fatal("a truncated gap was accepted")
 	}
-	live := encodeLiveFrames([]liveFrame{{tNS: 1, id: 1, n: 2}}, func(uint32) uint8 { return 0 })
-	if _, err := decodeLiveFrames(live[:len(live)-1]); err == nil {
-		t.Fatal("a LiveFrames message missing its last byte was accepted")
+	samples := encodeLiveSamples(1, []liveSample{{TNS: 1, Signal: 1, Value: 2}})
+	if _, err := decodeLiveSamples(samples[:len(samples)-1]); err == nil {
+		t.Fatal("a LiveSamples message missing its last byte was accepted")
 	}
-	if _, err := decodeLiveFrames(gap); err == nil {
-		t.Fatal("a Gap message was read as LiveFrames")
+	if _, err := decodeLiveSamples(gap); err == nil {
+		t.Fatal("a Gap message was read as LiveSamples")
 	}
 }

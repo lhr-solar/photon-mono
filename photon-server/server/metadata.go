@@ -98,12 +98,13 @@ func influxMetadata(w *dbWriter) InfluxMetadata {
 type V2Metadata struct {
 	LANListening    bool   `json:"lan_listening"`
 	CFListening     bool   `json:"cf_listening"`
-	Clients         int    `json:"clients"`          // connections past hello
-	AuthFailures    uint64 `json:"auth_failures"`    // hello, token and Access JWT rejections
-	LiveRingFrames  int    `json:"live_ring_frames"` // frames the live ring holds
-	LiveRingHead    uint64 `json:"live_ring_head"`   // sequence of the next frame the ring takes
-	LiveSubscribers int    `json:"live_subscribers"` // clients with at least one live ID
-	LiveGaps        uint64 `json:"live_gaps"`        // gap messages sent to clients that fell behind
+	Clients         int    `json:"clients"`           // connections past hello
+	AuthFailures    uint64 `json:"auth_failures"`     // hello, token and Access JWT rejections
+	LiveRingFrames  int    `json:"live_ring_frames"`  // frames the live ring holds
+	LiveRingHead    uint64 `json:"live_ring_head"`    // sequence of the next frame the ring takes
+	LiveSubscribers int    `json:"live_subscribers"`  // clients with at least one subscribed signal
+	LiveGaps        uint64 `json:"live_gaps"`         // gap messages sent to clients that fell behind
+	LiveSamplesSent uint64 `json:"live_samples_sent"` // decoded samples sent to live clients
 
 	TilesServed           uint64 `json:"tiles_served"`             // tile requests answered
 	TileCacheHits         uint64 `json:"tile_cache_hits"`          // tile requests answered from the live run's cache
@@ -135,6 +136,7 @@ func v2Metadata(h *v2Hub) V2Metadata {
 		LiveRingHead:    head,
 		LiveSubscribers: subscribers,
 		LiveGaps:        h.gaps.Load(),
+		LiveSamplesSent: h.liveSamples.Load(),
 		TilesServed:     h.tilesServed.Load(),
 	}
 	meta.TileCacheBytes, meta.TileCacheHits = h.tiles.stats()

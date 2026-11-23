@@ -197,7 +197,29 @@ func (h *v2Hub) fetchTile(ctx context.Context, ts tileSignal, run string, level 
 			*dst[i] = append(*dst[i], v)
 		}
 	}
+	toPhysical(t, ts.sig)
 	return t, nil
+}
+
+// toPhysical scales the values of t from raw to the signal's unit, as
+// dbc.Signal.Value does: v*factor + offset. With a negative factor the scaled min
+// and max trade places, so min is still the lower one.
+func toPhysical(t *tileData, sig *dbc.Signal) {
+	scale := func(v []float64) {
+		for i := range v {
+			v[i] = v[i]*sig.Factor + sig.Offset
+		}
+	}
+	if t.level == 0 {
+		scale(t.raw)
+		return
+	}
+	scale(t.lo)
+	scale(t.hi)
+	scale(t.mean)
+	if sig.Factor < 0 {
+		t.lo, t.hi = t.hi, t.lo
+	}
 }
 
 // tileSQL returns the query for the samples of one tile of ts in run, and its

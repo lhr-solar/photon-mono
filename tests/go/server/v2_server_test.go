@@ -141,23 +141,17 @@ type wireCatalog struct {
 	SHA      string   `json:"sha"`
 	Buses    []string `json:"buses"`
 	Messages []struct {
-		ID       uint32 `json:"id"`
-		Name     string `json:"name"`
-		Bus      int    `json:"bus"`
-		Length   uint8  `json:"length"`
-		Selector int    `json:"selector"`
-		Signals  []struct {
-			Index        int     `json:"index"`
-			Name         string  `json:"name"`
-			Start        uint16  `json:"start"`
-			Bits         uint8   `json:"bits"`
-			LittleEndian bool    `json:"little_endian"`
-			Signed       bool    `json:"signed"`
-			Kind         string  `json:"kind"`
-			Factor       float64 `json:"factor"`
-			Offset       float64 `json:"offset"`
-			Unit         string  `json:"unit"`
-			Mux          int16   `json:"mux"`
+		ID      uint32 `json:"id"`
+		Name    string `json:"name"`
+		Bus     int    `json:"bus"`
+		Signals []struct {
+			Index   int     `json:"index"`
+			Name    string  `json:"name"`
+			Unit    string  `json:"unit"`
+			Min     float64 `json:"min"`
+			Max     float64 `json:"max"`
+			Integer bool    `json:"integer"`
+			Mux     int16   `json:"mux"`
 		} `json:"signals"`
 	} `json:"messages"`
 }
@@ -206,8 +200,8 @@ func TestV2HelloAckThenCatalog(t *testing.T) {
 	index := 0
 	for i, m := range cat.Messages {
 		got := msg.Messages[i]
-		if got.ID != m.ID || got.Name != m.Name || got.Length != m.Length || got.Selector != m.Selector {
-			t.Fatalf("message %d = %+v, want %s (id %d, length %d, selector %d)", i, got, m.Name, m.ID, m.Length, m.Selector)
+		if got.ID != m.ID || got.Name != m.Name {
+			t.Fatalf("message %d = %+v, want %s (id %d)", i, got, m.Name, m.ID)
 		}
 		wantBus := -1
 		for b, name := range cat.Buses {
@@ -227,12 +221,9 @@ func TestV2HelloAckThenCatalog(t *testing.T) {
 				t.Fatalf("%s.%s index %d, want %d", m.Name, s.Name, gs.Index, index)
 			}
 			index++
-			if gs.Name != s.Name || gs.Start != s.Start || gs.Bits != s.Bits || gs.LittleEndian != s.LittleEndian ||
-				gs.Signed != s.Signed || gs.Factor != s.Factor || gs.Offset != s.Offset || gs.Unit != s.Unit || gs.Mux != s.Mux {
-				t.Fatalf("%s.%s = %+v, want the DBC's %+v", m.Name, s.Name, gs, s)
-			}
-			if gs.Kind != map[dbc.Kind]string{dbc.Integer: "int", dbc.Float32: "f32", dbc.Float64: "f64"}[s.Kind] {
-				t.Fatalf("%s.%s kind %q", m.Name, s.Name, gs.Kind)
+			wantInteger := s.Kind == dbc.Integer && s.Factor == 1 && s.Offset == 0
+			if gs.Name != s.Name || gs.Unit != s.Unit || gs.Min != s.Min || gs.Max != s.Max || gs.Integer != wantInteger || gs.Mux != s.Mux {
+				t.Fatalf("%s.%s = %+v, want the DBC's %+v (integer %v)", m.Name, s.Name, gs, s, wantInteger)
 			}
 		}
 	}
@@ -240,15 +231,15 @@ func TestV2HelloAckThenCatalog(t *testing.T) {
 		t.Fatal("catalog has no signals")
 	}
 
-	// A known message from the spec: wire ID 81 is BPSCommand, 12 bytes, on CarCAN.
+	// A known message from the spec: wire ID 81 is BPSCommand, on CarCAN.
 	found := false
 	for _, m := range msg.Messages {
 		if m.ID != 81 {
 			continue
 		}
 		found = true
-		if m.Name != "BPSCommand" || m.Length != 12 || m.Bus < 0 || msg.Buses[m.Bus] != "CarCAN" {
-			t.Fatalf("wire ID 81 = %+v, want BPSCommand, 12 bytes, on CarCAN", m)
+		if m.Name != "BPSCommand" || m.Bus < 0 || msg.Buses[m.Bus] != "CarCAN" {
+			t.Fatalf("wire ID 81 = %+v, want BPSCommand on CarCAN", m)
 		}
 	}
 	if !found {
@@ -465,4 +456,72 @@ func TestV2CFHelloAckUsesEmail(t *testing.T) {
 	if ack.Type != "hello_ack" || ack.User != "dev@example.com" {
 		t.Fatalf("hello_ack = %+v, want user dev@example.com", ack)
 	}
+}
+
+// Each message and signal of the catalog has exactly the display fields. integer is
+// true only for a signal whose scaled value is always whole: an integer with factor
+// 1 and offset 0.
+func TestV2CatalogFieldSet(t *testing.T) {
+	var doc struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(catalogJSON(liveCatalog(t)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if got := sortedKeys(doc.Messages[0]); !slices.Equal(got, []string{"bus", "id", "name", "signals"}) {
+		t.Fatalf("message fields %v, want bus id name signals", got)
+	}
+	wantInteger := map[string]bool{"A": true, "B": true, "C": false, "Neg": false, "D": true, "F": false,
+		"Page": true, "P0": true, "P1": true, "Timestamp": true, "Acc1": false, "Acc2": false, "G": true}
+	index := 0
+	seen := 0
+	for _, m := range doc.Messages {
+		for _, sv := range m["signals"].([]any) {
+			s := sv.(map[string]any)
+			if got := sortedKeys(s); !slices.Equal(got, []string{"index", "integer", "max", "min", "mux", "name", "unit"}) {
+				t.Fatalf("signal fields %v, want index integer max min mux name unit", got)
+			}
+			if int(s["index"].(float64)) != index {
+				t.Fatalf("signal %v has index %v, want %d", s["name"], s["index"], index)
+			}
+			index++
+			name := s["name"].(string)
+			if want, ok := wantInteger[name]; ok {
+				seen++
+				if s["integer"].(bool) != want {
+					t.Fatalf("signal %s integer %v, want %v", name, s["integer"], want)
+				}
+			}
+		}
+	}
+	if seen != len(wantInteger) {
+		t.Fatalf("checked %d of %d named signals", seen, len(wantInteger))
+	}
+}
+
+// A range that is not a number is sent as 0 to 0; the rest of the catalog is still
+// sent.
+func TestV2CatalogRangeNotFinite(t *testing.T) {
+	cat := loadDBC(t, "BO_ 1 N: 8 Node\n SG_ X : 0|8@1+ (1,0) [nan|inf] \"\" Node\n SG_ Y : 8|8@1+ (1,0) [0|255] \"\" Node\n\n", nil)
+	var doc v2CatalogMsg
+	if err := json.Unmarshal(catalogJSON(cat), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Type != "catalog" || len(doc.Messages) != 1 || len(doc.Messages[0].Signals) != 2 {
+		t.Fatalf("catalog = %+v, want one message of two signals", doc)
+	}
+	x, y := doc.Messages[0].Signals[0], doc.Messages[0].Signals[1]
+	if x.Min != 0 || x.Max != 0 || y.Min != 0 || y.Max != 255 {
+		t.Fatalf("ranges X %v..%v, Y %v..%v; want 0..0 and 0..255", x.Min, x.Max, y.Min, y.Max)
+	}
+}
+
+// sortedKeys returns the keys of m, sorted.
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }

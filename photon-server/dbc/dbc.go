@@ -23,6 +23,8 @@ type Signal struct {
 	Kind         Kind
 	Factor       float64
 	Offset       float64
+	Min          float64 // the DBC's range in the signal's unit; display only, not used to decode
+	Max          float64
 	Unit         string
 	Mux          int16 // mux page this signal belongs to, or -1 if always present
 	need         uint8 // bytes a frame must have to hold this signal; set by Load
@@ -60,6 +62,9 @@ type Catalog struct {
 	extended map[uint32]*Message // 29-bit IDs, keyed with extendedFlag set
 }
 
+// can0Bit is the bit the CANP v3 sender sets on standard IDs from can0.
+const can0Bit = 0x1000
+
 // Lookup returns the message for a wire ID, or nil if no DBC defines it.
 func (c *Catalog) Lookup(id uint32) *Message {
 	if id&extendedFlag != 0 {
@@ -67,6 +72,19 @@ func (c *Catalog) Lookup(id uint32) *Message {
 	}
 	if id < uint32(len(c.standard)) {
 		return c.standard[id]
+	}
+	return nil
+}
+
+// LookupWire is Lookup for an ID read off the wire, which may carry the can0
+// bit. When no DBC defines the ID as sent, and it has the can0 bit, it is looked
+// up without the bit: a DBC that leaves the bit out covers can0 too.
+func (c *Catalog) LookupWire(id uint32) *Message {
+	if m := c.Lookup(id); m != nil {
+		return m
+	}
+	if id&extendedFlag == 0 && id&can0Bit != 0 {
+		return c.Lookup(id &^ can0Bit)
 	}
 	return nil
 }

@@ -114,6 +114,7 @@ func TestParseRejects(t *testing.T) {
 		"no selector":       "BO_ 1 A: 8 X\n SG_ S m1 : 0|8@1+ (1,0) [0|255] \"\" X\n",
 		"bad float width":   "BO_ 1 A: 8 X\n SG_ S : 0|16@1+ (1,0) [0|1] \"\" X\n\nSIG_VALTYPE_ 1 S : 1;\n",
 		"duplicate signal":  "BO_ 1 A: 8 X\n SG_ S : 0|8@1+ (1,0) [0|255] \"\" X\n SG_ S : 8|8@1+ (1,0) [0|255] \"\" X\n",
+		"unreadable range":  "BO_ 1 A: 8 X\n SG_ S : 0|8@1+ (1,0) [a|255] \"\" X\n",
 	}
 	for name, text := range cases {
 		if _, err := parse("Test", text); err == nil {

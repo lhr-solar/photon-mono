@@ -62,7 +62,7 @@ func Load(dir string, rates []SampleRate) (*Catalog, error) {
 var (
 	messageLine = regexp.MustCompile(`^BO_ (\d+) (\w+): (\d+) \w+$`)
 	// name, mux marker (M or m<page>), start|bits@order sign, (factor,offset), [min|max], "unit"
-	signalLine    = regexp.MustCompile(`^ SG_ (\w+)(?: (M|m\d+))? : (\d+)\|(\d+)@([01])([+-]) \(([^,]+),([^)]+)\) \[[^|]*\|[^\]]*\] "([^"]*)" .+$`)
+	signalLine    = regexp.MustCompile(`^ SG_ (\w+)(?: (M|m\d+))? : (\d+)\|(\d+)@([01])([+-]) \(([^,]+),([^)]+)\) \[([^|]*)\|([^\]]*)\] "([^"]*)" .+$`)
 	valueTypeLine = regexp.MustCompile(`^SIG_VALTYPE_ (\d+) (\w+) ?: ?([12]) ?;$`)
 	// DBC names stop at 32 characters; a longer name is cut in the BO_ or SG_
 	// line and written in full here.
@@ -204,13 +204,15 @@ func parseSignal(m *Message, line string) error {
 	}
 	factor, err1 := strconv.ParseFloat(p[7], 64)
 	offset, err2 := strconv.ParseFloat(p[8], 64)
-	if err1 != nil || err2 != nil {
-		return fmt.Errorf("%s: unreadable factor or offset (%s,%s)", p[1], p[7], p[8])
+	lo, err3 := strconv.ParseFloat(p[9], 64)
+	hi, err4 := strconv.ParseFloat(p[10], 64)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		return fmt.Errorf("%s: unreadable factor, offset or range (%s,%s) [%s|%s]", p[1], p[7], p[8], p[9], p[10])
 	}
 	sig := Signal{
 		Name: p[1], Start: uint16(start), Bits: uint8(bits),
 		LittleEndian: p[5] == "1", Signed: p[6] == "-",
-		Factor: factor, Offset: offset, Unit: p[9], Mux: -1,
+		Factor: factor, Offset: offset, Min: lo, Max: hi, Unit: p[11], Mux: -1,
 	}
 	switch mux := p[2]; {
 	case mux == "M":

@@ -106,7 +106,10 @@ func TestLiveRingKeepsCan0Bit(t *testing.T) {
 	if len(frames) != 2 || frames[0].id != 0x123|canpBus0Bit || frames[1].id != 0x123 {
 		t.Fatalf("ring frames = %+v, want ids 0x1123 then 0x123", frames)
 	}
-	sub, err := newLiveSub([]uint32{0x123 | canpBus0Bit})
+	// A DBC that defines the can0 message as 0x1123 (4387): subscribing to its
+	// signal reads the ID with the bit, and not the one without it.
+	cat := loadDBC(t, "BO_ 4387 Can0: 8 Node\n SG_ A : 0|8@1+ (1,0) [0|255] \"\" Node\n\n", nil)
+	sub, err := newLiveSub(cat, catalogSignals(cat), []int64{0})
 	if err != nil {
 		t.Fatal(err)
 	}
