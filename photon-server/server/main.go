@@ -157,6 +157,12 @@ func main() {
 	pool := newBatchPool(cfg.Ingest.count(), cfg.Ingest.bufferSize())
 	log.Printf("[photon-server] Ingest pool %s", cfg.Ingest)
 
+	// The live ring keeps the recent frames for protocol v2 clients.
+	ring := newLiveRing(liveRingFrames(cfg))
+	ringFrames, _ := ring.stats()
+	log.Printf("[photon-server] Live ring %d frames (%.1f MiB, %s at peak)",
+		ringFrames, float64(ring.bytes())/(1<<20), cfg.LiveSeconds)
+
 	// Frame rows come from the decoder. The writer runs whenever InfluxDB is not
 	// off, so turning decoding on from the observer later also starts rows.
 	var session *frameSession
@@ -175,12 +181,34 @@ func main() {
 		}
 	}
 
+	// Protocol v2 clients see the live run as the frame session ID.
+	liveRun := func() string {
+		if session == nil {
+			return ""
+		}
+		return session.sid
+	}
+	// History queries go to the InfluxDB the rows are written to.
+	var querier *influxQuerier
+	if !strings.EqualFold(cfg.InfluxURL, "off") {
+		querier = newInfluxQuerier(cfg.InfluxURL, cfg.InfluxDB, cfg.InfluxToken, cfg.InfluxQueries)
+	}
+	hub := newV2Hub(cfg, gate, liveRun, ring, querier)
+	v2Current.Store(hub)
+
 	decoder := startCANDecoder(cfg.CAN, session)
 	// The observer can change these while the server runs.
 	canConfig := newCANSettings(cfg.CAN, decoder, session)
+	// Protocol v2 clients get each catalog the decoder uses, and the observer's
+	// changes to it.
+	canConfig.onCatalog = hub.SetCatalog
+	if decoder != nil {
+		hub.SetCatalog(decoder.catalog)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	stopV2 := startV2(ctx, cfg, hub)
 
 	var wg sync.WaitGroup
 
@@ -188,7 +216,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		appendLoop(store, pool, decoder, canConfig.swap)
+		appendLoop(store, pool, decoder, canConfig.swap, ring)
 		// appendLoop has returned, so nothing else writes to the session now.
 		session.Close(3 * time.Second)
 	}()
@@ -281,6 +309,7 @@ func main() {
 		_ = videoRTCP.Close()
 	}
 	_ = videoClientListener.Close()
+	stopV2()
 
 	// Wait for existing ingress readers to finish reading and close ingress channel
 	ingressConnWg.Wait()
@@ -309,10 +338,11 @@ func main() {
 	}
 }
 
-// appendLoop stores each submitted buffer, decodes its CAN frames when decoder
-// is not nil, and returns the buffer to the pool. A decoder sent on swap
-// replaces the current one between buffers; nil turns decoding off.
-func appendLoop(store *StreamStore, pool *batchPool, decoder *canDecoder, swap <-chan *canDecoder) {
+// appendLoop stores each submitted buffer, adds its frames to the live ring,
+// decodes its CAN frames when decoder is not nil, and returns the buffer to the
+// pool. A decoder sent on swap replaces the current one between buffers; nil
+// turns decoding off.
+func appendLoop(store *StreamStore, pool *batchPool, decoder *canDecoder, swap <-chan *canDecoder, ring *liveRing) {
 	for {
 		var batch []byte
 		select {
@@ -336,6 +366,7 @@ func appendLoop(store *StreamStore, pool *batchPool, decoder *canDecoder, swap <
 		if _, err := store.Append(batch); err != nil {
 			// Append error during store closure or write failure
 		}
+		ring.appendBuffer(batch)
 		if decoder != nil {
 			decoder.decode(batch)
 		}

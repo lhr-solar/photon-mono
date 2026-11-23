@@ -22,9 +22,14 @@ const (
 	DefaultVideoIngressPort = 6200
 	DefaultVideoClientPort  = 6700
 	DefaultVideoUdpPort     = 6800
+	DefaultV2Port           = 6900
+	DefaultV2CFPort         = 6901
 	DefaultDataDir          = "./data"
 	DefaultInfluxURL        = "http://127.0.0.1:8181"
 	DefaultInfluxDB         = "photon_dev"
+	// DefaultInfluxQueries is how many history queries run at once across all
+	// clients. 4 to 8 keeps InfluxDB busy without piling up work.
+	DefaultInfluxQueries = 6
 	// DefaultInfluxFlush is how long the DB writer holds rows before sending them.
 	// Together with InfluxDB's own --wal-flush-interval (run it at 250ms too),
 	// rows are queryable within about 500 ms of arriving. At 1 MiB/s of CAN a
@@ -41,6 +46,11 @@ const (
 	// DefaultIngestStall is a choice: how long the decoder may stall (disk
 	// append, GC) before readers stop and TCP pushes back on the car.
 	DefaultIngestStall = 10 * time.Second
+	// DefaultLiveSeconds is how far back the live ring reaches. It covers
+	// InfluxDB's ~0.5 s write delay, so a client that joins live loses no frames
+	// to that delay, plus slack for a client that reads slowly. A choice: a
+	// longer window costs memory, a shorter one gives gaps sooner.
+	DefaultLiveSeconds = 5 * time.Second
 )
 
 // Config holds runtime configuration for the photon server.
@@ -52,6 +62,11 @@ type Config struct {
 	VideoIngressPort int
 	VideoClientPort  int
 	VideoUdpPort     int
+	V2Port           int    // protocol v2 WebSocket port on the LAN; 0 = off
+	V2CFPort         int    // protocol v2 WebSocket port behind Cloudflare Access, 127.0.0.1 only; 0 = off
+	CFTeam           string // Cloudflare Access team name
+	CFAud            string // Cloudflare Access application AUD tag
+	WebDir           string // static web bundle served at /; empty = none
 	DataDir          string
 	TsdbDir          string
 	DbcPath          string
@@ -63,8 +78,10 @@ type Config struct {
 	InfluxToken      string        // env only, so it stays out of process listings
 	InfluxFlush      time.Duration // send buffered rows this long after the first; 0 sends each Write at once
 	InfluxNoSync     bool          // ask InfluxDB to acknowledge before its WAL is saved (no_sync=true)
+	InfluxQueries    int           // history queries to InfluxDB in flight at once, 1 to 64
 	CAN              CANConfig
-	Ingest           poolSizing // sizes the ingest buffer pool
+	Ingest           poolSizing    // sizes the ingest buffer pool
+	LiveSeconds      time.Duration // how far back the live ring for protocol v2 clients reaches
 }
 
 // CANConfig is how the server decodes the car's CAN frames. It is set here, not
@@ -176,6 +193,18 @@ func (c *Config) Validate() error {
 			port int
 		}{"video-udp", c.VideoUdpPort})
 	}
+	if c.V2Port != 0 {
+		ports = append(ports, struct {
+			name string
+			port int
+		}{"v2", c.V2Port})
+	}
+	if c.V2CFPort != 0 {
+		ports = append(ports, struct {
+			name string
+			port int
+		}{"v2-cf", c.V2CFPort})
+	}
 	for _, p := range ports {
 		if p.port < 1 || p.port > 65535 {
 			return fmt.Errorf("invalid %s port: %d (must be between 1 and 65535)", p.name, p.port)
@@ -195,9 +224,15 @@ func (c *Config) Validate() error {
 	if c.InfluxFlush < 0 {
 		return fmt.Errorf("invalid influx flush interval: %s (must not be negative)", c.InfluxFlush)
 	}
+	if c.InfluxQueries < 1 || c.InfluxQueries > 64 {
+		return fmt.Errorf("invalid influx queries: %d (must be between 1 and 64)", c.InfluxQueries)
+	}
 	if c.Ingest.Rate <= 0 || c.Ingest.Latency <= 0 || c.Ingest.Stall < c.Ingest.Latency {
 		return fmt.Errorf("invalid ingest pool: rate %d B/s, latency %s, stall %s (need rate and latency above zero, stall at least latency)",
 			c.Ingest.Rate, c.Ingest.Latency, c.Ingest.Stall)
+	}
+	if c.LiveSeconds <= 0 {
+		return fmt.Errorf("invalid live window: %s (must be above zero)", c.LiveSeconds)
 	}
 	if c.CAN.Decode && strings.TrimSpace(c.CAN.DBCDir) == "" {
 		return fmt.Errorf("CAN decoding is on but no DBC directory is set")
@@ -220,12 +255,16 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		VideoIngressPort: DefaultVideoIngressPort,
 		VideoClientPort:  DefaultVideoClientPort,
 		VideoUdpPort:     DefaultVideoUdpPort,
+		V2Port:           DefaultV2Port,
+		V2CFPort:         DefaultV2CFPort,
 		DataDir:          DefaultDataDir,
 		InfluxURL:        DefaultInfluxURL,
 		InfluxDB:         DefaultInfluxDB,
 		InfluxFlush:      DefaultInfluxFlush,
+		InfluxQueries:    DefaultInfluxQueries,
 		CAN:              DefaultCANConfig(),
 		Ingest:           poolSizing{Rate: DefaultIngestRate, Latency: DefaultIngestLatency, Stall: DefaultIngestStall},
+		LiveSeconds:      DefaultLiveSeconds,
 	}
 
 	// Environment variable fallbacks
@@ -265,6 +304,25 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 			cfg.VideoUdpPort = p
 		}
 	}
+	if portStr := getenvFirst(getenv, "PHOTON_V2_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			cfg.V2Port = p
+		}
+	}
+	if portStr := getenvFirst(getenv, "PHOTON_V2_CF_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			cfg.V2CFPort = p
+		}
+	}
+	if v := getenvFirst(getenv, "PHOTON_CF_TEAM"); v != "" {
+		cfg.CFTeam = v
+	}
+	if v := getenvFirst(getenv, "PHOTON_CF_AUD"); v != "" {
+		cfg.CFAud = v
+	}
+	if v := getenvFirst(getenv, "PHOTON_WEB_DIR"); v != "" {
+		cfg.WebDir = v
+	}
 	if dir := getenvFirst(getenv, "PHOTON_TSDB_DIR", "PHOTON_TSDB"); dir != "" {
 		cfg.TsdbDir = dir
 	}
@@ -296,6 +354,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 			cfg.InfluxNoSync = b
 		}
 	}
+	if v := getenvFirst(getenv, "PHOTON_INFLUX_QUERIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.InfluxQueries = n
+		}
+	}
 	cfg.InfluxToken = getenvFirst(getenv, "PHOTON_INFLUX_TOKEN", "INFLUXDB3_AUTH_TOKEN")
 	if v := getenvFirst(getenv, "PHOTON_INGEST_RATE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -312,6 +375,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 			cfg.Ingest.Stall = d
 		}
 	}
+	if v := getenvFirst(getenv, "PHOTON_LIVE_SECONDS"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.LiveSeconds = d
+		}
+	}
 
 	fs := flag.NewFlagSet("photon-server", flag.ContinueOnError)
 	fs.SetOutput(output)
@@ -323,6 +391,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var videoIngressPortFlag int
 	var videoClientPortFlag int
 	var videoUdpPortFlag int
+	var v2PortFlag, v2CFPortFlag int
+	var cfTeamFlag, cfAudFlag, webDirFlag string
 	var dataDirFlag string
 	var tsdbDirFlag string
 	var dbcPathFlag string
@@ -333,8 +403,10 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var influxDBFlag string
 	var influxFlushFlag time.Duration
 	var influxNoSyncFlag bool
+	var influxQueriesFlag int
 	var ingestRateFlag int
 	var ingestLatencyFlag, ingestStallFlag time.Duration
+	var liveSecondsFlag time.Duration
 
 	fs.StringVar(&hostFlag, "host", cfg.Host, "Bind host/IP address (e.g. 0.0.0.0 for all interfaces, 127.0.0.1 for local only)")
 	fs.StringVar(&hostFlag, "bind", cfg.Host, "Alias for -host")
@@ -350,6 +422,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.IntVar(&videoClientPortFlag, "video-client", cfg.VideoClientPort, "Alias for -video-client-port")
 	fs.IntVar(&videoUdpPortFlag, "video-udp-port", cfg.VideoUdpPort, "UDP port for live video fan-out")
 	fs.IntVar(&videoUdpPortFlag, "video-udp", cfg.VideoUdpPort, "Alias for -video-udp-port")
+	fs.IntVar(&v2PortFlag, "v2-port", cfg.V2Port, "WebSocket port for protocol v2 on the LAN; 0 = off")
+	fs.IntVar(&v2CFPortFlag, "v2-cf-port", cfg.V2CFPort, "WebSocket port for protocol v2 behind Cloudflare Access (127.0.0.1); 0 = off")
+	fs.StringVar(&cfTeamFlag, "cf-team", cfg.CFTeam, "Cloudflare Access team name (issuer https://<team>.cloudflareaccess.com)")
+	fs.StringVar(&cfAudFlag, "cf-aud", cfg.CFAud, "Cloudflare Access application AUD tag")
+	fs.StringVar(&webDirFlag, "web-dir", cfg.WebDir, "static web bundle served at / (empty = none)")
 	fs.StringVar(&dataDirFlag, "data-dir", cfg.DataDir, "Directory path for persistent storage segments")
 	fs.StringVar(&dataDirFlag, "storage-path", cfg.DataDir, "Alias for -data-dir")
 	fs.StringVar(&tsdbDirFlag, "tsdb-dir", cfg.TsdbDir, "TSDB root (default: <data-dir>/tsdb)")
@@ -361,9 +438,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.StringVar(&influxDBFlag, "influx-db", cfg.InfluxDB, "InfluxDB database for decoded rows")
 	fs.DurationVar(&influxFlushFlag, "influx-flush", cfg.InfluxFlush, "send buffered rows to InfluxDB this long after the first one (0 = each batch at once)")
 	fs.BoolVar(&influxNoSyncFlag, "influx-no-sync", cfg.InfluxNoSync, "InfluxDB acknowledges before its WAL is saved (faster ack, may lose the last WAL interval on crash, hides some write errors)")
+	fs.IntVar(&influxQueriesFlag, "influx-queries", cfg.InfluxQueries, "history queries to InfluxDB in flight at once, 1 to 64 (env PHOTON_INFLUX_QUERIES)")
 	fs.IntVar(&ingestRateFlag, "ingest-rate", cfg.Ingest.Rate, "peak CAN ingest in bytes/s; sizes the ingest pool")
 	fs.DurationVar(&ingestLatencyFlag, "ingest-latency", cfg.Ingest.Latency, "hand a buffer to the decoder at most this long after its first batch")
 	fs.DurationVar(&ingestStallFlag, "ingest-stall", cfg.Ingest.Stall, "decoder stall the ingest pool absorbs before TCP pushes back")
+	fs.DurationVar(&liveSecondsFlag, "live-seconds", cfg.LiveSeconds, "how far back the live ring for protocol v2 clients reaches; a client that falls further behind gets a gap")
 
 	fs.Usage = func() {
 		fmt.Fprintf(output, "Usage of photon-server:\n")
@@ -376,6 +455,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -video-ingress-port, -video-ingress int UDP+TCP RTP/H.264 ingress port (default %d, env: PHOTON_VIDEO_INGRESS_PORT)\n", DefaultVideoIngressPort)
 		fmt.Fprintf(output, "  -video-client-port, -video-client int TCP video live/replay port (default %d, env: PHOTON_VIDEO_CLIENT_PORT)\n", DefaultVideoClientPort)
 		fmt.Fprintf(output, "  -video-udp-port, -video-udp int UDP live video fan-out port (default %d, env: PHOTON_VIDEO_UDP_PORT)\n", DefaultVideoUdpPort)
+		fmt.Fprintf(output, "  -v2-port int                 WebSocket port for protocol v2 on the LAN (default %d, env: PHOTON_V2_PORT; 0 = off)\n", DefaultV2Port)
+		fmt.Fprintf(output, "  -v2-cf-port int              WebSocket port behind Cloudflare Access, 127.0.0.1 (default %d, env: PHOTON_V2_CF_PORT; 0 = off)\n", DefaultV2CFPort)
+		fmt.Fprintf(output, "  -cf-team string              Cloudflare Access team name (env: PHOTON_CF_TEAM)\n")
+		fmt.Fprintf(output, "  -cf-aud string               Cloudflare Access application AUD tag (env: PHOTON_CF_AUD)\n")
+		fmt.Fprintf(output, "  -web-dir string              static web bundle served at / (env: PHOTON_WEB_DIR; empty = none)\n")
 		fmt.Fprintf(output, "  -data-dir, -storage-path string Storage directory (default %q, env: PHOTON_DATA_DIR)\n", DefaultDataDir)
 		fmt.Fprintf(output, "  -tsdb-dir string             TSDB root (default <data-dir>/tsdb, env: PHOTON_TSDB_DIR)\n")
 		fmt.Fprintf(output, "  -dbc string                  DBC for the live TSDB writer (env: PHOTON_DBC)\n")
@@ -384,10 +468,12 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -password string             client password (env: PHOTON_PASSWORD; random if unset)\n")
 		fmt.Fprintf(output, "  -influx-url string           InfluxDB 3 URL for decoded rows, or off (default %q, env: PHOTON_INFLUX_URL)\n", DefaultInfluxURL)
 		fmt.Fprintf(output, "  -influx-db string            InfluxDB database (default %q, env: PHOTON_INFLUX_DB)\n", DefaultInfluxDB)
+		fmt.Fprintf(output, "  -influx-queries int          history queries in flight at once, 1 to 64 (default %d, env: PHOTON_INFLUX_QUERIES)\n", DefaultInfluxQueries)
 		fmt.Fprintf(output, "                               token: env PHOTON_INFLUX_TOKEN or INFLUXDB3_AUTH_TOKEN\n")
 		fmt.Fprintf(output, "  -ingest-rate int             peak CAN bytes/s for pool sizing (default %d, env: PHOTON_INGEST_RATE)\n", DefaultIngestRate)
 		fmt.Fprintf(output, "  -ingest-latency duration     max wait before a buffer goes to the decoder (default %s, env: PHOTON_INGEST_LATENCY)\n", DefaultIngestLatency)
 		fmt.Fprintf(output, "  -ingest-stall duration       decoder stall the pool absorbs (default %s, env: PHOTON_INGEST_STALL)\n", DefaultIngestStall)
+		fmt.Fprintf(output, "  -live-seconds duration       live ring window for protocol v2 clients (default %s, env: PHOTON_LIVE_SECONDS)\n", DefaultLiveSeconds)
 		fmt.Fprintf(output, "\nPHOTON_NO_BROWSER=1 starts the local UI without opening a browser.\n")
 	}
 
@@ -402,6 +488,11 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.VideoIngressPort = videoIngressPortFlag
 	cfg.VideoClientPort = videoClientPortFlag
 	cfg.VideoUdpPort = videoUdpPortFlag
+	cfg.V2Port = v2PortFlag
+	cfg.V2CFPort = v2CFPortFlag
+	cfg.CFTeam = cfTeamFlag
+	cfg.CFAud = cfAudFlag
+	cfg.WebDir = webDirFlag
 	cfg.DataDir = dataDirFlag
 	cfg.TsdbDir = tsdbDirFlag
 	cfg.DbcPath = dbcPathFlag
@@ -412,7 +503,9 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.InfluxDB = influxDBFlag
 	cfg.InfluxFlush = influxFlushFlag
 	cfg.InfluxNoSync = influxNoSyncFlag
+	cfg.InfluxQueries = influxQueriesFlag
 	cfg.Ingest = poolSizing{Rate: ingestRateFlag, Latency: ingestLatencyFlag, Stall: ingestStallFlag}
+	cfg.LiveSeconds = liveSecondsFlag
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err

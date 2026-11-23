@@ -546,10 +546,3 @@ func TestLastKeyframeSkipsFutureGOP(t *testing.T) {
 		t.Fatalf("lastKeyframe=%d, want the ~45s-ahead live GOP, not the old still", got)
 	}
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

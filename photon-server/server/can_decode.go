@@ -88,10 +88,17 @@ const (
 	frameMaxFuture = 60 * time.Second
 )
 
+// clockOK reports whether a frame's car timestamp tNS can be trusted: it is not
+// from before the car's clock was set, and not after maxNS (the server clock
+// plus frameMaxFuture, as the caller computed it).
+func clockOK(tNS, maxNS int64) bool {
+	return tNS >= frameMinValidNS && tNS <= maxNS
+}
+
 // goodClock decodes a frame unless its car timestamp is before the car's
 // clock was set or too far in the future. The first bad one is logged.
 func (c *canDecoder) goodClock(id uint32, bus string, data []byte, tNS int64) {
-	if tNS < frameMinValidNS || tNS > c.maxNS {
+	if !clockOK(tNS, c.maxNS) {
 		if c.badClock == 0 {
 			log.Printf("[photon-server] CAN decode: skipping frames with a bad car clock (first at %s)",
 				time.Unix(0, tNS).UTC().Format(time.RFC3339))
@@ -122,6 +129,9 @@ type canSettings struct {
 	cfg     CANConfig
 	session *frameSession    // frame rows for every decoder; nil when InfluxDB is off
 	swap    chan *canDecoder // the next decoder for appendLoop; nil turns decoding off
+
+	// onCatalog is told the catalog in use after each change: nil when decoding is off.
+	onCatalog func(*dbc.Catalog)
 }
 
 // newCANSettings starts from cfg, the decoder startCANDecoder made and the
@@ -178,6 +188,13 @@ func (s *canSettings) apply(change canChange) (CANConfig, error) {
 	s.cfg = next
 	canStats.enabled.Store(next.Decode)
 	log.Printf("[photon-server] CAN settings changed: decode=%v dbc_dir=%q", next.Decode, next.DBCDir)
+	if s.onCatalog != nil {
+		var cat *dbc.Catalog
+		if can != nil {
+			cat = can.catalog
+		}
+		s.onCatalog(cat)
+	}
 	return next, nil
 }
 
