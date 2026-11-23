@@ -10,7 +10,7 @@ import (
 // bytes, so the data is a fixed array.
 type liveFrame struct {
 	tNS  int64
-	id   uint32 // wire ID as walkCANP3 gives it: bit 31 set for 29-bit IDs
+	id   uint32 // wire ID as the CANP v3 sender sent it: bit 31 set for 29-bit IDs, bit 12 for can0
 	n    uint8  // data bytes in use
 	data [8]byte
 }
@@ -49,9 +49,12 @@ func (r *liveRing) appendBuffer(buf []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	added := false
-	walkCANP3(buf, func(id uint32, _ string, data []byte, tNS int64) {
+	walkCANP3(buf, func(id uint32, bus string, data []byte, tNS int64) {
 		if !clockOK(tNS, maxNS) {
 			return
+		}
+		if bus == "can0" {
+			id |= canpBus0Bit // keep the ID as sent, so can0 and can1 frames stay apart
 		}
 		s := &r.slots[r.head%uint64(len(r.slots))]
 		s.tNS, s.id, s.n = tNS, id, uint8(len(data))

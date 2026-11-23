@@ -1,0 +1,83 @@
+# DBCs own IDs, signal layouts and timing; this file owns physical topology.
+# Filters use quoted hex IDs scoped to their source bus.
+# No route means no forwarding. Exclude [] forwards all; include [] forwards none.
+# All routes preserve frame ID, payload, format and arrival rate.
+# Identical native frames win over forwarded copies; unknown IDs are dropped.
+version: 1
+
+buses:
+  CarCAN:
+    dbc: dbc/CarCAN.dbc
+    format: can_fd
+    bitrate: 500000
+    brs: false
+    forwards:
+      - to: ChargerCAN
+        via: BPS
+        filter:
+          mode: include
+          messages: ["0x060"]
+      - to: TelemetryLink
+        via: CM5
+        filter:
+          mode: exclude
+          messages: []
+
+  DAqCAN:
+    dbc: dbc/DAqCAN.dbc
+    format: can_fd
+    bitrate: 500000
+    brs: false
+    forwards:
+      - to: TelemetryLink
+        via: CM5
+        filter:
+          mode: exclude
+          messages: ["0x620"]
+
+  ChargerCAN:
+    category: aux
+    dbc: dbc/ChargerCAN.dbc
+    format: can_fd
+    bitrate: 500000
+    brs: false
+    forwards:
+      - to: CarCAN
+        via: BPS
+        filter:
+          mode: exclude
+          # Do not echo the BPS frames received from CarCAN.
+          messages: ["0x060"]
+
+  ElconCAN:
+    category: aux
+    dbc: dbc/ElconCAN.dbc
+    format: classic
+    bitrate: 250000
+    forwards:
+      - to: ChargerCAN
+        via: ElconInterface
+        filter:
+          mode: exclude
+          messages: []
+
+  COTSCAN:
+    dbc: dbc/COTSCAN.dbc
+    format: classic
+    bitrate: 500000
+    forwards:
+      - to: CarCAN
+        via: VCU
+        filter:
+          mode: exclude
+          # All VCU-to-MPPT commands stay on COTSCAN; other COTS traffic is forwarded.
+          messages: [
+            "0x205", "0x206", "0x207", "0x208", "0x209", "0x20A", "0x20B", "0x20C",
+            "0x225", "0x226", "0x227", "0x228", "0x229", "0x22A", "0x22B", "0x22C",
+            "0x245", "0x246", "0x247", "0x248", "0x249", "0x24A", "0x24B", "0x24C"
+          ]
+
+outputs:
+  TelemetryLink:
+    transport: tcp
+    dbc: dbc/TelemetryLink.dbc

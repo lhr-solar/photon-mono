@@ -97,7 +97,8 @@ type CANConfig struct {
 func DefaultCANConfig() CANConfig {
 	return CANConfig{
 		Decode: false,
-		DBCDir: "dbc/spec/dbc",
+		// HighNoon 2026, the car running now. HighNoon 2027: dbc/spec/dbc or dbc/spec-cdr/dbc.
+		DBCDir: "dbc/highnoon2026",
 		SampleRates: []dbc.SampleRate{
 			{Messages: `Chassis(Acceleration|Gyro)Data`, Hz: 208},
 			{Messages: `Upright\w+(Acceleration|Gyro)Data`, Hz: 416},
@@ -329,6 +330,9 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	if path := getenvFirst(getenv, "PHOTON_DBC", "PHOTON_DBC_PATH"); path != "" {
 		cfg.DbcPath = path
 	}
+	if dir := getenvFirst(getenv, "PHOTON_DBC_DIR"); dir != "" {
+		cfg.CAN.DBCDir = dir
+	}
 	if path := getenvFirst(getenv, "PHOTON_LIVE_WRITER"); path != "" {
 		cfg.LiveWriter = path
 	}
@@ -396,6 +400,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var dataDirFlag string
 	var tsdbDirFlag string
 	var dbcPathFlag string
+	var dbcDirFlag string
 	var liveWriterFlag string
 	var uiFlag string
 	var passwordFlag string
@@ -431,6 +436,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.StringVar(&dataDirFlag, "storage-path", cfg.DataDir, "Alias for -data-dir")
 	fs.StringVar(&tsdbDirFlag, "tsdb-dir", cfg.TsdbDir, "TSDB root (default: <data-dir>/tsdb)")
 	fs.StringVar(&dbcPathFlag, "dbc", cfg.DbcPath, "DBC file for the live TSDB writer")
+	fs.StringVar(&dbcDirFlag, "dbc-dir", cfg.CAN.DBCDir, "folder of *.dbc files the CAN decoder uses, one per bus: dbc/highnoon2026 (HighNoon 2026), dbc/spec/dbc or dbc/spec-cdr/dbc (HighNoon 2027)")
 	fs.StringVar(&liveWriterFlag, "live-writer", cfg.LiveWriter, "photon-index binary that writes the TSDB, or 'off'")
 	fs.StringVar(&uiFlag, "ui", cfg.Ui, "local UI backend (photon-backend), or off")
 	fs.StringVar(&passwordFlag, "password", cfg.Password, "shared client password (env: PHOTON_PASSWORD)")
@@ -463,6 +469,8 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -data-dir, -storage-path string Storage directory (default %q, env: PHOTON_DATA_DIR)\n", DefaultDataDir)
 		fmt.Fprintf(output, "  -tsdb-dir string             TSDB root (default <data-dir>/tsdb, env: PHOTON_TSDB_DIR)\n")
 		fmt.Fprintf(output, "  -dbc string                  DBC for the live TSDB writer (env: PHOTON_DBC)\n")
+		fmt.Fprintf(output, "  -dbc-dir string              DBC folder for the CAN decoder (default %q, env: PHOTON_DBC_DIR;\n", DefaultCANConfig().DBCDir)
+		fmt.Fprintf(output, "                               HighNoon 2027: dbc/spec/dbc, or dbc/spec-cdr/dbc for the newer CAN/cdr spec)\n")
 		fmt.Fprintf(output, "  -live-writer string          photon-index path, or off (env: PHOTON_LIVE_WRITER)\n")
 		fmt.Fprintf(output, "  -ui string                   local photon-backend + page, or off (env: PHOTON_UI)\n")
 		fmt.Fprintf(output, "  -password string             client password (env: PHOTON_PASSWORD; random if unset)\n")
@@ -496,6 +504,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.DataDir = dataDirFlag
 	cfg.TsdbDir = tsdbDirFlag
 	cfg.DbcPath = dbcPathFlag
+	cfg.CAN.DBCDir = dbcDirFlag
 	cfg.LiveWriter = liveWriterFlag
 	cfg.Ui = uiFlag
 	cfg.Password = passwordFlag

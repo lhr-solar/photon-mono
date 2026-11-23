@@ -12,7 +12,7 @@ const v2LiveFrames = 1300
 // liveSub is the set of wire IDs a client subscribed to. It is built once by
 // subscribe and never changed after, so the pusher can read it without a lock.
 type liveSub struct {
-	std [2048]bool      // 11-bit IDs, indexed directly
+	std [0x2000]bool    // 11-bit IDs plus the can0 bit (12), indexed directly
 	ext map[uint32]bool // 29-bit IDs, with bit 31 set as on the wire
 	any bool            // at least one ID; false means nothing is sent
 }
@@ -34,7 +34,7 @@ func newLiveSub(ids []uint32) (*liveSub, error) {
 		case id < uint32(len(s.std)):
 			s.std[id] = true
 		default:
-			return nil, errors.New("message ID is wider than 11 bits and has no extended bit (31)")
+			return nil, errors.New("message ID is wider than 11 bits plus the can0 bit and has no extended bit (31)")
 		}
 	}
 	s.any = len(ids) > 0

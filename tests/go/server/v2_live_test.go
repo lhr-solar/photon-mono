@@ -282,7 +282,7 @@ func TestBadSubscribeGetsError(t *testing.T) {
 	conn := liveConn(t, h)
 	for _, body := range []string{
 		`{"type":"subscribe","messages":"0x100"}`,
-		`{"type":"subscribe","messages":[2048]}`, // 12 bits, no extended flag
+		`{"type":"subscribe","messages":[8192]}`, // 14 bits: past the can0 bit, no extended flag
 	} {
 		sendV2(t, conn, json.RawMessage(body))
 		var e struct {

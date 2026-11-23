@@ -53,7 +53,10 @@ type Catalog struct {
 	Messages []*Message
 	Buses    []string            // the bus names, sorted: one per DBC file
 	SHA      string              // SHA-1 hex of the DBC files' names and contents
-	standard [2048]*Message      // 11-bit IDs, indexed directly
+	// standard holds 11-bit IDs, indexed directly, plus bit 12: the HighNoon 2026
+	// DBC (carcan_telemcan.dbc) marks its can0 messages with it, as the CANP v3
+	// sender does on the wire.
+	standard [0x2000]*Message
 	extended map[uint32]*Message // 29-bit IDs, keyed with extendedFlag set
 }
 
@@ -80,7 +83,7 @@ func (c *Catalog) add(m *Message) error {
 			return fmt.Errorf("%s: extended ID 0x%X is wider than 29 bits", m.Name, m.ID&^extendedFlag)
 		}
 	} else if m.ID >= uint32(len(c.standard)) {
-		return fmt.Errorf("%s: standard ID 0x%X is wider than 11 bits", m.Name, m.ID)
+		return fmt.Errorf("%s: standard ID 0x%X is wider than 11 bits plus the can0 bit", m.Name, m.ID)
 	}
 
 	old := c.Lookup(m.ID)

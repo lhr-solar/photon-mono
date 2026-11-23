@@ -23,6 +23,10 @@ type canDecoder struct {
 	maxNS    int64                                               // latest frame time accepted in this buffer
 	badClock uint64                                              // frames dropped for a bad car clock
 
+	// can0Bit is set when the DBC marks can0 messages with bit 12, as the
+	// HighNoon 2026 DBC does; the decoder then puts the bit back on can0 frames.
+	can0Bit bool
+
 	// Frame rows go to session when it is not nil. defsSent is whether this
 	// decoder's signal_def rows are queued.
 	session  *frameSession
@@ -41,6 +45,12 @@ func newCANDecoder(cfg CANConfig, session *frameSession) (*canDecoder, error) {
 	c := &canDecoder{dec: dbc.NewDecoder(catalog, newSOCSink(discardRows{})), catalog: catalog, session: session}
 	if session != nil {
 		c.layouts = buildLayouts(catalog)
+	}
+	for _, m := range catalog.Messages {
+		if m.ID&canpExtended == 0 && m.ID&canpBus0Bit != 0 {
+			c.can0Bit = true
+			break
+		}
 	}
 	c.emit = c.goodClock
 	return c, nil
@@ -113,6 +123,9 @@ func (c *canDecoder) goodClock(id uint32, bus string, data []byte, tNS int64) {
 		c.badClock++
 		canStats.badClock.Add(1)
 		return
+	}
+	if c.can0Bit && bus == "can0" {
+		id |= canpBus0Bit
 	}
 	c.dec.Decode(id, bus, data, tNS)
 	if c.session == nil {
