@@ -107,7 +107,8 @@ type V2Metadata struct {
 	LiveSamplesSent uint64 `json:"live_samples_sent"` // decoded samples sent to live clients
 
 	TilesServed           uint64 `json:"tiles_served"`             // tile requests answered
-	TileCacheHits         uint64 `json:"tile_cache_hits"`          // tile requests answered from the live run's cache
+	TileStalls            uint64 `json:"tile_stalls"`              // streaming tiles stopped because the client read nothing
+	TileCacheHits        uint64 `json:"tile_cache_hits"`          // tile requests answered from the live run's cache
 	TileCacheBytes        int64  `json:"tile_cache_bytes"`         // bytes of tiles in the cache
 	InfluxQueriesInFlight int    `json:"influx_queries_in_flight"` // history queries running now
 	InfluxQueryErrors     uint64 `json:"influx_query_errors"`      // history queries that failed
@@ -138,6 +139,7 @@ func v2Metadata(h *v2Hub) V2Metadata {
 		LiveGaps:        h.gaps.Load(),
 		LiveSamplesSent: h.liveSamples.Load(),
 		TilesServed:     h.tilesServed.Load(),
+		TileStalls:      h.tileStalls.Load(),
 	}
 	meta.TileCacheBytes, meta.TileCacheHits = h.tiles.stats()
 	if h.querier != nil {

@@ -490,6 +490,7 @@ func (c *v2Client) serveTile(ctx context.Context, me *tileRequest, job tileJob) 
 	// fit in the cache is not kept, so a request never holds more than the cache could.
 	var kept [][]byte
 	keptBytes := 0
+	stalled := false // the client took no piece for tileSendStall
 	send := func(piece []byte, last bool) bool {
 		if cacheable {
 			if keptBytes+len(piece) > tileCacheMax {
@@ -509,9 +510,19 @@ func (c *v2Client) serveTile(ctx context.Context, me *tileRequest, job tileJob) 
 			h.tilesServed.Add(1)
 			finish()
 		}
-		return c.enqueueTile(ctx, outMsg{typ: wsBinary, data: piece})
+		ok, timedOut := c.enqueueTileWithin(ctx, outMsg{typ: wsBinary, data: piece}, tileSendStall)
+		stalled = timedOut
+		return ok
 	}
 	err := h.streamTile(ctx, job, sealed, send)
+	if stalled {
+		// The query held an InfluxDB slot while the client read nothing; it was
+		// stopped so other requests can run. The error skips the full live queue.
+		finish()
+		h.tileStalls.Add(1)
+		c.tileError(job.qid, "tile stopped: the client did not read it")
+		return
+	}
 	if err == nil || errors.Is(err, errTileStopped) || ctx.Err() != nil {
 		return
 	}
@@ -535,6 +546,30 @@ func (c *v2Client) sendCached(ctx context.Context, qid uint32, msgs [][]byte, be
 		if !c.enqueueTile(ctx, outMsg{typ: wsBinary, data: out}) {
 			return
 		}
+	}
+}
+
+// tileSendStall is how long a streaming tile waits for room in the client's live
+// queue. The query holds one of the few InfluxDB slots meanwhile, so a client that
+// stops reading must not keep it for the whole query timeout.
+var tileSendStall = 5 * time.Second
+
+// enqueueTileWithin is enqueueTile that gives up after wait; timedOut reports that.
+func (c *v2Client) enqueueTileWithin(ctx context.Context, m outMsg, wait time.Duration) (ok, timedOut bool) {
+	if ctx.Err() != nil {
+		return false, false
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case c.live <- m:
+		return true, false
+	case <-ctx.Done():
+		return false, false
+	case <-c.done:
+		return false, false
+	case <-t.C:
+		return false, true
 	}
 }
 

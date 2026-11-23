@@ -1090,3 +1090,28 @@ func TestLiveRunMultiPieceTileIsCachedOnce(t *testing.T) {
 	}
 }
 
+
+// A streaming tile gives up when the client's live queue takes nothing for the
+// stall limit, so a client that stops reading does not keep an InfluxDB slot.
+func TestTileSendGivesUpOnAStalledClient(t *testing.T) {
+	c := &v2Client{live: make(chan outMsg), done: make(chan struct{})} // nobody reads live
+	start := time.Now()
+	ok, timedOut := c.enqueueTileWithin(context.Background(), outMsg{typ: wsBinary}, 50*time.Millisecond)
+	if ok || !timedOut {
+		t.Fatalf("ok=%v timedOut=%v, want a timeout", ok, timedOut)
+	}
+	if d := time.Since(start); d < 50*time.Millisecond || d > 2*time.Second {
+		t.Fatalf("gave up after %s", d)
+	}
+	// A reader that takes the message in time: queued, no timeout.
+	go func() { <-c.live }()
+	if ok, timedOut := c.enqueueTileWithin(context.Background(), outMsg{typ: wsBinary}, time.Second); !ok || timedOut {
+		t.Fatalf("ok=%v timedOut=%v, want queued", ok, timedOut)
+	}
+	// A cancelled request is not a stall.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if ok, timedOut := c.enqueueTileWithin(ctx, outMsg{typ: wsBinary}, time.Second); ok || timedOut {
+		t.Fatalf("cancelled: ok=%v timedOut=%v", ok, timedOut)
+	}
+}

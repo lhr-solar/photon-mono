@@ -68,7 +68,9 @@ the server swaps min and max so `min <= max`).
 The server streams a tile: it sends each piece as soon as it has read that many rows from InfluxDB, so
 the first piece arrives before the whole tile is read, and the server holds about one piece per query.
 If something fails after some pieces were sent, a `tile_error` with the same `qid` follows: drop the pieces
-received for that `qid`.
+received for that `qid`, and any that still arrive for it. After a `tile_cancel`, a few pieces already
+queued may still arrive; drop them too. A client that reads nothing for 5 s while a tile streams gets a
+`tile_error` for it (the query holds one of the server's few InfluxDB slots), and can ask again.
 
 **Levels and tiles.** `hello_ack.levels` lists the bucket width of each level in ms; today
 `[0, 10, 100, 1000, 10000, 60000, 600000]` (level 0 = raw samples). A level-0 tile covers **10 s**; a tile

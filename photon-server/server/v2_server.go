@@ -43,6 +43,7 @@ type v2Hub struct {
 	querier     *influxQuerier  // history queries; nil when InfluxDB is off
 	tiles       *tileCache      // the sealed tiles of the live run
 	tilesServed atomic.Uint64   // tile requests answered
+	tileStalls  atomic.Uint64   // streaming tiles stopped because the client read nothing
 
 	helloTimeout time.Duration
 	idleTimeout  time.Duration
