@@ -20,8 +20,10 @@ Same shape as v1, so the framing code carries over.
 
 ## Binary messages (server → client)
 
-### `0x20` LiveFrames
-Raw CAN frames from the live ring, only the message IDs the client subscribed to.
+### `0x20` LiveSamples
+Decoded values of the signals the client subscribed to, from the live ring. The server decodes; the
+client never sees CAN frames or bit layouts (user decision 2026-11-23: "client shouldn't parse on their
+side").
 
 | Type | Field |
 |---|---|
@@ -30,10 +32,12 @@ Raw CAN frames from the live ring, only the message IDs the client subscribed to
 | `u16` | reserved |
 | then `count` records: | |
 | `u32` | `dt_us`: microseconds after `base_ns` |
-| `u32` | `can_id`: wire ID, bit 31 set for 29-bit IDs |
-| `u8` | `bus`: index into `catalog.buses`, or `0xFF` unknown |
-| `u8` | `len`: data bytes, 0–64 |
-| `u8[len]` | `data` |
+| `u32` | `signal`: catalog signal index |
+| `f64` | `value`: in the signal's unit (factor and offset applied) |
+
+- A multi-sample message (several readings of one sensor per frame) gives one record per reading, each at
+  its own time. A multiplexed message gives records only for the signals on the page it carried.
+- A signal that does not decode (frame too short, NaN/infinite float) gives no record.
 
 ### `0x21` Gap
 The client fell behind the live ring; frames between the two times were skipped.
@@ -55,10 +59,11 @@ One tile, or one piece of it (tiles are sent in pieces of at most 64 KiB, interl
 | `u32` | `offset`: index of this piece's first sample in the tile |
 | `u32` | `n`: samples in this piece |
 | `f64[n]` | `t_ms` |
-| level 0: `f64[n]` | `raw` |
+| level 0: `f64[n]` | `value` |
 | level > 0: `f64[n]` ×3 | `min`, `max`, `mean` |
 
-Values are in **raw units**; the client scales them with the catalog.
+Values are in the signal's **unit**, scaled by the server like live samples (with a negative factor,
+the server swaps min and max so `min <= max`).
 
 ### `0x23` VideoChunk
 One piece of an Annex-B H.264 frame, at most 16 KiB. Sent only when nothing telemetry is queued.
@@ -83,7 +88,7 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
 | `hello` | C → S | `protocol` (2), `client`, `token` (LAN listener only; browsers cannot set WebSocket headers) |
 | `hello_ack` | S → C | `protocol`, `server`, `user`, `server_time_ns`, `catalog_sha`, `live_run`, `levels` (bucket ms per level), `features` |
 | `catalog` | S → C | sent after `hello_ack` and whenever the DBCs change; when decoding turns off, an empty one (`sha` `""`, no messages); see below |
-| `subscribe` | C → S | `messages`: wire IDs. Replaces the previous set; `[]` stops live data |
+| `subscribe` | C → S | `signals`: catalog signal indexes. Replaces the previous set; `[]` stops live data |
 | `runs_list` | C → S | — |
 | `runs` | S → C | `runs`: `[{id, label, source, device, dbc_sha, start_ms, end_ms, live}]` |
 | `tile_request` | C → S | `qid`, `run`, `signal`, `level`, `index` |
@@ -99,17 +104,17 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
 ### `catalog`
 ```json
 {"type": "catalog", "sha": "…", "buses": ["CarCAN", "DAqCAN"],
- "messages": [{"id": 1234, "name": "BPSPackData", "bus": 0, "length": 8, "selector": -1,
-   "signals": [{"index": 17, "name": "CellSumVoltage", "start": 0, "bits": 16,
-     "little_endian": true, "signed": false, "kind": "int", "factor": 0.01, "offset": 0,
-     "unit": "V", "mux": -1}]}]}
+ "messages": [{"id": 1234, "name": "BPSPackData", "bus": 0,
+   "signals": [{"index": 17, "name": "CellSumVoltage", "unit": "V", "min": 0, "max": 655.35,
+     "integer": false, "mux": -1}]}]}
 ```
 - A signal's `index` is its position in the catalog and is stable for one `sha`.
   `TileKey.signalId` is this index; `TileKey.dbcHash` is `sha`.
-- `kind`: `int`, `f32` or `f64`. `mux`: the selector page this signal belongs to, or -1.
-- A message's `selector` is the position of its mux selector **within that message's `signals` list**
-  (not a catalog `index`), or -1 when the message is not multiplexed.
-- The client decodes frames with these layouts; it does not parse DBC files.
+- The catalog is for display only: names, units, the DBC's min/max (a plot's default range), and
+  `integer` (the scaled value is always a whole number: factor 1, offset 0, integer signal; show it
+  without decimals). `mux` is the selector page the signal belongs to, or -1. `id` and `bus` are for
+  showing where a message comes from.
+- No bit layouts, factors or offsets: the client never decodes CAN frames and never parses DBC files.
 
 ### Server rules
 - At most 4–8 InfluxDB queries run at once across all clients; cancelled ones are dropped.
@@ -117,6 +122,8 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
   the cache when it is older than the live view window (~10 min) or the cap is reached, and the cache
   empties when the run ends. Tiles of past runs come straight from InfluxDB. There is no video replay cache.
 - A client whose live cursor falls off the ring jumps to the newest frame and gets a `Gap`.
+- The live ring keeps raw frames (24 B each); each client's pusher decodes only the messages its
+  subscribed signals are in, with the same decoder that writes InfluxDB.
 
 ## Login
 - **Cloudflare listener:** the request must carry `Cf-Access-Jwt-Assertion`. The server checks its

@@ -57,7 +57,7 @@ PCAN adapter ─▶ photon-pcan ─CANP─▶ photon-server (laptop, local mode)
 | `daq_tcp` source | Gone; the server is the source |
 | `pcan` source | `photon-pcan` → a server (laptop or main) |
 | `synthetic` source | Test tools send CANP to :6100 (`send-laptop-synth.py`) |
-| `subscribe_signals` / `subscribe_can` | `subscribe` by message ID; the server filters raw frames |
+| `subscribe_signals` / `subscribe_can` | `subscribe` by catalog signal index; the server decodes and sends values |
 | `history_query` / `credit` / `cancel` | `tile_request` / `tile_cancel`, tiles from InfluxDB |
 | `catalog_list` (log sessions) | `runs`, from InfluxDB's `session` table |
 | `log_replay`, `timeline_control` | Moving through history tiles; play/pause is a client-side cursor |
@@ -75,14 +75,14 @@ fan-out on :6500, TCP video on :6700, and `startLiveWriter` / `startLocalUI` in 
 | Module | v2 |
 |---|---|
 | Transport | v2 WebSocket client; keeps the existing reconnect backoff |
-| Catalog + decode | `photon/decode` bit-walk driven by the server's `catalog` (no DBC text parsing), so client and server decode identically |
+| Catalog | Names, units and ranges from the server's `catalog`. No decoding: `photon/decode` and the client's DBC files leave the client (user decision 2026-11-23: "client shouldn't parse on their side") |
 | Live store | New: per subscribed signal, a bounded ring of decoded samples about as long as the server's live ring |
 | TileCache | Same `TileKey` {session, dbc hash, signal, level, index} and IndexedDB; tiles come from the server; the live store fills the open tile at the live edge |
 | Plot merge | Builds `PlotArrays` from tiles + live samples, dropping duplicate timestamps |
 | Video | WebCodecs in the browser; the existing decoder in the native exe |
 
-Values arrive **raw** (live frames and tiles alike). The client scales with the catalog:
-`value = raw × factor + offset`; with a negative factor, a tile's min and max swap.
+Values arrive **decoded and scaled**, in the signal's unit (live samples and tiles alike). The server is
+the only decoder, so a DBC fix on the server reaches every client at once.
 
 **Joining live:** subscribe (the cursor starts at the oldest ring row) → request tiles for the visible
 window → merge by timestamp, drop duplicates. The ring covers InfluxDB's ~0.5 s write delay, so there
@@ -91,9 +91,9 @@ is no gap and no re-query.
 ## Build order
 
 1. **Server endpoint:** `/v2` WebSocket, LAN token + Cloudflare JWT login, `hello`, `catalog`.
-2. **Live:** live ring, `LiveFrames`, `subscribe`, `Gap`, telemetry-first send queue.
+2. **Live:** live ring, `LiveSamples` (decoded on the server), `subscribe`, `Gap`, telemetry-first send queue.
 3. **History:** `runs`, tiles from InfluxDB, a small cache of the live run's sealed tiles, query concurrency cap.
-4. **Client:** v2 transport, catalog decode, live store, TileCache source swap.
+4. **Client:** v2 transport, catalog (display only), live store, TileCache source swap; remove client-side DBC decoding.
 5. **PCAN:** `photon-pcan`, server local mode, run upload + replay into InfluxDB, segment compression.
 6. **Video** on the shared socket.
 7. **Later:** CSV export, downlink, analysis.
