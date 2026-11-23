@@ -23,7 +23,7 @@ type SignalID struct {
 	Name     string
 }
 
-// SignalDef is loaded from the DBC and does not change during a session.
+// is loaded from the DBC and does not change during a session.
 type SignalDef struct {
 	ID        SignalID
 	Message   string
@@ -68,6 +68,7 @@ type SessionCache struct {
 	Definitions map[SignalID]SignalDef
 	Samples     map[SampleKey]*Sample
 	byCANID     map[uint32][]SignalDef
+	layouts     map[uint32]*frameLayout // frame rows, keyed like byCANID
 }
 
 // New creates the definitions and samples for one recording.
@@ -194,33 +195,125 @@ func SHA1Hex(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// nsPerMs turns frame-clock milliseconds into line protocol nanoseconds.
+const nsPerMs = 1_000_000
+
 // SignalDefLines returns one signal_def row per DBC signal, so stored raw
-// integers can be scaled later. start is Unix seconds, like SampleKey.Second.
-func SignalDefLines(db *SessionCache, sha string, start int64) []string {
-	defs := make([]SignalDef, 0, len(db.Definitions))
+// integers can be scaled later. startMs is the session start on the frame
+// clock; the rows match what the photon database already holds.
+func SignalDefLines(db *SessionCache, sha string, startMs int64) []string {
+	// Build each "Message.Signal" name once; the sort compares them many times.
+	type named struct {
+		name string
+		def  SignalDef
+	}
+	defs := make([]named, 0, len(db.Definitions))
 	for _, def := range db.Definitions {
-		defs = append(defs, def)
+		defs = append(defs, named{def.Message + "." + def.ID.Name, def})
 	}
 	sort.Slice(defs, func(i, j int) bool {
-		a, b := defs[i].Message+"."+defs[i].ID.Name, defs[j].Message+"."+defs[j].ID.Name
-		if a != b {
-			return a < b
+		if defs[i].name != defs[j].name {
+			return defs[i].name < defs[j].name
 		}
-		return defs[i].ID.CANID < defs[j].ID.CANID
+		return defs[i].def.ID.CANID < defs[j].def.ID.CANID
 	})
 
 	lines := make([]string, 0, len(defs))
-	for _, def := range defs {
-		line := "signal_def,dbc=" + tagEscaper.Replace(sha) + ",signal=" + tagEscaper.Replace(def.Message+"."+def.ID.Name)
-		line += fmt.Sprintf(" can_id=%di,start_bit=%di,bit_length=%di,little_endian=%t,signed=%t,value_type=%di",
-			def.ID.CANID, def.StartBit, def.BitLength, def.LittleEndian, def.Signed, def.ValueType)
-		line += ",factor=" + strconv.FormatFloat(def.Factor, 'g', -1, 64)
+	for _, d := range defs {
+		def := d.def
+		line := "signal_def,dbc_sha=" + tagEscaper.Replace(sha) + ",signal=" + tagEscaper.Replace(d.name)
+		line += " factor=" + strconv.FormatFloat(def.Factor, 'g', -1, 64)
 		line += ",offset=" + strconv.FormatFloat(def.Offset, 'g', -1, 64)
 		line += `,unit="` + strEscaper.Replace(def.Unit) + `"`
-		line += fmt.Sprintf(" %d", start*nsPerSec)
+		line += fmt.Sprintf(" %d", startMs*nsPerMs)
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+// SessionLine returns the session row. Its time is startMs, so a later call
+// with a newer endMs overwrites the same row.
+func SessionLine(id, dbcLabel, sha string, startMs, endMs int64) string {
+	return fmt.Sprintf(`session,id=%s dbc_label="%s",dbc_sha="%s",start=%di,end=%di %d`,
+		tagEscaper.Replace(id), strEscaper.Replace(dbcLabel), strEscaper.Replace(sha),
+		startMs, endMs, startMs*nsPerMs)
+}
+
+// frameLayout is how one CAN ID becomes a row, worked out once at DBC load:
+// names are already escaped, and tap and field signals already sorted out.
+type frameLayout struct {
+	msgTag string      // ",msg=<message>"
+	taps   []SignalDef // _idx signals; the first that decodes is the tap tag
+	fields []frameField
+}
+
+type frameField struct {
+	def SignalDef
+	key string // "<signal>="
+}
+
+func newFrameLayout(defs []SignalDef) *frameLayout {
+	l := &frameLayout{msgTag: ",msg=" + tagEscaper.Replace(defs[0].Message)}
+	for _, def := range defs {
+		switch {
+		case isTapIndex(def):
+			l.taps = append(l.taps, def)
+		case def.ValueType == 1 || def.ValueType == 2: // IEEE float/double
+		default:
+			l.fields = append(l.fields, frameField{def: def, key: tagEscaper.Replace(def.ID.Name) + "="})
+		}
+	}
+	return l
+}
+
+// FramePrefix is the start of every frame row in a session. Build it once
+// and pass it to AppendFrameLine.
+func FramePrefix(session string) string {
+	return "frame,session=" + tagEscaper.Replace(session)
+}
+
+// AppendFrameLine appends one row for a decoded frame to dst, ending in '\n':
+// prefix (from FramePrefix), the message as a tag, and every integer signal
+// as a raw field. An index signal is the tap tag, so multiplexed frames at the
+// same instant stay apart. IEEE float and double signals are skipped. ok is
+// false, and dst is returned unchanged, when the frame has no signal to write.
+// It appends straight into the caller's buffer, so a row costs no allocation.
+func (s *SessionCache) AppendFrameLine(dst []byte, prefix string, fr Frame) (out []byte, ok bool) {
+	l := s.layouts[fr.CANID]
+	if l == nil {
+		return dst, false
+	}
+	start := len(dst)
+	dst = append(dst, prefix...)
+	dst = append(dst, l.msgTag...)
+	for _, def := range l.taps {
+		if raw, ok := extractRaw(def, fr.Data, fr.DLC); ok {
+			dst = append(dst, ",tap="...)
+			dst = strconv.AppendInt(dst, raw, 10)
+			break
+		}
+	}
+
+	sep := byte(' ')
+	for i := range l.fields {
+		f := &l.fields[i]
+		raw, ok := extractRaw(f.def, fr.Data, fr.DLC)
+		if !ok {
+			continue
+		}
+		dst = append(dst, sep)
+		sep = ','
+		dst = append(dst, f.key...)
+		dst = strconv.AppendInt(dst, raw, 10)
+		dst = append(dst, 'i')
+	}
+	if sep == ' ' {
+		return dst[:start], false
+	}
+	dst = append(dst, ' ')
+	dst = strconv.AppendUint(dst, fr.TimeMs*nsPerMs, 10)
+	dst = append(dst, '\n')
+	return dst, true
 }
 
 // Fold adds one frame. An index signal is the tap, not its own row.
