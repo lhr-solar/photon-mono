@@ -93,7 +93,7 @@ type chunkzWorker struct {
 
 func newChunkzWorker() (*chunkzWorker, error) {
 	enc, err := zstd.NewWriter(nil,
-		zstd.WithEncoderLevel(zstd.SpeedBestCompression),
+		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
 		zstd.WithWindowSize(chunkzWindowBytes),
 		zstd.WithEncoderConcurrency(1),
 		zstd.WithLowerEncoderMem(true),

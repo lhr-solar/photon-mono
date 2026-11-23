@@ -108,7 +108,7 @@ type archiver struct {
 	remote string // rclone destination; empty means compress only
 	now    func() time.Time
 
-	worker  *chunkzWorker
+	worker  *chunkzWorker    // made when a chunk is to be compressed, freed when idle
 	skipped map[string]bool  // .seg paths given up on until restart
 	removal map[*chunk]int64 // .seg files still to remove, with their size
 	stale   map[string]bool  // runs whose manifest did not reach the remote
@@ -127,15 +127,10 @@ type archiver struct {
 
 // newArchiver makes an archiver for the store. It does not start it.
 func newArchiver(store *StreamStore, remote string) (*archiver, error) {
-	w, err := newChunkzWorker()
-	if err != nil {
-		return nil, err
-	}
 	return &archiver{
 		store:   store,
 		remote:  remote,
 		now:     time.Now,
-		worker:  w,
 		skipped: map[string]bool{},
 		removal: map[*chunk]int64{},
 		stale:   map[string]bool{},
@@ -181,6 +176,9 @@ func (a *archiver) run(ctx context.Context) {
 		if a.step(ctx) {
 			continue
 		}
+		// Nothing to do: give back the encoder's ~20-30 MiB until the next chunk is
+		// sealed, so the server's memory stays flat between chunks.
+		a.close()
 		t := time.NewTimer(archivePoll)
 		select {
 		case <-ctx.Done():
@@ -190,9 +188,26 @@ func (a *archiver) run(ctx context.Context) {
 	}
 }
 
-// close frees the encoder and decoder. The archiver calls it when it stops.
+// close frees the encoder and decoder, when there are any. The archiver calls it
+// when it is idle and when it stops.
 func (a *archiver) close() {
-	a.worker.close()
+	if a.worker != nil {
+		a.worker.close()
+		a.worker = nil
+	}
+}
+
+// ensureWorker makes the encoder and decoder if they were freed.
+func (a *archiver) ensureWorker() error {
+	if a.worker != nil {
+		return nil
+	}
+	w, err := newChunkzWorker()
+	if err != nil {
+		return err
+	}
+	a.worker = w
+	return nil
 }
 
 // startup removes the .segz.tmp files that a crash left, and removes the .seg
@@ -270,6 +285,11 @@ func (a *archiver) compressOne(ctx context.Context, c *chunk) {
 		created bool // the .segz file is new on disk, so its size is not counted yet
 		err     error
 	)
+	if err = a.ensureWorker(); err != nil {
+		log.Printf("[photon-server] archive: cannot start the compressor: %v", err)
+		a.skipped[c.path] = true // do not spin on it; the next start tries again
+		return
+	}
 	if _, serr := os.Stat(zpath); serr == nil {
 		// A copy from an earlier attempt is on disk: check it again, do not write it again.
 		info, err = a.worker.verifyExisting(c.path, zpath)
