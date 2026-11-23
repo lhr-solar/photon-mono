@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -41,5 +43,26 @@ func TestStoreMaxGBParsingAndDefault(t *testing.T) {
 	bad := map[string]string{"PHOTON_STORE_MAX_GB": "lots"}
 	if _, err := ParseConfigWithEnv(func(k string) string { return bad[k] }, []string{}, &bytes.Buffer{}); err == nil {
 		t.Fatal("PHOTON_STORE_MAX_GB=lots was accepted")
+	}
+}
+
+// The storage limit counts the run folders, not the old files a migration moved
+// into segments/legacy.
+func TestStoreBytesSkipLegacy(t *testing.T) {
+	dir := t.TempDir()
+	for name, size := range map[string]int{
+		filepath.Join("20261123T000000Z", "000001.seg"): 100,
+		filepath.Join(legacyFolder, "000000000001.log"):  5000,
+	} {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := dirBytes(dir); err != nil || n != 100 {
+		t.Fatalf("dirBytes = %d, %v; want 100 (legacy left out)", n, err)
 	}
 }

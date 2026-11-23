@@ -477,6 +477,12 @@ func dirBytes(dir string) (int64, error) {
 			return err
 		}
 		if d.IsDir() {
+			// The old files a migration moved aside are a second copy of data that is
+			// already in run folders, waiting to be checked and removed by hand; they
+			// must not make ingest wait.
+			if path != dir && d.Name() == legacyFolder {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		info, err := os.Stat(path)
