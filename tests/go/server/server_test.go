@@ -38,12 +38,12 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 
 	pool := newBatchPool(4, 1<<16)
 	var ingressWg sync.WaitGroup
-	go listenForIngress(ctx, ingressListener, &ingressWg, pool)
+	go listenForIngress(ctx, ingressListener, &ingressWg, pool, DefaultIngestLatency)
 
 	// Append loop; CAN decoding starts off and the observer turns it on below.
 	canCfg := DefaultCANConfig()
 	canCfg.DBCDir = testDBCDir
-	canSettings := newCANSettings(canCfg, nil)
+	canSettings := newCANSettings(canCfg, nil, nil)
 	go appendLoop(store, pool, nil, canSettings.swap)
 
 	// 2. Start Client fan-out listener on random available port

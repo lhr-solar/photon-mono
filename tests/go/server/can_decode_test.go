@@ -93,7 +93,7 @@ func TestCANDecodingOffByDefault(t *testing.T) {
 	if cfg.CAN.Decode {
 		t.Errorf("CAN decoding is on by default")
 	}
-	if startCANDecoder(cfg.CAN) != nil {
+	if startCANDecoder(cfg.CAN, nil) != nil {
 		t.Errorf("startCANDecoder returned a decoder with decoding off")
 	}
 	cfg.CAN.Decode, cfg.CAN.DBCDir = true, ""
@@ -105,7 +105,7 @@ func TestCANDecodingOffByDefault(t *testing.T) {
 func TestStartCANDecoderBadDir(t *testing.T) {
 	cfg := DefaultCANConfig()
 	cfg.Decode, cfg.DBCDir = true, filepath.Join(t.TempDir(), "missing")
-	if startCANDecoder(cfg) != nil {
+	if startCANDecoder(cfg, nil) != nil {
 		t.Errorf("startCANDecoder returned a decoder for a missing DBC directory")
 	}
 }
@@ -137,13 +137,14 @@ func TestDefaultSampleRatesCoverSpec(t *testing.T) {
 func TestCANDecoderCountsFrames(t *testing.T) {
 	cfg := DefaultCANConfig()
 	cfg.Decode, cfg.DBCDir = true, testDBCDir
-	can := startCANDecoder(cfg)
+	can := startCANDecoder(cfg, nil)
 	if can == nil {
 		t.Fatal("startCANDecoder returned nil for the spec")
 	}
 	before := canStats.frames.Load()
 	imu := make([]byte, 32)
-	buf := canp3Batch(1_000,
+	// A real car time: the decoder drops frames stamped before 2020 (bad clock).
+	buf := canp3Batch(1_700_000_000_000,
 		canpTestFrame{id: 0x061 | canpBus0Bit, data: make([]byte, 6)}, // PedalsStatus: one row
 		canpTestFrame{id: 0x640, data: imu[:8]},                       // UprightFRAccelerationData, short: v3 carries 8 of its 32 bytes
 		canpTestFrame{id: 0x7FD | canpBus0Bit, data: make([]byte, 8)}, // Sig_Wave
