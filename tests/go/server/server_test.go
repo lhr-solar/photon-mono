@@ -44,7 +44,7 @@ func TestEndToEndStreamPipeline(t *testing.T) {
 	canCfg := DefaultCANConfig()
 	canCfg.DBCDir = testDBCDir
 	canSettings := newCANSettings(canCfg, nil, nil)
-	go appendLoop(store, pool, nil, canSettings.swap)
+	go appendLoop(store, pool, nil, canSettings.swap, newLiveRing(liveRingMinFrames))
 
 	// 2. Start Client fan-out listener on random available port
 	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
