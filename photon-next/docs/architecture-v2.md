@@ -92,7 +92,7 @@ is no gap and no re-query.
 
 1. **Server endpoint:** `/v2` WebSocket, LAN token + Cloudflare JWT login, `hello`, `catalog`.
 2. **Live:** live ring, `LiveFrames`, `subscribe`, `Gap`, telemetry-first send queue.
-3. **History:** `runs`, tiles from InfluxDB, shared LRU of sealed tiles, query concurrency cap.
+3. **History:** `runs`, tiles from InfluxDB, a small cache of the live run's sealed tiles, query concurrency cap.
 4. **Client:** v2 transport, catalog decode, live store, TileCache source swap.
 5. **PCAN:** `photon-pcan`, server local mode, run upload + replay into InfluxDB, segment compression.
 6. **Video** on the shared socket.

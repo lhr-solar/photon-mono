@@ -12,8 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"server/dbc"
 )
 
@@ -74,13 +72,21 @@ func newV2Hub(cfg *Config, gate *ClientGate, liveRun func() string) *v2Hub {
 	return h
 }
 
+// emptyCatalog tells clients that decoding is off: no DBCs, no signals.
+var emptyCatalog = []byte(`{"type":"catalog","sha":"","buses":[],"messages":[]}`)
+
 // SetCatalog makes c the catalog that clients get. Every client past hello is
-// sent it when its SHA is new. A nil c clears the catalog; the clients are not
-// told, and the next hello_ack carries no catalog.
+// sent it when its SHA is new. A nil c means decoding is off: clients that had
+// a catalog get an empty one, and later hellos get none.
 func (h *v2Hub) SetCatalog(c *dbc.Catalog) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if c == nil {
+		if h.catalog != nil {
+			for cl := range h.clients {
+				cl.enqueue(emptyCatalog)
+			}
+		}
 		h.catalog, h.catalogSHA = nil, ""
 		return
 	}
@@ -131,7 +137,7 @@ func (h *v2Hub) serveWS(w http.ResponseWriter, r *http.Request, cf bool) {
 		}
 	}
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
+	conn, err := wsAccept(w, r)
 	if err != nil {
 		return // Accept has already answered the request
 	}
@@ -160,7 +166,7 @@ func (h *v2Hub) verifyAccess(r *http.Request) (string, error) {
 
 // admitHello reads the first message, which must be a hello that passes the
 // login, and returns the user it names. A connection that fails is closed here.
-func (h *v2Hub) admitHello(ctx context.Context, conn *websocket.Conn, ip, email string, cf bool) (string, bool) {
+func (h *v2Hub) admitHello(ctx context.Context, conn *wsConn, ip, email string, cf bool) (string, bool) {
 	rctx, cancel := context.WithTimeout(ctx, h.helloTimeout)
 	typ, data, err := conn.Read(rctx)
 	cancel()
@@ -169,7 +175,7 @@ func (h *v2Hub) admitHello(ctx context.Context, conn *websocket.Conn, ip, email 
 		Protocol int    `json:"protocol"`
 		Token    string `json:"token"`
 	}
-	if err != nil || typ != websocket.MessageText || json.Unmarshal(data, &hello) != nil || hello.Type != "hello" {
+	if err != nil || typ != wsText || json.Unmarshal(data, &hello) != nil || hello.Type != "hello" {
 		h.reject(conn, ip, "hello expected")
 		return "", false
 	}
@@ -190,10 +196,10 @@ func (h *v2Hub) admitHello(ctx context.Context, conn *websocket.Conn, ip, email 
 
 // reject closes a connection that failed its hello or its login, with policy
 // violation 1008 and the reason.
-func (h *v2Hub) reject(conn *websocket.Conn, ip, reason string) {
+func (h *v2Hub) reject(conn *wsConn, ip, reason string) {
 	h.authFailures.Add(1)
 	log.Printf("[photon-server] v2 connection from %s closed: %s", ip, reason)
-	_ = conn.Close(websocket.StatusPolicyViolation, reason)
+	_ = conn.Close(wsStatusPolicyViolation, reason)
 }
 
 // register makes c a client past hello. Its hello_ack and then the current
@@ -225,8 +231,10 @@ func (h *v2Hub) unregister(c *v2Client) {
 	delete(h.clients, c)
 }
 
-// closeClients closes every client past hello. It waits for the close handshakes
-// until ctx is done, then drops the connections that are left.
+// closeClients closes every client past hello. Each one's reader ends when the
+// peer answers the close or the close wait runs out, and its handler then
+// returns; this waits for those handlers until ctx is done, then drops the
+// connections that are left.
 func (h *v2Hub) closeClients(ctx context.Context) {
 	h.mu.Lock()
 	clients := make([]*v2Client, 0, len(h.clients))
@@ -235,22 +243,14 @@ func (h *v2Hub) closeClients(ctx context.Context) {
 	}
 	h.mu.Unlock()
 
-	var wg sync.WaitGroup
 	for _, c := range clients {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = c.conn.Close(websocket.StatusGoingAway, "server stopping")
-		}()
+		_ = c.conn.Close(wsStatusGoingAway, "server stopping")
 	}
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
+	for _, c := range clients {
+		select {
+		case <-c.done:
+		case <-ctx.Done():
+		}
 	}
 	for _, c := range clients {
 		_ = c.conn.CloseNow()
@@ -260,7 +260,7 @@ func (h *v2Hub) closeClients(ctx context.Context) {
 // v2Client is one connection past hello. From registration on, only its writer
 // goroutine writes to conn; everything else queues on send.
 type v2Client struct {
-	conn    *websocket.Conn
+	conn    *wsConn
 	send    chan []byte   // text messages waiting for the writer
 	done    chan struct{} // closed when the connection's handler returns
 	closing sync.Once     // closes a client that fell behind, once
@@ -276,7 +276,7 @@ func (c *v2Client) enqueue(msg []byte) {
 	case c.send <- msg:
 	default:
 		c.closing.Do(func() {
-			go func() { _ = c.conn.Close(websocket.StatusPolicyViolation, "too slow") }()
+			go func() { _ = c.conn.Close(wsStatusPolicyViolation, "too slow") }()
 		})
 	}
 }
@@ -318,8 +318,8 @@ func (c *v2Client) readLoop(ctx context.Context, idle time.Duration) {
 
 // handle answers one message from a client past hello. Only ping is supported
 // so far; any other type gets an error that says so.
-func (c *v2Client) handle(typ websocket.MessageType, data []byte) {
-	if typ == websocket.MessageBinary {
+func (c *v2Client) handle(typ wsMessageType, data []byte) {
+	if typ == wsBinary {
 		c.enqueueError("unexpected_binary", "binary messages are not supported yet")
 		return
 	}
@@ -378,10 +378,10 @@ func encodeV2(v any) []byte {
 }
 
 // writeV2 sends one text message on conn, giving up after v2WriteTimeout.
-func writeV2(conn *websocket.Conn, msg []byte) error {
+func writeV2(conn *wsConn, msg []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), v2WriteTimeout)
 	defer cancel()
-	return conn.Write(ctx, websocket.MessageText, msg)
+	return conn.Write(ctx, wsText, msg)
 }
 
 // startV2 opens the protocol v2 listeners: the LAN one on cfg.Host:cfg.V2Port,

@@ -82,7 +82,7 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
 |---|---|---|
 | `hello` | C → S | `protocol` (2), `client`, `token` (LAN listener only; browsers cannot set WebSocket headers) |
 | `hello_ack` | S → C | `protocol`, `server`, `user`, `server_time_ns`, `catalog_sha`, `live_run`, `levels` (bucket ms per level), `features` |
-| `catalog` | S → C | sent after `hello_ack` and whenever the DBCs change; see below |
+| `catalog` | S → C | sent after `hello_ack` and whenever the DBCs change; when decoding turns off, an empty one (`sha` `""`, no messages); see below |
 | `subscribe` | C → S | `messages`: wire IDs. Replaces the previous set; `[]` stops live data |
 | `runs_list` | C → S | — |
 | `runs` | S → C | `runs`: `[{id, label, source, device, dbc_sha, start_ms, end_ms, live}]` |
@@ -107,11 +107,15 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
 - A signal's `index` is its position in the catalog and is stable for one `sha`.
   `TileKey.signalId` is this index; `TileKey.dbcHash` is `sha`.
 - `kind`: `int`, `f32` or `f64`. `mux`: the selector page this signal belongs to, or -1.
+- A message's `selector` is the position of its mux selector **within that message's `signals` list**
+  (not a catalog `index`), or -1 when the message is not multiplexed.
 - The client decodes frames with these layouts; it does not parse DBC files.
 
 ### Server rules
 - At most 4–8 InfluxDB queries run at once across all clients; cancelled ones are dropped.
-- Sealed tiles are cached once on the server (shared LRU, ~64 MB).
+- Only the **live run's** sealed tiles are cached, once, shared by every client (~8–16 MB). A tile leaves
+  the cache when it is older than the live view window (~10 min) or the cap is reached, and the cache
+  empties when the run ends. Tiles of past runs come straight from InfluxDB. There is no video replay cache.
 - A client whose live cursor falls off the ring jumps to the newest frame and gets a `Gap`.
 
 ## Login

@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"server/dbc"
 )
 
@@ -45,22 +43,22 @@ func serveHub(t *testing.T, h *v2Hub, cf bool) string {
 }
 
 // dialV2 opens a WebSocket to url with the given request headers.
-func dialV2(t *testing.T, url string, hdr http.Header) *websocket.Conn {
+func dialV2(t *testing.T, url string, hdr http.Header) *wsConn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: hdr})
+	conn, _, err := wsDial(ctx, url, hdr)
 	if err != nil {
 		t.Fatalf("dial %s: %v", url, err)
 	}
-	// The catalog is bigger than the library's default 32 KiB read limit.
+	// The catalog is bigger than the default 1 MiB limit allows for later growth.
 	conn.SetReadLimit(4 << 20)
 	t.Cleanup(func() { _ = conn.CloseNow() })
 	return conn
 }
 
 // sendV2 writes v as one text message.
-func sendV2(t *testing.T, conn *websocket.Conn, v any) {
+func sendV2(t *testing.T, conn *wsConn, v any) {
 	t.Helper()
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -68,13 +66,13 @@ func sendV2(t *testing.T, conn *websocket.Conn, v any) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := conn.Write(ctx, websocket.MessageText, b); err != nil {
+	if err := conn.Write(ctx, wsText, b); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 }
 
 // readMsg returns the next message, which must be text.
-func readMsg(t *testing.T, conn *websocket.Conn) []byte {
+func readMsg(t *testing.T, conn *wsConn) []byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -82,14 +80,14 @@ func readMsg(t *testing.T, conn *websocket.Conn) []byte {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if typ != websocket.MessageText {
+	if typ != wsText {
 		t.Fatalf("got a binary message, want text")
 	}
 	return data
 }
 
 // readInto decodes the next message into v.
-func readInto(t *testing.T, conn *websocket.Conn, v any) {
+func readInto(t *testing.T, conn *wsConn, v any) {
 	t.Helper()
 	data := readMsg(t, conn)
 	if err := json.Unmarshal(data, v); err != nil {
@@ -98,7 +96,7 @@ func readInto(t *testing.T, conn *websocket.Conn, v any) {
 }
 
 // closeError reads until the connection ends and returns the error that ended it.
-func closeError(t *testing.T, conn *websocket.Conn) error {
+func closeError(t *testing.T, conn *wsConn) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -110,10 +108,10 @@ func closeError(t *testing.T, conn *websocket.Conn) error {
 }
 
 // expectCloseStatus checks that the connection ends with the given close status.
-func expectCloseStatus(t *testing.T, conn *websocket.Conn, want websocket.StatusCode) {
+func expectCloseStatus(t *testing.T, conn *wsConn, want wsStatusCode) {
 	t.Helper()
 	err := closeError(t, conn)
-	if got := websocket.CloseStatus(err); got != want {
+	if got := wsCloseStatus(err); got != want {
 		t.Fatalf("connection ended with status %d (%v), want %d", got, err, want)
 	}
 }
@@ -261,7 +259,7 @@ func TestV2BadTokenCloses1008(t *testing.T) {
 	conn := dialV2(t, serveHub(t, h, false), nil)
 
 	sendV2(t, conn, hello(2, "wrong"))
-	expectCloseStatus(t, conn, websocket.StatusPolicyViolation)
+	expectCloseStatus(t, conn, wsStatusPolicyViolation)
 	if n := h.authFailures.Load(); n != 1 {
 		t.Fatalf("auth failures = %d, want 1", n)
 	}
@@ -294,7 +292,7 @@ func TestV2ProtocolOneGetsErrorThenClose(t *testing.T) {
 	if e.Type != "error" || e.Code != "protocol" || e.Message != "protocol 2 required" {
 		t.Fatalf("error = %+v, want protocol 2 required", e)
 	}
-	expectCloseStatus(t, conn, websocket.StatusPolicyViolation)
+	expectCloseStatus(t, conn, wsStatusPolicyViolation)
 }
 
 func TestV2PingEchoesT(t *testing.T) {
@@ -342,7 +340,7 @@ func TestV2BinaryAfterHelloGetsError(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := conn.Write(ctx, websocket.MessageBinary, []byte{1, 2, 3}); err != nil {
+	if err := conn.Write(ctx, wsBinary, []byte{1, 2, 3}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	var e struct {
@@ -439,7 +437,7 @@ func TestV2CFNeedsAccessToken(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: hdr})
+			_, resp, err := wsDial(ctx, url, hdr)
 			if err == nil {
 				t.Fatal("dial succeeded without a valid Access token")
 			}
