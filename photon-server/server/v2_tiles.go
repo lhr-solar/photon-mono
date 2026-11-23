@@ -26,7 +26,8 @@ const (
 	// tileSealLagMS is how long before now a tile must end to be sealed: InfluxDB's
 	// write delay, with a margin.
 	tileSealLagMS = 2000
-	// tileRawRows caps the raw samples of one level 0 tile.
+	// tileRawRows caps the raw samples of one level 0 tile: 60 s at 3.3 kHz, far
+	// above any one signal's rate. A tile that reaches it is an error, not data.
 	tileRawRows = 200000
 	// v2MaxTileRequests is how many tile requests one client may have in flight.
 	v2MaxTileRequests = 32
@@ -172,6 +173,11 @@ func (h *v2Hub) fetchTile(ctx context.Context, ts tileSignal, run string, level 
 	}
 	if err != nil {
 		return nil, err
+	}
+	if level == 0 && len(rows) >= tileRawRows {
+		// The LIMIT cut the tile short; an incomplete tile must not pass (or be
+		// cached) as a whole one. The client asks for a coarser level instead.
+		return nil, fmt.Errorf("tile has more than %d raw samples; use a coarser level", tileRawRows)
 	}
 	cols, dst := []string{"v"}, []*[]float64{&t.raw}
 	if level > 0 {

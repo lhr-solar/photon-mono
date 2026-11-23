@@ -685,3 +685,20 @@ func mapKeys(m map[string]string) []string {
 	slices.Sort(keys)
 	return keys
 }
+
+// A raw tile that fills the LIMIT is cut short, so it is a tile_error, not data.
+func TestTileAtRawLimitIsTileError(t *testing.T) {
+	signal, _ := plainSignal(t)
+	var body strings.Builder
+	for i := 0; i < tileRawRows; i++ {
+		fmt.Fprintf(&body, "{\"t_ns\":%d,\"v\":1}\n", 1_700_000_000_000_000_000+int64(i))
+	}
+	rows := body.String()
+	f := &fakeQueries{reply: func(context.Context, fakeQuery) (int, string) { return http.StatusOK, rows }}
+	conn := tileConn(t, newTileHub(t, f, fixedLive(tileTestRun)))
+	requestTile(t, conn, 11, "run-old", signal, 0, pastIndex(0))
+	if msg := readTileError(t, conn, 11); !strings.Contains(msg, "more than") {
+		t.Fatalf("tile_error %q, want the raw limit named", msg)
+	}
+}
+

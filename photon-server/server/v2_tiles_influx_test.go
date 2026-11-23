@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"math"
+	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,7 +57,8 @@ func findSignal(t *testing.T, cat *dbc.Catalog, pred func(tileSignal) bool) (int
 // fresh database, then reads them back over a hub: the runs list, and level 0 and
 // level 1 tiles of a float, a plain integer and a muxed integer signal. It runs
 // only when PHOTON_TEST_INFLUX names an InfluxDB 3, for example
-// http://127.0.0.1:8181. The database is left in place.
+// http://127.0.0.1:8181. The database is deleted afterwards: InfluxDB 3 Core
+// allows only 5 databases, so leaving one per run soon makes runs fail.
 func TestHistoryFromRealInfluxDB(t *testing.T) {
 	url := os.Getenv("PHOTON_TEST_INFLUX")
 	if url == "" {
@@ -63,6 +66,23 @@ func TestHistoryFromRealInfluxDB(t *testing.T) {
 	}
 	cat := loadTestCatalog(t)
 	db := fmt.Sprintf("photon_test_%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		req, err := http.NewRequest(http.MethodDelete, strings.TrimRight(url, "/")+"/api/v3/configure/database?db="+db, nil)
+		if err != nil {
+			t.Errorf("delete %s: %v", db, err)
+			return
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Errorf("delete %s: %v", db, err)
+			return
+		}
+		resp.Body.Close()
+		// 404: nothing was written, so there was no database to delete.
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+			t.Errorf("delete %s: HTTP %d", db, resp.StatusCode)
+		}
+	})
 
 	// Each message gets 50 frames, 10 ms apart, two hours back. t0 starts a level 0
 	// tile and a level 1 tile together: it is a multiple of both spans.
@@ -184,5 +204,4 @@ func TestHistoryFromRealInfluxDB(t *testing.T) {
 				tile.TMS[b], tile.Min[b], tile.Max[b], tile.Mean[b], t0+int64(b)*100, lo, lo+2.25, lo+1.125)
 		}
 	}
-	t.Logf("database %s left in place", db)
 }
