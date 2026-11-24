@@ -86,24 +86,18 @@ void LiveViewScreen::draw(UiContext& ui) {
     const float statusH = std::max(24.0f, ImGui::GetFontSize() + 10.0f);
     theme::beginCard("livestat", ImVec2(avail.x, statusH), theme::muted(), theme::kStripPadding,
                      theme::CardFit::Band);
-    if (!kVideoEnabled) {
-        ImGui::TextColored(theme::mutedFg(), "video coming back");
+    if (!v.available) {
+        ImGui::TextColored(theme::mutedFg(), "Video is not on this server");
     } else if (!videoDecoder().supported()) {
         ImGui::TextColored(theme::warning(), "Video decoder unavailable");
-    } else if (videoDecoder().hasFrame()) {
-        ImGui::TextColored(theme::success(), "video cache  %s  %0.1f fps  %zu kB", v.mode.c_str(), v.fps,
-                           videoDecoder().bufferedBytes() / 1024);
-    } else if (v.haveStatus) {
-        ImGui::TextColored(v.connected ? theme::success() : theme::warning(),
-                           "%s  %s  %0.1f fps  frames=%llu  drop=%llu", v.connected ? "video up" : "video down",
-                           v.mode.c_str(), v.fps, static_cast<unsigned long long>(v.frames),
-                           static_cast<unsigned long long>(v.dropped));
     } else if (videoDecoder().error()[0] != '\0') {
         ImGui::TextColored(theme::danger(), "%s", videoDecoder().error());
-    } else if (v.subscribed && !v.lastError.empty()) {
-        ImGui::TextColored(theme::warning(), "video store down  %s", v.lastError.c_str());
-    } else if (v.subscribed) {
-        ImGui::TextColored(theme::mutedFg(), "pointer cache: locating GOP");
+    } else if (videoDecoder().hasFrame()) {
+        ImGui::TextColored(theme::success(), "video %s  %s  %0.1f fps  frames=%llu  drop=%u", v.mode.c_str(),
+                           v.replay ? "replay" : "live", v.fps, static_cast<unsigned long long>(v.frames),
+                           v.dropped);
+    } else if (v.requested != VideoStream::Off) {
+        ImGui::TextColored(theme::mutedFg(), "video %s: waiting for pictures", videoStreamName(v.requested));
     } else {
         ImGui::TextColored(theme::mutedFg(), "Video idle: press Live");
     }
@@ -191,11 +185,7 @@ void LiveViewScreen::draw(UiContext& ui) {
         theme::beginCard("livevideo", ImVec2(videoW, stack ? videoH : bodyH), theme::background(),
                          ImVec2(0.0f, 0.0f), theme::CardFit::Band);
         paneHeader("Video", &showVideo_);
-        if (kVideoEnabled) {
-            drawVideoImage(ui.arena, ImGui::GetContentRegionAvail());
-        } else {
-            ImGui::TextColored(theme::mutedFg(), "video coming back");
-        }
+        drawVideoImage(ui.arena, ImGui::GetContentRegionAvail());
         theme::endCard();
     }
 }

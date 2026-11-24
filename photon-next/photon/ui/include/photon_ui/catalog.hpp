@@ -56,9 +56,4 @@ inline bool signalAlarmed(const SignalDesc& desc, double value) {
 
 // Native default; the web build uses the page's own /v2 (web/shell.html).
 inline std::string_view defaultWsUrl() { return "ws://127.0.0.1:6900/v2"; }
-
-// Video is off until step 2 brings it back on the v2 socket. Every video call and
-// panel checks this flag.
-inline constexpr bool kVideoEnabled = false;
-
 }  // namespace photon::ui

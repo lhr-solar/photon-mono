@@ -19,15 +19,6 @@
 namespace photon::ui {
 namespace {
 
-// Video is off in this step (kVideoEnabled): a tile of the same size with a note.
-void drawVideoOff(ImVec2 size) {
-    theme::beginCard("videotile-off", size, theme::card());
-    ImGui::TextColored(theme::primary(), "Live View");
-    ImGui::SameLine();
-    ImGui::TextColored(theme::mutedFg(), "video coming back");
-    theme::endCard();
-}
-
 struct Series {
     std::vector<double> t;
     std::vector<double> v;
@@ -104,11 +95,7 @@ void MechanicalScreen::draw(UiContext& ui) {
     const float tileWidth = std::max(200.0f, ImGui::GetContentRegionAvail().x);
     drawScene3DTile(ui.arena, ImVec2(tileWidth, std::max(170.0f, side * 0.62f)));
     const ImVec2 videoSize(tileWidth, std::max(155.0f, side * 0.56f));
-    if (kVideoEnabled) {
-        drawVideoTile(ui.arena, videoSize);
-    } else {
-        drawVideoOff(videoSize);
-    }
+    drawVideoTile(ui.arena, videoSize);
     status("Speed", ringFor(ui, "vehicle_speed"), "mph", kMpsToMph);
     ImGui::TextUnformatted("Driver inputs | 15 s");
     const auto throttle = seriesFor(ui, "throttle", start, end);

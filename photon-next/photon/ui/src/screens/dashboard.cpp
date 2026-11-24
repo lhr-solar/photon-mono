@@ -347,6 +347,7 @@ enum class Gear : int { Forward = 0, Neutral = 1, Reverse = 2 };
 enum class Turn : int { None = 0, Left = 1, Right = 2 };
 
 struct DashView {
+    bool videoOn = false;  // the server has video (the rear camera shows it)
     Vital packSoc{};
     Vital packV{};
     Vital packI{};
@@ -472,6 +473,7 @@ struct DashView {
 
 DashView fillView(UiContext& ui, std::uint8_t heartbeat) {
     DashView d;
+    d.videoOn = ui.arena.videoOn();
     const SignalMap& map = ui.arena.signalMap();
     auto take = [&](const char* role) { return map.vital(role, ui.arena); };
     d.packSoc = take("pack_soc");
@@ -811,20 +813,13 @@ void drawFaultBanner(const DashView& d) {
 void drawCamera(const char* id, const char* label, ImVec2 size, ImVec4 bg, bool video, bool mirror) {
     beginPanel(id, size, bg, ImVec2(0.0f, 0.0f));
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    if (video && kVideoEnabled && videoDecoder().hasFrame() && videoDecoder().width() > 0 &&
-        videoDecoder().height() > 0) {
+    if (video && videoDecoder().hasFrame() && videoDecoder().width() > 0 && videoDecoder().height() > 0) {
         (void)mirror;
         // The screen already polled once this frame. A second poll consumes
         // another decoded picture, so live video runs ahead and then freezes.
         blitDecodedVideo(avail);
-    } else if (video && kVideoEnabled) {
-        drawVideoBuffering(avail);
     } else if (video) {
-        // Video is off in this step: a note, not a spinner that never ends.
-        const char* note = "video coming back";
-        const ImVec2 noteSize = ImGui::CalcTextSize(note);
-        ImGui::SetCursorPos(ImVec2((avail.x - noteSize.x) * 0.5f, (avail.y - noteSize.y) * 0.5f));
-        ImGui::TextColored(theme::mutedFg(), "%s", note);
+        drawVideoBuffering(avail);
     } else {
         const char* space = std::strchr(label, ' ');
         ImGui::PushStyleColor(ImGuiCol_Text, theme::mutedFg());
@@ -1539,7 +1534,7 @@ void drawCluster(const DashView& d) {
     ImGui::SetCursorPos(ImVec2(0.0f, rowTop));
     drawBattery(d, ImVec2(side, rowBot));
     ImGui::SetCursorPos(ImVec2(colCenterX, rowTop));
-    drawCamera("rearcam", "REAR VIEW", ImVec2(center, rowBot), panelBg(d), true, true);
+    drawCamera("rearcam", "REAR VIEW", ImVec2(center, rowBot), panelBg(d), d.videoOn, true);
     ImGui::SetCursorPos(ImVec2(colRightX, rowTop));
     drawButtons(d, ImVec2(side, rowBot));
 }
@@ -1548,7 +1543,8 @@ void drawCluster(const DashView& d) {
 
 void DashboardScreen::draw(UiContext& ui) {
     ui.arena.signalMap().subscribe(ui.client, MapScreen::Pit | MapScreen::Dashboard);
-    if (kVideoEnabled) {
+    if (ui.arena.videoOn()) {
+        ui.arena.markVideoWanted();
         videoDecoder().syncToCursor(ui.arena);
         videoDecoder().poll();
     }

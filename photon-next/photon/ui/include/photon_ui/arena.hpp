@@ -8,9 +8,12 @@
 #include "photon_ui/live_v2.hpp"
 #include "photon_ui/signal_map.hpp"
 #include "photon_ui/tile_cache.hpp"
+#include "photon_ui/video_v2.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -75,32 +78,25 @@ struct ServerInfo {
     std::int64_t clockOffsetNs = 0;  // server_time_ns minus this machine's clock at hello_ack
 };
 
-// Video is off in this step (kVideoEnabled); nothing fills this in until step 2.
+// Video over protocol v2 (the /v2 socket). The server says what it streams (mode,
+// gap); the client says what it asked for (requested) and when a screen last showed
+// video (wantedMs).
 struct VideoState {
-    bool connected = false;
-    std::string host;
-    std::uint16_t port = 0;
-    std::string mode = "live";
-    std::uint64_t lastTsMs = 0;
-    std::uint64_t lastFrameArrivalMs = 0;
-    std::uint64_t frames = 0;
-    std::uint64_t dropped = 0;
+    bool available = false;                    // hello_ack features contain "video"
+    VideoStream requested = VideoStream::Off;  // the stream the client asked for last
+    std::string mode = "off";                  // the last video_status mode
+    std::uint64_t tMs = 0;                     // the last video_status t_ms
+    std::string clock;                         // its clock provenance
     bool haveStatus = false;
-    bool subscribed = false;
-    std::string lastError;
-    std::int64_t clockOffsetMs = 0;
-    bool haveClockOffset = false;
-    bool clockOffsetDirty = false;
-    bool clockOffsetUser = false;
-    double fps = 0.0;
-    // Recent picture intervals, in ms. The rate is their median, so a GOP
-    // that arrives in one burst still reads as the camera interval.
-    static constexpr int kFpsDeltas = 15;
-    std::uint32_t fpsDeltaMs[kFpsDeltas]{};
-    int fpsDeltaN = 0;
-    int fpsDeltaI = 0;
-    bool fpsHaveLast = false;
-    std::uint64_t fpsLastPictureMs = 0;
+    std::optional<ctrl2::VideoGap> gap;        // set while the stream has no video to show
+    bool replay = false;                       // the last frame was replayed
+    double wantedMs = -1.0e12;                 // the last time a screen showed video
+    std::uint64_t frames = 0;                  // frames since the stream (re)started
+    std::uint32_t dropped = 0;                 // partial frames the assembler gave up
+    double fps = 0.0;                          // pictures per second, from the last full second
+    std::uint64_t fpsCount = 0;
+    double fpsStartMs = 0.0;
+    std::optional<std::uint32_t> qid;          // the qid of the last status, after a seek
 };
 
 // Result of applyCatalog. remap maps each old client id to the new client id of
@@ -210,6 +206,16 @@ public:
         return tiles_.runMaxMs();
     }
     const CellPack& cells() const { return cells_; }
+    // Video (protocol v2). The client pushes restarts and frames in order; the decoder
+    // takes them with takeVideoEvents on the UI thread.
+    void pushVideoRestart();
+    void pushVideoFrame(const AssembledFrame& frame);
+    std::deque<VideoEvent> takeVideoEvents();
+    void applyVideoStatus(const ctrl2::VideoStatus& status);
+    // A screen is showing video now. The client reads it with the clock of its tick.
+    void markVideoWanted() { video.wantedMs = tickMs_; }
+    void noteTick(double nowMs) { tickMs_ = nowMs; }
+    bool videoOn() const { return video.available; }
     const std::vector<LogLine>& logs() const { return logs_; }
 
     std::string wsUrl = std::string(defaultWsUrl());
@@ -231,6 +237,9 @@ private:
     std::uint64_t previewCursorMs_ = 0;
     bool previewCursor_ = false;
     std::uint64_t videoFollowMs_ = 0;
+    std::deque<VideoEvent> videoEvents_;
+    std::size_t videoBytes_ = 0;
+    double tickMs_ = 0.0;
     CellPack cells_{};
     std::vector<LogLine> logs_;
     std::vector<GapSpan> gaps_;

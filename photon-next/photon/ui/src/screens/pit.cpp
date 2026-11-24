@@ -18,15 +18,6 @@
 namespace photon::ui {
 namespace {
 
-// Video is off in this step (kVideoEnabled): a tile of the same size with a note.
-void drawVideoOff(ImVec2 size) {
-    theme::beginCard("videotile-off", size, theme::card());
-    ImGui::TextColored(theme::primary(), "Live View");
-    ImGui::SameLine();
-    ImGui::TextColored(theme::mutedFg(), "video coming back");
-    theme::endCard();
-}
-
 // Li-ion pit limits in Fahrenheit (DBC temps are Celsius).
 //   < 95 F  (~35 C)  green  — typical pack comfort
 //   < 113 F (~45 C)  yellow — charge/pit caution
@@ -594,11 +585,7 @@ void PitScreen::draw(UiContext& ui) {
     const float embedW = (avail.x - gap) * 0.5f;
     drawScene3DTile(ui.arena, ImVec2(embedW, embedH));
     ImGui::SameLine(0.0f, gap);
-    if (kVideoEnabled) {
-        drawVideoTile(ui.arena, ImVec2(embedW, embedH));
-    } else {
-        drawVideoOff(ImVec2(embedW, embedH));
-    }
+    drawVideoTile(ui.arena, ImVec2(embedW, embedH));
 
     drawCellStrip(ui.arena.cells(), ui.arena.signalMap().heat(), ImVec2(avail.x, kCellStripH));
     ImGui::PopStyleVar();

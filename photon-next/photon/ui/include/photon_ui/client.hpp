@@ -5,6 +5,7 @@
 #include "photon_ui/arena.hpp"
 #include "photon_ui/history_io.hpp"
 #include "photon_ui/tile_queue.hpp"
+#include "photon_ui/video_v2.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -112,6 +113,8 @@ private:
     double lastTileErrorLogMs_ = 0.0;
     TileRequestQueue queue_;
     std::unordered_map<std::uint32_t, double> tileSentMs_;  // sent tile requests, by qid
+    VideoSession videoSession_;   // the video stream asked for, and what is awaited
+    VideoAssembler videoAssembler_;
 
     void attachCallbacks();
     void scheduleReconnect(double nowMs);
@@ -126,6 +129,10 @@ private:
     void finishTile(std::uint32_t qid);
     TileCache* cacheFor(std::uint32_t qid);
     void applyRuns(std::vector<ctrl2::Run> runs);
+    void pumpVideo(double nowMs);
+    void handleVideoChunk(std::span<const std::uint8_t> bytes);
+    void applyVideoStatus(const ctrl2::VideoStatus& status);
+    void resetVideo();
 };
 
 }  // namespace photon::ui

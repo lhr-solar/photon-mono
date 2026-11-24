@@ -69,6 +69,7 @@ add_executable(photon-v2-probe
     ${CMAKE_SOURCE_DIR}/photon/ui/src/client.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/arena.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/live_v2.cpp
+    ${CMAKE_SOURCE_DIR}/photon/ui/src/video_v2.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/signal_map.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/alarms.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/theme.cpp

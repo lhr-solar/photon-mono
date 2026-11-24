@@ -57,7 +57,7 @@ public:
     // scrub replay video instead of fighting it.
     //
     // Call once per UI frame, after the network poll.
-    void syncToCursor(const ClientArena& arena);
+    void syncToCursor(ClientArena& arena);
 
     // Feed a video_locate reply (payload without its u32 length prefix).
     bool applyLocateReply(std::span<const std::uint8_t> payload);
@@ -112,6 +112,8 @@ private:
     double liveWallMs_ = 0.0;
 
     void ensureTexture();
+    void restartStream();
+    void drainVideoEvents(ClientArena& arena);
     void pushToRing(std::uint64_t timestampMs, std::uint8_t flags, std::span<const std::uint8_t> nal);
     void submit(const vidx::BufferedNal& nal);
     void releaseThrough(std::uint64_t videoMs);

@@ -80,6 +80,7 @@ set(PHOTON_UI_SOURCES
     src/log_drawer.cpp
     src/video_decoder.cpp
     src/video_hud.cpp
+    src/video_v2.cpp
     src/widgets.cpp
     src/gl3d/renderer.cpp
     src/gl3d/model.cpp

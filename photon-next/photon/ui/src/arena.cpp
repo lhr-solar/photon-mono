@@ -324,6 +324,75 @@ void ClientArena::pushLog(std::string text, bool error) {
     }
 }
 
+namespace {
+
+// Frames the decoder has not taken yet. A screen that stops drawing video stops taking
+// them, so the queue is held to this many bytes, oldest frames out first.
+constexpr std::size_t kVideoQueueBytes = std::size_t{8} << 20;
+
+}  // namespace
+
+void ClientArena::pushVideoRestart() {
+    videoEvents_.push_back(VideoEvent{VideoEvent::Kind::Restart, 0, 0, {}});
+    video.frames = 0;
+    video.fpsCount = 0;
+    video.fpsStartMs = 0.0;
+    video.fps = 0.0;
+}
+
+void ClientArena::pushVideoFrame(const AssembledFrame& frame) {
+    VideoEvent ev;
+    ev.kind = VideoEvent::Kind::Frame;
+    ev.tMs = frame.tMs;
+    ev.flags = decoderFlags(frame.flags);
+    ev.payload = frame.payload;
+    videoBytes_ += ev.payload.size();
+    videoEvents_.push_back(std::move(ev));
+    while (videoBytes_ > kVideoQueueBytes) {
+        const auto oldest = std::find_if(videoEvents_.begin(), videoEvents_.end(), [](const VideoEvent& e) {
+            return e.kind == VideoEvent::Kind::Frame;
+        });
+        if (oldest == videoEvents_.end()) {
+            break;
+        }
+        videoBytes_ -= oldest->payload.size();
+        videoEvents_.erase(oldest);
+    }
+
+    ++video.frames;
+    video.replay = isReplayChunk(frame.flags);
+    video.gap.reset();
+    if ((frame.flags & proto2::kVideoConfig) == 0) {
+        if (video.fpsStartMs == 0.0) {
+            video.fpsStartMs = tickMs_;
+        }
+        ++video.fpsCount;
+        const double span = tickMs_ - video.fpsStartMs;
+        if (span >= 1000.0) {
+            video.fps = static_cast<double>(video.fpsCount) * 1000.0 / span;
+            video.fpsCount = 0;
+            video.fpsStartMs = tickMs_;
+        }
+    }
+}
+
+std::deque<VideoEvent> ClientArena::takeVideoEvents() {
+    std::deque<VideoEvent> out;
+    out.swap(videoEvents_);
+    videoBytes_ = 0;
+    return out;
+}
+
+void ClientArena::applyVideoStatus(const ctrl2::VideoStatus& status) {
+    video.mode = status.mode;
+    video.tMs = status.tMs < 0 ? 0 : static_cast<std::uint64_t>(status.tMs);
+    video.clock = status.clock;
+    video.qid = status.qid;
+    video.haveStatus = true;
+    // A plain status ends a gap; one with a gap shows it.
+    video.gap = status.gap;
+}
+
 void ClientArena::resetSignalMap() {
     signalMap_.reset();
     alarms_.resetResolve();

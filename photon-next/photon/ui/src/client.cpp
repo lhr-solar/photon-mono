@@ -4,6 +4,7 @@
 #include "photon_ui/analysis_runtime.hpp"
 #include "photon_ui/page_url.hpp"
 #include "photon_ui/platform.hpp"
+#include "photon_ui/video_v2.hpp"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
@@ -187,6 +188,7 @@ void pumpNativeWs(Client& self, ws::Connection& conn, bool& handshakeOk) {
 
 void Client::tick(double nowMs) {
     nowMs_ = nowMs;
+    arena_.noteTick(nowMs);
 #ifndef __EMSCRIPTEN__
     if (ws_) {
         pumpNativeWs(*this, *ws_, wsHandshakeOk_);
@@ -207,6 +209,7 @@ void Client::tick(double nowMs) {
         arena_.setLiveCursor(static_cast<std::uint64_t>(std::max<std::int64_t>(serverNs, 0) / 1000000));
         arena_.syncRun(this);
         flushSubscribe();
+        pumpVideo(nowMs);
         // A request nobody answered in time is given up, so its slot is not held for good.
         std::vector<std::uint32_t> stalled;
         for (const auto& [qid, sentMs] : tileSentMs_) {
@@ -373,6 +376,7 @@ void Client::handleOpen() {
     catalogSeen_ = false;
     sentSubscribed_.clear();
     subscribeDirty_ = true;
+    resetVideo();
     arena_.pushLog("socket open, sending hello");
     send(ctrl2::Hello{"photon-ui", token_});
 }
@@ -392,6 +396,7 @@ void Client::handleClose(const char* why, bool error, std::uint16_t closeCode, s
         return;
     }
     dropTiles();
+    resetVideo();
     const bool refused = closeCode == kCloseRefused && reason == "bad token" && state_ != State::HelloOk;
 #ifdef __EMSCRIPTEN__
     const int sock = socket_;
@@ -472,11 +477,82 @@ void Client::handleText(std::string_view text) {
         send(ctrl2::Pong{ping->tMs});
     } else if (const auto* err = std::get_if<ctrl2::Error>(&msg)) {
         arena_.pushLog(err->code + ": " + err->message, true);
+        if (err->code == "video" || err->code.starts_with("bad_video")) {
+            noteVideoError(videoSession_, nowMs_);
+        }
     } else if (const auto* tileErr = std::get_if<ctrl2::TileError>(&msg)) {
         handleTileError(tileErr->qid, tileErr->message);
+    } else if (const auto* status = std::get_if<ctrl2::VideoStatus>(&msg)) {
+        applyVideoStatus(*status);
     }
-    // Pong and video_status need nothing here: video is off, and pongs
-    // only confirm the socket is alive.
+    // Pongs only confirm the socket is alive.
+}
+
+void Client::applyVideoStatus(const ctrl2::VideoStatus& status) {
+    if (noteVideoStatus(videoSession_, status)) {
+        // The new stream starts with this status: nothing of the old one follows it.
+        videoAssembler_.reset();
+    }
+    arena_.applyVideoStatus(status);
+}
+
+void Client::resetVideo() {
+    videoSession_ = VideoSession{};
+    videoAssembler_.reset();
+    arena_.video.requested = VideoStream::Off;
+    arena_.video.gap.reset();
+    arena_.pushVideoRestart();
+}
+
+void Client::pumpVideo(double nowMs) {
+    VideoInputs in;
+    in.connected = state_ == State::HelloOk;
+    in.serverHasVideo = arena_.video.available;
+    in.lastWantedMs = arena_.video.wantedMs;
+    in.pinned = arena_.catalogPinned();
+    in.playing = arena_.timeline().mode == static_cast<std::uint8_t>(proto::TimelineMode::Play) &&
+                 !arena_.hasPreviewCursor();
+    in.cursorMs = arena_.videoCursorMs();
+    const VideoCommand cmd = decideVideo(in, videoSession_, nowMs);
+    arena_.video.requested = videoSession_.stream;
+    switch (cmd.op) {
+        case VideoOp::None:
+            return;
+        case VideoOp::SubscribeLive:
+            send(ctrl2::VideoSubscribe{"live", 0});
+            break;
+        case VideoOp::SubscribeReplay:
+            send(ctrl2::VideoSubscribe{"replay", static_cast<std::int64_t>(cmd.fromMs)});
+            break;
+        case VideoOp::Seek:
+            send(ctrl2::VideoSeek{cmd.qid, static_cast<std::int64_t>(cmd.fromMs)});
+            break;
+        case VideoOp::Off:
+            send(ctrl2::VideoSubscribe{"off", 0});
+            break;
+    }
+    if (cmd.op != VideoOp::Off) {
+        // Telemetry and video are separate: frames of the old stream are dropped by
+        // the decoder, and the new stream's frames start from its keyframe.
+        videoAssembler_.reset();
+        arena_.pushVideoRestart();
+    }
+}
+
+void Client::handleVideoChunk(std::span<const std::uint8_t> bytes) {
+    // Pieces are dropped while the request is awaited: they belong to the stream before it.
+    if (videoSession_.awaiting || videoSession_.stream == VideoStream::Off) {
+        return;
+    }
+    const auto chunk = proto2::decodeVideoChunk(bytes);
+    if (!chunk) {
+        arena_.pushLog("bad VideoChunk", true);
+        return;
+    }
+    if (auto frame = videoAssembler_.push(*chunk)) {
+        arena_.pushVideoFrame(*frame);
+    }
+    arena_.video.dropped = videoAssembler_.dropped();
 }
 
 void Client::applyHelloAck(const ctrl2::HelloAck& ack) {
@@ -485,6 +561,7 @@ void Client::applyHelloAck(const ctrl2::HelloAck& ack) {
     backoffIndex_ = 0;
     lastPingMs_ = 0.0;
     arena_.features = ack.features;
+    arena_.video.available = std::find(ack.features.begin(), ack.features.end(), "video") != ack.features.end();
     arena_.server.helloOk = true;
     arena_.server.server = ack.server;
     arena_.server.user = ack.user;
@@ -614,8 +691,10 @@ void Client::handleBinary(std::span<const std::uint8_t> bytes) {
             routeTilePiece(*piece);
             break;
         }
+        case static_cast<std::uint8_t>(proto2::MsgType::VideoChunk):
+            handleVideoChunk(bytes);
+            break;
         default:
-            // VideoChunk pieces come back in step 3 (video is off until then).
             break;
     }
 }

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace photon::ui {
 namespace {
@@ -798,7 +799,37 @@ void VideoDecoder::releaseLivePaced(double nowMs) {
     releaseThrough(static_cast<std::uint64_t>(liveReleaseMs_));
 }
 
-void VideoDecoder::syncToCursor(const ClientArena& arena) {
+void VideoDecoder::restartStream() {
+    ring_.clear();
+    releasedSeq_ = 0;
+    releasedMs_ = 0;
+    lastCursorVideoMs_ = 0;
+    lastRawMs_ = 0;
+    nextPicMs_ = 0;
+    haveVcl_ = false;
+    batchFloorMs_ = 0;
+    pastVideoEnd_ = false;
+    videoEndMs_ = 0;
+    liveIgnoreOlderThanMs_ = 0;
+    lastLiveKeyMs_ = 0;
+    skipLiveGop_ = false;
+    resetLiveGopFeed();
+    forcedStillTries_ = 0;
+    liveReleaseMs_ = 0;
+    liveWallMs_ = 0.0;
+}
+
+void VideoDecoder::drainVideoEvents(ClientArena& arena) {
+    for (const VideoEvent& ev : arena.takeVideoEvents()) {
+        if (ev.kind == VideoEvent::Kind::Restart) {
+            restartStream();
+        } else {
+            feed(ev.tMs, ev.flags, ev.payload);
+        }
+    }
+}
+
+void VideoDecoder::syncToCursor(ClientArena& arena) {
     if (!supported()) {
         return;
     }
@@ -807,76 +838,18 @@ void VideoDecoder::syncToCursor(const ClientArena& arena) {
         inited_ = true;
     }
 
-    const std::uint64_t cursorMs = arena.videoCursorMs();
-    const std::int64_t clockOff =
-        arena.video.clockOffsetUser ? arena.video.clockOffsetMs : playback_.clockOffsetMs();
-    if (arena.video.clockOffsetUser && playback_.clockOffsetMs() != clockOff) {
-        playback_.setClockOffsetMs(clockOff);
-    }
-    const std::uint64_t videoMs = vidx::videoMsForCursor(cursorMs, clockOff);
-    const bool inCoverageGap =
-        arena.catalogPinned() && !playback_.coverage().empty() && !playback_.covered(cursorMs);
-    const bool pastRecordedEnd =
-        pastVideoEnd_ && arena.catalogPinned() && videoEndMs_ != 0 && videoMs > videoEndMs_;
-    if (pastRecordedEnd) {
-        havePendingLocate_ = false;
-        std::snprintf(error_, sizeof(error_), "%s", kNoRunVideo);
-        return;
-    }
-    if (inCoverageGap) {
-        // Clipped coverage can miss the playhead even when video exists at
-        // this time in the run. Only treat it as a hole when some coverage
-        // actually sits next to the cursor.
-        bool coverageNear = false;
-        for (const auto& c : playback_.coverage()) {
-            if (c.endMs + vidx::kReplayHoldMs >= videoMs && c.startMs <= videoMs + vidx::kReplayHoldMs) {
-                coverageNear = true;
-                break;
-            }
-        }
-        if (!coverageNear) {
-            if (!havePendingLocate_) {
-                pendingLocateMs_ = videoMs == 0 ? 1 : videoMs;
-                havePendingLocate_ = true;
-            }
-        } else {
-            havePendingLocate_ = false;
-            if (ring_.nals().empty()) {
-                const std::uint64_t minV = vidx::videoMsForCursor(arena.timeline().minTimeMs, clockOff);
-                const std::uint64_t maxV = arena.timeline().maxTimeMs == 0
-                                               ? 0
-                                               : vidx::videoMsForCursor(arena.timeline().maxTimeMs, clockOff);
-                const std::uint64_t snapV = vidx::firstCoveredVideoMs(playback_.coverage(), minV, maxV);
-                if (snapV != 0) {
-                    pendingLocateMs_ = snapV;
-                    havePendingLocate_ = true;
-                }
-            }
-            return;
-        }
-    }
-    if (pastVideoEnd_ && arena.catalogPinned() && !playback_.coverage().empty() &&
-        playback_.covered(cursorMs)) {
-        pastVideoEnd_ = false;
-        error_[0] = '\0';
-    }
+    // Live follows the wall clock. Replay (a catalog pin, a drag, or the preview cursor)
+    // follows the cursor: the server streams the replay already paced to real time, so
+    // the cursor only decides how far the frames it has sent are released.
+    const bool followClient = arena.catalogPinned() || arena.hasPreviewCursor() || arena.videoFollowMs() != 0;
     vidx::PlaybackMode next = vidx::PlaybackMode::Idle;
-    const bool liveCache = arena.video.subscribed && arena.video.mode == "live";
-    const bool followClient = arena.catalogPinned() || arena.hasPreviewCursor() ||
-                              arena.videoFollowMs() != 0;
-    // A catalog pin / rail pointer is a historical time. Live subscribe would
-    // keep showing today's camera (or sit in Live and never video_locate).
     if (followClient) {
         if (arena.hasPreviewCursor()) {
             next = vidx::PlaybackMode::Scrubbing;
-        } else {
-            next = cursorMs != 0 ? vidx::PlaybackMode::Committed : vidx::PlaybackMode::Idle;
+        } else if (arena.videoCursorMs() != 0) {
+            next = vidx::PlaybackMode::Committed;
         }
-    } else if (liveCache) {
-        next = vidx::PlaybackMode::Live;
-    } else if (cursorMs != 0) {
-        next = vidx::PlaybackMode::Committed;
-    } else {
+    } else if (arena.video.requested == VideoStream::Live) {
         next = vidx::PlaybackMode::Live;
     }
     const bool modeChanged = next != mode_;
@@ -887,7 +860,7 @@ void VideoDecoder::syncToCursor(const ClientArena& arena) {
             return;
         }
         const std::uint64_t want =
-            mode_ == vidx::PlaybackMode::Live ? ring_.newestMs() : videoMs;
+            mode_ == vidx::PlaybackMode::Live ? ring_.newestMs() : arena.videoCursorMs();
         // Cursor time can sit before the cached GOP (clock offset, locate 0).
         // The ring still has a picture; decode that instead of staying blank.
         std::ptrdiff_t kf = ring_.keyframeAtOrBefore(want);
@@ -928,8 +901,11 @@ void VideoDecoder::syncToCursor(const ClientArena& arena) {
     };
 
     if (mode_ == vidx::PlaybackMode::Idle) {
+        // Nothing is asking for video, so what arrives now is not shown.
+        (void)arena.takeVideoEvents();
         return;
     }
+    drainVideoEvents(arena);
     if (mode_ == vidx::PlaybackMode::Live) {
         if (modeChanged) {
             // Jump to the newest GOP. Replaying the whole ring makes Live lag
@@ -938,51 +914,19 @@ void VideoDecoder::syncToCursor(const ClientArena& arena) {
         }
         releaseLivePaced(ImGui::GetTime() * 1000.0);
         forceCachedStill();
-        // The client requests a newest-GOP seed only when live frames stall.
-        // Queuing it on every paint makes pointer RPCs interrupt UDP playback.
         return;
     }
 
-    const vidx::CursorPlan plan = playback_.update(cursorMs, mode_);
-    if (plan.requestLocate) {
-        pendingLocateMs_ = plan.locateAtMs;
-        havePendingLocate_ = true;
-    } else if (!havePendingLocate_ && !ring_.nals().empty() &&
-               (mode_ == vidx::PlaybackMode::Committed || mode_ == vidx::PlaybackMode::Scrubbing)) {
-        const std::uint64_t videoMs = vidx::videoMsForCursor(cursorMs, playback_.clockOffsetMs());
-        // Pointer rows are not bytes. A fat prefetch table used to suppress
-        // locate while the ring still held one GOP, so Play froze on a still.
-        const bool outsideRing = videoMs + 50 < ring_.oldestMs() || videoMs > ring_.newestMs() + 200;
-        const bool ringRunningOut =
-            mode_ == vidx::PlaybackMode::Committed && videoMs + vidx::kLocateLeadMs >= ring_.newestMs();
-        const bool beforeEnd = videoEndMs_ == 0 || ring_.newestMs() + 100 < videoEndMs_;
-        if (beforeEnd && (outsideRing || ringRunningOut)) {
-            pendingLocateMs_ = outsideRing ? (videoMs == 0 ? 1 : videoMs) : ring_.newestMs() + 1;
-            havePendingLocate_ = true;
-        }
-    }
-    if (!plan.haveTarget) {
-        // No pointer covers the cursor. Fall back to the ring alone, which is
-        // what makes a small scrub work before any pointer has been fetched.
-        const std::uint64_t videoMs = vidx::videoMsForCursor(cursorMs, playback_.clockOffsetMs());
-        if (ring_.keyframeAtOrBefore(videoMs) >= 0 &&
-            (releasedSeq_ == 0 || videoMs < lastCursorVideoMs_)) {
-            reenterAt(videoMs, videoMs);
-        } else {
-            releaseThrough(videoMs);
-        }
-        lastCursorVideoMs_ = videoMs;
-        forceCachedStill();
-        return;
-    }
-    // Crossing a GOP boundary during forward playback is not a seek.
-    // Reset/re-feed only on initial entry or an actual backwards seek.
-    if (releasedSeq_ == 0 || plan.feedUpToMs < lastCursorVideoMs_) {
-        reenterAt(plan.target.startMs, plan.feedUpToMs);
+    // Replay: release what the cursor has reached. A cursor the ring cannot reach by
+    // releasing (a jump backwards, or the first frame of a stream) re-enters at the
+    // keyframe before it.
+    const std::uint64_t videoMs = arena.videoCursorMs();
+    if (ring_.keyframeAtOrBefore(videoMs) >= 0 && (releasedSeq_ == 0 || videoMs < lastCursorVideoMs_)) {
+        reenterAt(videoMs, videoMs);
     } else {
-        releaseThrough(plan.feedUpToMs);
+        releaseThrough(videoMs);
     }
-    lastCursorVideoMs_ = plan.feedUpToMs;
+    lastCursorVideoMs_ = videoMs;
     forceCachedStill();
 }
 
@@ -1242,6 +1186,21 @@ void blitDecodedVideo(ImVec2 avail) {
                                              ImVec2(1.0f, 1.0f), ImVec2(1.0f, 0.0f));
 }
 
+// The gap the server reported, over the picture: there is no video at this time.
+static void drawVideoGapOverlay(const ClientArena& arena, ImVec2 a, ImVec2 b) {
+    if (!arena.video.gap) {
+        return;
+    }
+    const std::string text = videoGapText(*arena.video.gap);
+    const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
+    const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(c.x - ts.x * 0.5f - 12.0f, c.y - ts.y * 0.5f - 8.0f),
+                      ImVec2(c.x + ts.x * 0.5f + 12.0f, c.y + ts.y * 0.5f + 8.0f),
+                      theme::u32(theme::withAlpha(theme::background(), 0.88f)), 6.0f);
+    dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), theme::u32(theme::mutedFg()), text.c_str());
+}
+
 static void drawVideoAndHud(ClientArena& arena, ImVec2 avail) {
     const float gap = 12.0f;
     const float hudW = std::clamp(std::min(avail.y * 0.48f, 252.0f), 200.0f, 268.0f);
@@ -1249,6 +1208,7 @@ static void drawVideoAndHud(ClientArena& arena, ImVec2 avail) {
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float videoW = side ? avail.x - hudW - gap : avail.x;
     drawVideoImage(ImVec2(videoW, avail.y));
+    drawVideoGapOverlay(arena, origin, ImVec2(origin.x + videoW, origin.y + avail.y));
     if (side) {
         const ImVec2 a(origin.x + videoW + gap, origin.y);
         const ImVec2 b(origin.x + avail.x, origin.y + avail.y);
@@ -1258,37 +1218,25 @@ static void drawVideoAndHud(ClientArena& arena, ImVec2 avail) {
     ImGui::Dummy(avail);
 }
 
-// One line describing where video is relative to the cursor. Without it the
-// three interesting failures — cursor outside the buffered window, unverified
-// A/V clock, no pointer available — all look identical to "no video".
-static void drawCursorPlaybackStatus(ClientArena& arena) {
+// One line: the mode the picture is in, its rate and how much is buffered.
+static void drawVideoStatusLine(ClientArena& arena) {
     const VideoDecoder& dec = videoDecoder();
     const char* modeName = "idle";
     switch (dec.mode()) {
         case vidx::PlaybackMode::Live:
-            modeName = "cache";
+            modeName = "live";
             break;
         case vidx::PlaybackMode::Scrubbing:
             modeName = "scrub";
             break;
         case vidx::PlaybackMode::Committed:
-            modeName = "cursor";
+            modeName = "replay";
             break;
         case vidx::PlaybackMode::Idle:
             break;
     }
-    const vidx::CursorPlayback& pb = dec.playback();
     char line[160];
-    std::snprintf(line, sizeof(line), "%s  %zu kB", modeName, dec.bufferedBytes() / 1024);
-    if (dec.mode() != vidx::PlaybackMode::Live && dec.mode() != vidx::PlaybackMode::Idle) {
-        std::uint64_t locateAt = 0;
-        const std::uint64_t cursorMs = arena.displayCursorMs();
-        if (dec.pendingLocate(locateAt)) {
-            std::snprintf(line, sizeof(line), "%s  locating…", modeName);
-        } else if (!pb.covers(cursorMs) && !pb.coverage().empty() && !pb.covered(cursorMs)) {
-            std::snprintf(line, sizeof(line), "%s  no video at cursor", modeName);
-        }
-    }
+    std::snprintf(line, sizeof(line), "%s  %0.1f fps  %zu kB", modeName, arena.video.fps, dec.bufferedBytes() / 1024);
     const float w = ImGui::GetContentRegionAvail().x;
     ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + std::max(32.0f, w));
     ImGui::TextColored(theme::mutedFg(), "%s", line);
@@ -1296,6 +1244,11 @@ static void drawCursorPlaybackStatus(ClientArena& arena) {
 }
 
 void drawVideoImage(ClientArena& arena, ImVec2 avail) {
+    arena.markVideoWanted();
+    if (!arena.videoOn()) {
+        ImGui::TextColored(theme::mutedFg(), "Video is not on this server");
+        return;
+    }
     if (!videoDecoder().supported()) {
         ImGui::TextColored(theme::warning(), "Video decoder unavailable");
         return;
@@ -1303,16 +1256,22 @@ void drawVideoImage(ClientArena& arena, ImVec2 avail) {
     // Video follows the cursor, so the plan is recomputed once per UI frame
     // before anything is drawn.
     videoDecoder().syncToCursor(arena);
-    drawCursorPlaybackStatus(arena);
+    drawVideoStatusLine(arena);
     const ImVec2 left = ImGui::GetContentRegionAvail();
     const ImVec2 blit(std::min(avail.x, left.x), std::min(avail.y, left.y));
     drawVideoAndHud(arena, blit);
 }
 
 void drawVideoTile(ClientArena& arena, ImVec2 size) {
+    arena.markVideoWanted();
     theme::beginCard("videotile", size, theme::card());
     ImGui::TextColored(theme::primary(), "Live View");
     ImGui::SameLine();
+    if (!arena.videoOn()) {
+        ImGui::TextColored(theme::mutedFg(), "not on this server");
+        theme::endCard();
+        return;
+    }
     if (!videoDecoder().supported()) {
         ImGui::TextColored(theme::mutedFg(), "unsupported");
         ImGui::TextColored(theme::warning(), "Video decoder unavailable");
@@ -1320,27 +1279,14 @@ void drawVideoTile(ClientArena& arena, ImVec2 size) {
         return;
     }
     videoDecoder().syncToCursor(arena);
-    const auto& v = arena.video;
-    std::uint64_t locateAt = 0;
     if (videoDecoder().hasFrame()) {
-        ImGui::TextColored(theme::success(), "cache  %s  %0.0f fps  %zu kB", v.mode.c_str(), v.fps,
-                           videoDecoder().bufferedBytes() / 1024);
-    } else if (!v.lastError.empty()) {
-        ImGui::TextColored(theme::warning(), "video store  %s", v.lastError.c_str());
-    } else if (videoDecoder().pendingLocate(locateAt)) {
-        ImGui::TextColored(theme::warning(), "buffering…");
-    } else if (v.haveStatus) {
-        ImGui::TextColored(v.connected ? theme::success() : theme::warning(), "%s  %s  %0.0f fps  drop %llu",
-                           v.connected ? "up" : "down", v.mode.c_str(), v.fps,
-                           static_cast<unsigned long long>(v.dropped));
-    } else if (v.subscribed && !v.lastError.empty()) {
-        ImGui::TextColored(theme::warning(), "store down  %s", v.lastError.c_str());
-    } else if (v.subscribed) {
-        ImGui::TextColored(theme::mutedFg(), "pointer cache: waiting for GOP");
-    } else {
+        ImGui::TextColored(theme::success(), "%s  %0.0f fps", arena.video.mode.c_str(), arena.video.fps);
+    } else if (arena.video.requested == VideoStream::Off) {
         ImGui::TextColored(theme::mutedFg(), "idle");
+    } else {
+        ImGui::TextColored(theme::warning(), "buffering…");
     }
-    drawCursorPlaybackStatus(arena);
+    drawVideoStatusLine(arena);
     drawVideoAndHud(arena, ImGui::GetContentRegionAvail());
     theme::endCard();
 }
