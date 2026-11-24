@@ -284,11 +284,7 @@ void Client::connect() {
         return;
     }
     state_ = State::Connecting;
-    if (pageIsSharedConsole()) {
-        arena_.pushLog("connecting to this website");
-    } else {
-        arena_.pushLog(std::string("connecting ") + url_);
-    }
+    arena_.pushLog(std::string("connecting ") + url_);
 #endif
 }
 
