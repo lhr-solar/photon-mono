@@ -45,12 +45,18 @@ void runPlotAxisTests() {
         allNan.t = {nan};
         allNan.y = {nan};
         CHECK(!samplePlotArraysAt(allNan, 1500.0, y));
-        CHECK(!photon::ui::plotArraysAllFinite(hist, 4));
+        // A NaN point is a break in the line, so the series still draws.
+        CHECK(photon::ui::plotArraysDrawable(hist, 4));
+        CHECK(!photon::ui::plotArraysDrawable(allNan, 1));
         PlotArrays clean;
         clean.t = {1000.0, 2000.0};
         clean.y = {1.0, 2.0};
-        CHECK(photon::ui::plotArraysAllFinite(clean, 2));
-        CHECK(!photon::ui::plotArraysAllFinite(clean, 3));
+        CHECK(photon::ui::plotArraysDrawable(clean, 2));
+        CHECK(!photon::ui::plotArraysDrawable(clean, 3));
+        PlotArrays infinite;
+        infinite.t = {1000.0, 2000.0};
+        infinite.y = {1.0, HUGE_VAL};
+        CHECK(!photon::ui::plotArraysDrawable(infinite, 2));
     }
 
     {
