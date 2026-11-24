@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"slices"
 	"strconv"
@@ -16,6 +17,18 @@ const (
 	nsPerMs = 1_000_000
 	// sessionRowEvery is how often the session row's end is rewritten.
 	sessionRowEvery = time.Second
+	// rollupNS is the width of a rollup_1s bucket, in ns.
+	rollupNS = 1_000_000_000
+	// rollupLagNS is how far behind the newest frame a second's bucket waits before
+	// it is written. A frame for a second already written is late: it is in the
+	// frame rows only.
+	rollupLagNS = 2 * rollupNS
+	// rollupIdle is how long wall time may pass without a frame before the open
+	// buckets are written, so the last seconds of a run that stopped sending reach
+	// rollup_1s too.
+	rollupIdle = 2 * time.Second
+	// rollupIdleCheck is how often appendLoop checks for idle rollup buckets.
+	rollupIdleCheck = 500 * time.Millisecond
 )
 
 // Line protocol escaping: tag keys and values escape , = and space; string
@@ -59,10 +72,12 @@ func (l *frameLayout) bump(page int16, tNS int64) int64 {
 }
 
 // frameField is one signal, written as a field: integers as raw integers
-// ("...i"), IEEE floats as floats.
+// ("...i"), IEEE floats as floats. The rollup keys are the field names of the
+// rollup_1s row: min, max, sum and count of the second.
 type frameField struct {
-	sig *dbc.Signal
-	key string // "<signal name>="
+	sig                          *dbc.Signal
+	key                          string // "<signal name>="
+	minKey, maxKey, sumKey, nKey string
 }
 
 // buildLayouts makes the frame layout of every message in c, keyed by wire ID.
@@ -87,20 +102,31 @@ func newFrameLayout(m *dbc.Message) *frameLayout {
 		if i == m.Selector {
 			continue
 		}
-		l.fields = append(l.fields, frameField{sig: sig, key: tagEscaper.Replace(sig.Name) + "="})
+		name := tagEscaper.Replace(sig.Name)
+		l.fields = append(l.fields, frameField{sig: sig, key: name + "=",
+			minKey: name + "_min=", maxKey: name + "_max=", sumKey: name + "_sum=", nKey: name + "_n="})
 	}
 	slices.SortFunc(l.fields, func(a, b frameField) int { return strings.Compare(a.sig.Name, b.sig.Name) })
 	return l
 }
 
 // frameSession turns decoded frames into rows for the sink: one frame row per
-// frame, plus the signal_def and session rows. Every decoder the server runs
-// shares it, and only the appendLoop goroutine touches it.
+// frame, a rollup_1s row per message, page and second, plus the signal_def and
+// session rows. Every decoder the server runs shares it, and only the appendLoop
+// goroutine touches it.
 type frameSession struct {
 	sid    string // session ID: the server start time, UTC
 	prefix string // "frame,session=<escaped sid>", built once
 	sink   lineSink
 	now    func() time.Time
+
+	// rollups holds the buckets not yet written, per message and page. The
+	// rollup_1s prefix is the session part of their rows.
+	rollups      map[rollupKey]*rollupSeries
+	rollupPrefix string
+	framed       bool      // frames were added since the last flush
+	lastFrame    time.Time // when frames were last flushed, by now
+	rollupLate   int64     // frames too late for their second's rollup bucket
 
 	// The session's span on the frame clock, in ms, and the end that the last
 	// session row carried.
@@ -130,11 +156,13 @@ func newFrameSession(startedAt time.Time, sink lineSink) *frameSession {
 // Backfill replays a past session under its own ID.
 func newFrameSessionID(sid string, sink lineSink) *frameSession {
 	return &frameSession{
-		sid:    sid,
-		prefix: "frame,session=" + tagEscaper.Replace(sid),
-		sink:   sink,
-		now:    time.Now,
-		buf:    make([]byte, 0, 64<<10),
+		sid:          sid,
+		prefix:       "frame,session=" + tagEscaper.Replace(sid),
+		sink:         sink,
+		now:          time.Now,
+		rollups:      make(map[rollupKey]*rollupSeries),
+		rollupPrefix: "rollup_1s,session=" + tagEscaper.Replace(sid),
+		buf:          make([]byte, 0, 64<<10),
 	}
 }
 
@@ -152,19 +180,28 @@ func (s *frameSession) appendFrame(l *frameLayout, data []byte, tNS int64) {
 	if ms > s.endMs {
 		s.endMs = ms
 	}
+	s.framed = true
 
 	// page stays -1 when there is no selector or it does not read, so only the
 	// signals on every page are written, as the decoder writes them.
 	page := int16(-1)
+	var tap uint64
+	hasTap := false
+	if l.sel != nil {
+		if raw, ok := l.sel.Raw(data); ok {
+			page, tap, hasTap = int16(raw), raw, true
+		}
+	}
+	// The rollup bucket is found first: closing buckets writes rows into buf, and
+	// the frame's own row goes after them.
+	acc := s.rollupBucketFor(l, page, tNS)
+
 	start := len(s.buf)
 	b := append(s.buf, s.prefix...)
 	b = append(b, l.msgTag...)
-	if l.sel != nil {
-		if raw, ok := l.sel.Raw(data); ok {
-			page = int16(raw)
-			b = append(b, ",tap="...)
-			b = strconv.AppendUint(b, raw, 10)
-		}
+	if hasTap {
+		b = append(b, ",tap="...)
+		b = strconv.AppendUint(b, tap, 10)
 	}
 	sep := byte(' ')
 	for i := range l.fields {
@@ -182,6 +219,9 @@ func (s *frameSession) appendFrame(l *frameLayout, data []byte, tNS int64) {
 			b = append(b, f.key...)
 			b = strconv.AppendInt(b, v, 10)
 			b = append(b, 'i')
+			if acc != nil {
+				acc[i].addInt(v)
+			}
 			continue
 		}
 		raw, ok := f.sig.Raw(data)
@@ -199,6 +239,9 @@ func (s *frameSession) appendFrame(l *frameLayout, data []byte, tNS int64) {
 		sep = ','
 		b = append(b, f.key...)
 		b = strconv.AppendFloat(b, v, 'g', -1, bits)
+		if acc != nil {
+			acc[i].addFloat(v)
+		}
 	}
 	if sep == ' ' {
 		s.buf = b[:start]
@@ -208,6 +251,211 @@ func (s *frameSession) appendFrame(l *frameLayout, data []byte, tNS int64) {
 	b = strconv.AppendInt(b, l.bump(page, tNS), 10)
 	b = append(b, '\n')
 	s.buf = b
+	s.n++
+}
+
+// rollupKey names the rollup series of one message on one page of a layout.
+type rollupKey struct {
+	l    *frameLayout
+	page int16
+}
+
+// rollupSeries is the rollup of one message on one page: its buckets that are not
+// written yet, and the point up to which it is written.
+type rollupSeries struct {
+	l      *frameLayout
+	prefix string // "rollup_1s,session=<sid>,msg=<msg>[,tap=<page>]", built once
+	newest int64  // newest frame time of this series, ns
+	done   int64  // buckets at or before this time, ns, are written; a frame at or before it is late
+	open   []rollupBucket
+	spare  [][]rollupAcc // accumulators of written buckets, for reuse
+}
+
+// rollupBucket is one second of a series: sec is its start, ns.
+type rollupBucket struct {
+	sec int64
+	acc []rollupAcc // one per field of the layout
+}
+
+// rollupAcc is what one signal had in a second: its count, sum, and the lowest and
+// highest value. Integer signals keep their min and max as integers (ilo, ihi);
+// float signals keep them as floats (lo, hi).
+type rollupAcc struct {
+	n        int64
+	sum      float64
+	lo, hi   float64
+	ilo, ihi int64
+}
+
+// addInt adds one integer value.
+func (a *rollupAcc) addInt(v int64) {
+	if a.n == 0 || v < a.ilo {
+		a.ilo = v
+	}
+	if a.n == 0 || v > a.ihi {
+		a.ihi = v
+	}
+	a.n++
+	a.sum += float64(v)
+}
+
+// addFloat adds one float value.
+func (a *rollupAcc) addFloat(v float64) {
+	if a.n == 0 || v < a.lo {
+		a.lo = v
+	}
+	if a.n == 0 || v > a.hi {
+		a.hi = v
+	}
+	a.n++
+	a.sum += v
+}
+
+// rollupSecond is the start, ns, of the second that holds tNS.
+func rollupSecond(tNS int64) int64 {
+	return tNS - ((tNS%rollupNS)+rollupNS)%rollupNS
+}
+
+// rollupBucketFor returns the accumulators of the bucket that a frame at tNS on
+// page of layout l goes into. It writes the buckets that the frame closes first.
+// It returns nil for a frame too late for its bucket, which counts as rollupLate.
+// The frame row is written either way.
+func (s *frameSession) rollupBucketFor(l *frameLayout, page int16, tNS int64) []rollupAcc {
+	key := rollupKey{l: l, page: page}
+	ser := s.rollups[key]
+	if ser == nil {
+		ser = s.newRollupSeries(l, page)
+	}
+	sec := rollupSecond(tNS)
+	if sec <= ser.done {
+		s.rollupLate++
+		return nil
+	}
+	if tNS > ser.newest {
+		ser.newest = tNS
+		s.closeRollups(ser, tNS-rollupLagNS)
+	}
+	for i := range ser.open {
+		if ser.open[i].sec == sec {
+			return ser.open[i].acc
+		}
+	}
+	acc := ser.spareAcc(len(l.fields))
+	ser.open = append(ser.open, rollupBucket{sec: sec, acc: acc})
+	return acc
+}
+
+// newRollupSeries starts the series of page of l.
+func (s *frameSession) newRollupSeries(l *frameLayout, page int16) *rollupSeries {
+	prefix := s.rollupPrefix + l.msgTag
+	if page >= 0 {
+		prefix += ",tap=" + strconv.Itoa(int(page))
+	}
+	ser := &rollupSeries{l: l, prefix: prefix}
+	s.rollups[rollupKey{l: l, page: page}] = ser
+	return ser
+}
+
+// spareAcc returns n empty accumulators, reusing those of a bucket already written.
+func (ser *rollupSeries) spareAcc(n int) []rollupAcc {
+	if k := len(ser.spare); k > 0 {
+		acc := ser.spare[k-1]
+		ser.spare = ser.spare[:k-1]
+		clear(acc)
+		return acc
+	}
+	return make([]rollupAcc, n)
+}
+
+// closeRollups writes the open buckets of ser at or before cut, and sets cut as the
+// point up to which ser is written.
+func (s *frameSession) closeRollups(ser *rollupSeries, cut int64) {
+	if cut > ser.done {
+		ser.done = cut
+	}
+	keep := ser.open[:0]
+	for _, b := range ser.open {
+		if b.sec > cut {
+			keep = append(keep, b)
+			continue
+		}
+		s.appendRollupRow(ser, b)
+		ser.spare = append(ser.spare, b.acc)
+	}
+	ser.open = keep
+}
+
+// closeIdleRollups writes every open bucket once no frame has come for rollupIdle
+// of wall time. This is how the last seconds of a run reach rollup_1s when the car
+// stops sending: a message's buckets are otherwise closed only by its own later
+// frames, or by finish. The car's clock is not compared with the wall clock. It runs
+// on appendLoop's timer, so it shares the session with the frames.
+func (s *frameSession) closeIdleRollups() {
+	if s == nil || s.lastFrame.IsZero() || s.now().Sub(s.lastFrame) < rollupIdle {
+		return
+	}
+	open := false
+	for _, ser := range s.rollups {
+		if len(ser.open) > 0 {
+			open = true
+			s.closeRollups(ser, ser.newest)
+		}
+	}
+	if open {
+		s.flush()
+	}
+}
+
+// appendRollupRow queues the rollup_1s row of bucket b of ser. Each signal with a
+// value in the second gets its min, max, sum and count: integer min and max stay
+// integers, and the sum is a float. A signal with no value is left out, and a
+// bucket with no signal writes no row.
+func (s *frameSession) appendRollupRow(ser *rollupSeries, b rollupBucket) {
+	start := len(s.buf)
+	buf := append(s.buf, ser.prefix...)
+	sep := byte(' ')
+	for i := range ser.l.fields {
+		a := &b.acc[i]
+		if a.n == 0 {
+			continue
+		}
+		f := &ser.l.fields[i]
+		buf = append(buf, sep)
+		sep = ','
+		if f.sig.Kind == dbc.Integer {
+			buf = append(buf, f.minKey...)
+			buf = strconv.AppendInt(buf, a.ilo, 10)
+			buf = append(buf, 'i', ',')
+			buf = append(buf, f.maxKey...)
+			buf = strconv.AppendInt(buf, a.ihi, 10)
+			buf = append(buf, 'i', ',')
+		} else {
+			bits := 64
+			if f.sig.Kind == dbc.Float32 {
+				bits = 32
+			}
+			buf = append(buf, f.minKey...)
+			buf = strconv.AppendFloat(buf, a.lo, 'g', -1, bits)
+			buf = append(buf, ',')
+			buf = append(buf, f.maxKey...)
+			buf = strconv.AppendFloat(buf, a.hi, 'g', -1, bits)
+			buf = append(buf, ',')
+		}
+		buf = append(buf, f.sumKey...)
+		buf = strconv.AppendFloat(buf, a.sum, 'g', -1, 64)
+		buf = append(buf, ',')
+		buf = append(buf, f.nKey...)
+		buf = strconv.AppendInt(buf, a.n, 10)
+		buf = append(buf, 'i')
+	}
+	if sep == ' ' {
+		s.buf = buf[:start]
+		return
+	}
+	buf = append(buf, ' ')
+	buf = strconv.AppendInt(buf, b.sec, 10)
+	buf = append(buf, '\n')
+	s.buf = buf
 	s.n++
 }
 
@@ -251,10 +499,14 @@ func (s *frameSession) appendSession() {
 	s.sentEndMs = s.endMs
 }
 
-// flush queues the session row when its end has moved and it is due, then
-// hands every queued row to the sink in one Write. appendLoop calls it once per
-// ingest buffer.
+// flush queues the session row when its end has moved and it is due, then hands
+// every queued row to the sink in one Write. appendLoop calls it once per ingest
+// buffer.
 func (s *frameSession) flush() {
+	if s.framed {
+		s.framed = false
+		s.lastFrame = s.now()
+	}
 	if s.endMs != s.sentEndMs {
 		if now := s.now(); now.Sub(s.lastSession) >= sessionRowEvery {
 			s.lastSession = now
@@ -268,14 +520,20 @@ func (s *frameSession) flush() {
 	s.buf, s.n = s.buf[:0], 0
 }
 
-// finish queues the final session row if the end has moved, and sends every
-// queued row. It leaves the sink open, so backfill can run more sessions into
-// it.
+// finish writes every rollup bucket still open, queues the final session row if
+// the end has moved, and sends every queued row. It leaves the sink open, so
+// backfill can run more sessions into it.
 func (s *frameSession) finish() {
+	for _, ser := range s.rollups {
+		s.closeRollups(ser, ser.newest)
+	}
 	if s.endMs != s.sentEndMs {
 		s.appendSession()
 	}
 	s.flush()
+	if s.rollupLate > 0 {
+		log.Printf("[photon-server] rollup_1s: %d frames arrived after their second was written; they are in the frame rows only", s.rollupLate)
+	}
 }
 
 // Close finishes the session, then gives the sink up to wait to deliver its

@@ -273,7 +273,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		appendLoop(store, pool, decoder, canConfig.swap, ring)
+		appendLoop(store, pool, decoder, canConfig.swap, ring, session)
 		// appendLoop has returned, so nothing else writes to the session now.
 		session.Close(3 * time.Second)
 	}()
@@ -401,12 +401,19 @@ func main() {
 // appendLoop stores each submitted buffer, adds its frames to the live ring,
 // decodes its CAN frames when decoder is not nil, and returns the buffer to the
 // pool. A decoder sent on swap replaces the current one between buffers; nil
-// turns decoding off.
-func appendLoop(store *StreamStore, pool *batchPool, decoder *canDecoder, swap <-chan *canDecoder, ring *liveRing) {
+// turns decoding off. session, when not nil, is the frame session the decoders
+// write to; its idle rollup buckets are closed on a timer, here, so the session
+// is only ever touched from this goroutine.
+func appendLoop(store *StreamStore, pool *batchPool, decoder *canDecoder, swap <-chan *canDecoder, ring *liveRing, session *frameSession) {
+	idle := time.NewTicker(rollupIdleCheck)
+	defer idle.Stop()
 	for {
 		var batch []byte
 		select {
 		case decoder = <-swap:
+			continue
+		case <-idle.C:
+			session.closeIdleRollups()
 			continue
 		case b, ok := <-pool.ready:
 			if !ok {

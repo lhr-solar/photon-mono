@@ -115,7 +115,7 @@ func TestBackfillWritesSameRowsAsLive(t *testing.T) {
 	}
 
 	liveLines, replayedLines := live.lines(t), replayed.lines(t)
-	for _, prefix := range []string{"frame,", "signal_def,"} {
+	for _, prefix := range []string{"frame,", "signal_def,", "rollup_1s,"} {
 		want := rowsWithPrefix(liveLines, prefix)
 		got := rowsWithPrefix(replayedLines, prefix)
 		slices.Sort(want)
