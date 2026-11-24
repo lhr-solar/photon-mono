@@ -140,8 +140,9 @@ func TestRTPClockMapsSenderTimeNotReceiveTime(t *testing.T) {
 		t.Fatalf("stale fallback gave %d, want the receive time %d", ms, staleRecv)
 	}
 	// One millisecond inside the window is still trusted, so the boundary is a
-	// real boundary rather than an always-stale or never-stale check.
-	if _, p := clock.WallMs(srRtp+90000, srWall+40+rtcpStaleMs); p != clockProvRTCP {
+	// real boundary rather than an always-stale or never-stale check. The packet's
+	// RTP time matches when it arrives (otherwise it looks like a new stream).
+	if _, p := clock.WallMs(srRtp+uint32(rtcpStaleMs)*90, srWall+40+rtcpStaleMs); p != clockProvRTCP {
 		t.Fatalf("a report exactly at the staleness limit must still map, got prov %d", p)
 	}
 }
@@ -651,5 +652,29 @@ func TestVideoRequestExtKeepsNineByteModesIntact(t *testing.T) {
 		if got != want {
 			t.Fatalf("mode %d round trip:\n got %+v\nwant %+v", want.Mode, got, want)
 		}
+	}
+}
+
+// A camera that restarts sends a new stream with an unrelated RTP timestamp base.
+// Its packets must not be mapped with the old stream's sender report (which put
+// them hours off); they fall back to receive time until the new report arrives.
+// A sender whose clock is simply off by more than the jump limit keeps RTCP
+// timing, because the check compares offsets.
+func TestRTPClockNewStreamFallsBackUntilItsSenderReport(t *testing.T) {
+	c := NewRTPClock()
+	const now = uint64(1_800_000_000_000)
+	// The car's clock runs 90 s ahead of ours; that is not a new stream.
+	c.ApplySR(now+90_000, 1000, now)
+	if ms, prov := c.WallMs(1000+90*500, now+500); prov != clockProvRTCP || ms != now+90_500 {
+		t.Fatalf("same stream: %d (%d), want %d via RTCP", ms, prov, now+90_500)
+	}
+	// New stream: random base far from the old one.
+	if ms, prov := c.WallMs(3_000_000_000, now+1000); prov != clockProvReceive || ms != now+1000 {
+		t.Fatalf("new stream: %d (%d), want receive time %d", ms, prov, now+1000)
+	}
+	// Its own sender report restores RTCP timing.
+	c.ApplySR(now+92_000, 3_000_000_000, now+2000)
+	if ms, prov := c.WallMs(3_000_000_000+90*100, now+2100); prov != clockProvRTCP || ms != now+92_100 {
+		t.Fatalf("after the new report: %d (%d), want %d via RTCP", ms, prov, now+92_100)
 	}
 }

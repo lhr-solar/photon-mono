@@ -33,6 +33,13 @@ const (
 	// timestamps; senders emit one every ~5 s, so a minute of silence means
 	// the sender is gone or its clock story has changed.
 	rtcpStaleMs = uint64(60_000)
+	// rtpJumpMs: a packet whose mapped time disagrees by more than this with the
+	// offset the last sender report showed (sender clock minus our clock) belongs
+	// to a different stream, e.g. a camera that restarted with a new random RTP
+	// timestamp base. Its time falls back to receive time until that stream's own
+	// sender report arrives. A sender clock that is simply off is not affected:
+	// the check compares offsets, not clocks.
+	rtpJumpMs = int64(10_000)
 )
 
 // videoClockFile is the persisted manual nudge and last known provenance
@@ -54,6 +61,9 @@ type RTPClock struct {
 	srRtpTs   uint32
 	srSeenMs  uint64
 	clockRate uint32
+	// jumped is set while packets disagree with the sender report (logged once);
+	// the next sender report clears it.
+	jumped bool
 
 	// Manual ±ms nudge, applied on top of whatever mapping is in force and
 	// reported to clients so they can apply it to already-stored timestamps.
@@ -121,6 +131,7 @@ func (c *RTPClock) ApplySR(ntpMs uint64, rtpTs uint32, nowMs uint64) {
 	c.srNtpMs = ntpMs
 	c.srRtpTs = rtpTs
 	c.srSeenMs = nowMs
+	c.jumped = false
 }
 
 // WallMs maps an RTP timestamp to unix ms, or falls back to receive time.
@@ -152,6 +163,17 @@ func (c *RTPClock) WallMs(rtpTs uint32, receiveMs uint64) (uint64, uint8) {
 	deltaMs := deltaTicks * 1000 / int64(rate)
 	mapped := int64(c.srNtpMs) + deltaMs
 	if mapped < 0 {
+		return apply(receiveMs, clockProvReceive)
+	}
+	// A different stream (see rtpJumpMs): its RTP timestamps say nothing about
+	// the last sender report's mapping.
+	expected := int64(c.srNtpMs) - int64(c.srSeenMs)
+	if d := (mapped - int64(receiveMs)) - expected; d > rtpJumpMs || d < -rtpJumpMs {
+		if !c.jumped {
+			c.jumped = true
+			log.Printf("[photon-server] video: RTP timestamps jumped %d s from the last sender report "+
+				"(new stream?); using receive time until its sender report arrives", d/1000)
+		}
 		return apply(receiveMs, clockProvReceive)
 	}
 	return apply(uint64(mapped), clockProvRTCP)
