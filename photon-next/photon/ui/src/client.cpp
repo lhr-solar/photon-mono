@@ -489,10 +489,9 @@ void Client::handleText(std::string_view text) {
 }
 
 void Client::applyVideoStatus(const ctrl2::VideoStatus& status) {
-    if (noteVideoStatus(videoSession_, status)) {
-        // The new stream starts with this status: nothing of the old one follows it.
-        videoAssembler_.reset();
-    }
+    // The status and the pieces travel on different queues at the server, so pieces of the
+    // new stream can come before its status. handleVideoChunk takes them by their replay bit.
+    noteVideoStatus(videoSession_, status);
     arena_.applyVideoStatus(status);
 }
 
@@ -540,13 +539,18 @@ void Client::pumpVideo(double nowMs) {
 }
 
 void Client::handleVideoChunk(std::span<const std::uint8_t> bytes) {
-    // Pieces are dropped while the request is awaited: they belong to the stream before it.
-    if (videoSession_.awaiting || videoSession_.stream == VideoStream::Off) {
+    if (videoSession_.stream == VideoStream::Off) {
         return;
     }
     const auto chunk = proto2::decodeVideoChunk(bytes);
     if (!chunk) {
         arena_.pushLog("bad VideoChunk", true);
+        return;
+    }
+    // While a request is awaited, the pieces of the stream before it are not wanted: those
+    // are the other kind (live or replay) by their replay bit.
+    if (videoSession_.awaiting &&
+        isReplayChunk(chunk->flags) != (videoSession_.awaitingStream == VideoStream::Replay)) {
         return;
     }
     if (auto frame = videoAssembler_.push(*chunk)) {
