@@ -112,7 +112,6 @@ void ClientArena::clearTelemetry() {
     tiles_.clearRingOldest();
     timeline_ = proto::TimelineStatus{};
     alarms_.resetRuntime();
-    primedHistoryKey_.clear();
     mapsResetPulse_ = true;
 }
 
@@ -168,6 +167,9 @@ void ClientArena::ingestTelemetry(std::span<const proto::TelemetryBlock> blocks)
 }
 
 void ClientArena::ingestGap(std::int64_t fromNs, std::int64_t toNs) {
+    if (fromNs > 0 && toNs >= fromNs) {
+        tiles_.noteGap(static_cast<std::uint64_t>(fromNs / 1000000), static_cast<std::uint64_t>(toNs / 1000000));
+    }
     gaps_.push_back(GapSpan{fromNs, toNs});
     constexpr std::size_t kMaxGaps = 256;
     if (gaps_.size() > kMaxGaps) {
@@ -226,11 +228,34 @@ CatalogChange ClientArena::applyCatalog(const ctrl2::Catalog& catalog) {
         ring.id = sig.id;
         ring.name = sig.message.empty() ? sig.name : sig.message + "." + sig.name;
     }
+    std::unordered_map<std::uint32_t, double> periods;
+    for (std::size_t i = 0; i < signalCatalog.size() && i < signalExtra.size(); ++i) {
+        periods[signalCatalog[i].id] = signalExtra[i].periodMs;
+    }
+    tiles_.setPeriods(std::move(periods));
     clearTelemetry();
     resetSignalMap();
     signalMap_.resolve(signalCatalog, *this);
     alarms_.resolve(signalCatalog, *this);
     return change;
+}
+
+void ClientArena::syncRun(HistoryIO* io) {
+    // Live for now: the run the server says is live, with its rev and start from runs_list.
+    std::string runId = server.liveRun;
+    std::int64_t rev = 0;
+    std::uint64_t minMs = 0;
+    for (const auto& run : runs) {
+        if (run.id == runId) {
+            rev = run.rev;
+            minMs = run.startMs > 0 ? static_cast<std::uint64_t>(run.startMs) : 0;
+            break;
+        }
+    }
+    if (io != nullptr && (runId != tiles_.runId() || rev != tiles_.rev() || catalogSha != tiles_.catalogSha())) {
+        tiles_.cancelAll(*io);
+    }
+    tiles_.setRun(runId, rev, catalogSha, minMs, timeline_.maxTimeMs);
 }
 
 float ClientArena::historyRateHz(std::uint32_t signalId) const {
@@ -308,19 +333,9 @@ void ClientArena::refreshMappedCells() {
 }
 
 void ClientArena::maybePrimeHistory(HistoryIO& io) {
-    if (!haveSignalCatalog || tiles_.sessionMaxMs() <= tiles_.sessionMinMs()) {
+    if (!haveSignalCatalog || tiles_.runId().empty()) {
         return;
     }
-    // Live/BUFFERING: do not dump TSDB tiles into WASM. A log switch used to
-    // prime on the first BUFFERING timeline (min/max still growing) and abort.
-    // Catalog pin is Pause + a known session window: prime that cursor only.
-    const auto mode = static_cast<proto::TimelineMode>(timeline_.mode);
-    if (!catalogPinned() && (mode == proto::TimelineMode::Live || mode == proto::TimelineMode::Buffering ||
-                            mode == proto::TimelineMode::Unknown)) {
-        return;
-    }
-    const std::string key = tiles_.sessionId() + "|" + tiles_.dbcHash() + "|" +
-                            std::to_string(tiles_.sessionMinMs()) + "|" + std::to_string(tiles_.sessionMaxMs());
     auto appendMapped = [&](const char* role, std::vector<std::uint32_t>& dest) {
         const ResolvedScalar* slot = signalMap_.scalar(role);
         if (slot != nullptr && slot->mapped && slot->id != 0) {
@@ -365,49 +380,11 @@ void ClientArena::maybePrimeHistory(HistoryIO& io) {
     }
     std::sort(ids.begin(), ids.end());
     ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-    // Stay on the playhead. A one-shot prime at session minMs misses the first
-    // samples, and a failed hop (history-remote down) used to never retry.
-    if (catalogPinned()) {
-        if (!urgent.empty()) {
-            tiles_.requestCursorWindow(io, urgent, effectiveCursorMs());
-        }
-        tiles_.requestCursorWindow(io, ids, effectiveCursorMs());
-    }
-    if (key == primedHistoryKey_) {
-        return;
-    }
-    if (catalogPinned() && !gpsIds.empty() && tiles_.sessionMaxMs() > tiles_.sessionMinMs()) {
-        tiles_.requestWindow(io, gpsIds, tiles_.sessionMinMs(), tiles_.sessionMaxMs(), 4000, false);
-        std::fprintf(stderr, "[maps] prime GPS ids=%zu session=%s %llu..%llu\n", gpsIds.size(),
-                     tiles_.sessionId().c_str(),
-                     static_cast<unsigned long long>(tiles_.sessionMinMs()),
-                     static_cast<unsigned long long>(tiles_.sessionMaxMs()));
-        for (const auto id : gpsIds) {
-            std::fprintf(stderr, "[maps] prime GPS id=%u\n", id);
-        }
-        std::fflush(stderr);
-    }
-    if (catalogPinned()) {
-        // First minutes are often empty at minMs (video/CAN start skew). Pull
-        // L0 tiles, not a 4k-point rollup. Mux tap index averaged over 4 s
-        // cannot rebuild the 32-cell pack.
-        const auto from = tiles_.sessionMinMs();
-        const auto cap = from + 180000;
-        const auto to = tiles_.sessionMaxMs() < cap ? tiles_.sessionMaxMs() : cap;
-        if (to > from && !urgent.empty()) {
-            constexpr std::uint64_t kL0Span = 60000;
-            for (auto t = from; t <= to; t += kL0Span) {
-                tiles_.requestCursorWindow(io, urgent, t);
-                if (t > to - kL0Span) {
-                    break;
-                }
-            }
-            tiles_.requestCursorWindow(io, urgent, to);
-        }
-    } else {
-        tiles_.primeStartup(io, ids, effectiveCursorMs());
-    }
-    primedHistoryKey_ = key;
+    // The cursor's raw tiles: urgent for the mapped signals the readouts use, priming
+    // for the rest. want() is a lookup for tiles already here, so this runs every frame.
+    const std::uint64_t cursor = effectiveCursorMs();
+    tiles_.requestCursorWindow(io, urgent, cursor);
+    tiles_.primeStartup(io, ids, cursor);
 }
 
 void ClientArena::setMappedCells(std::vector<float> voltages, std::vector<float> temps,
@@ -492,9 +469,10 @@ bool ClientArena::cursorValue(std::uint32_t id, double& value) const {
         }
         return tiles_.sampleAt(id, effectiveCursorMs(), value);
     }
+    // Before the ring's oldest sample the tiles answer; from there on the ring does.
     const auto t = effectiveCursorMs();
-    const auto seam = tiles_.seamFor(id);
-    if (t != 0 && (seam == 0 || t < seam) && tiles_.sampleAt(id, t, value)) {
+    const bool beforeRing = r == nullptr || r->count == 0 || static_cast<double>(t) < r->firstTs();
+    if (t != 0 && beforeRing && tiles_.sampleAt(id, t, value)) {
         return true;
     }
     if (r != nullptr && r->hasLatest) {
@@ -504,10 +482,7 @@ bool ClientArena::cursorValue(std::uint32_t id, double& value) const {
         value = r->latest;
         return true;
     }
-    if (t != 0 && tiles_.sampleAt(id, t, value)) {
-        return true;
-    }
-    return false;
+    return t != 0 && tiles_.sampleAt(id, t, value);
 }
 
 bool ClientArena::interpolate(std::uint32_t id, double tMs, double& value) const {

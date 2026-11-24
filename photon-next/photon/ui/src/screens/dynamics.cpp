@@ -338,7 +338,7 @@ void DynamicsScreen::draw(UiContext& ui) {
     static std::string heldKey;
     static GgPeaks heldPeaks;
     const std::string key =
-        ggPeakSessionKey(ui.arena.tiles().sessionId(), ui.arena.server.liveRun) + "|" + imu.id;
+        ggPeakSessionKey(ui.arena.tiles().runId(), ui.arena.server.liveRun) + "|" + imu.id;
     if (key != heldKey) {
         heldKey = key;
         heldPeaks = {};

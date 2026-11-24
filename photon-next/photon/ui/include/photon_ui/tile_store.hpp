@@ -16,7 +16,7 @@ namespace photon::ui {
 // gets the same bytes back, so the encode/decode/validate path is ordinary C++
 // covered by native tests rather than browser-only glue.
 
-// Identifies a record *within* the current scope. Session and DBC identity are
+// Identifies a record *within* the current scope. Run, rev and catalog identity are
 // deliberately absent: they live in the scope set by setScope, so they cannot
 // disagree with it on a per-record basis. The blob itself still carries them, and
 // TileCache re-checks them on read.
@@ -31,8 +31,9 @@ struct PersistedTileKey {
 // disagree, which is what catches a truncated or spliced payload.
 struct PersistedTile {
     std::uint32_t formatVersion = 0;
-    std::string sessionId;
-    std::string dbcHash;
+    std::string runId;
+    std::int64_t rev = 0;
+    std::string sha;
     std::uint32_t signalId = 0;
     std::uint8_t level = 0;
     std::int64_t tileIndex = 0;
@@ -59,9 +60,10 @@ class TileStore {
 public:
     virtual ~TileStore() = default;
 
-    // Scope = (sessionId, dbcHash). Changing it must make every record from a
-    // previous scope unreachable; the store may drop them eagerly or lazily.
-    virtual void setScope(const std::string& sessionId, const std::string& dbcHash) = 0;
+    // Scope = (run, rev, catalog sha). Changing it must make every record from a
+    // previous scope unreachable; the store may drop them eagerly or lazily. A new
+    // rev of a run therefore drops that run's tiles.
+    virtual void setScope(const std::string& runId, std::int64_t rev, const std::string& sha) = 0;
 
     // Non-blocking. Returns false when the store cannot take the read (not open
     // yet, too many in flight, no scope). A `true` return promises exactly one
@@ -80,7 +82,9 @@ public:
 };
 
 inline constexpr std::uint32_t kTileBlobMagic = 0x31435450;  // "PTC1"
-inline constexpr std::uint32_t kTileBlobVersion = 1;
+inline constexpr std::uint32_t kTileBlobVersion = 2;
+// The highest level a blob may name. The cache checks it against its own levels.
+inline constexpr std::uint8_t kTileBlobMaxLevel = 63;
 // A tile larger than this is refused rather than written; it means the level or
 // the sample count is not what this cache thinks it is.
 inline constexpr std::size_t kTileBlobMaxBytes = 4u * 1024u * 1024u;

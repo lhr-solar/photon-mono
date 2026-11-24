@@ -5,27 +5,34 @@
 
 namespace photon::ui {
 
-void AnalysisHistoryIO::requestHistory(std::uint32_t queryId, std::string sessionId, std::uint64_t fromMs,
-                                       std::uint64_t toMs, std::vector<std::uint32_t> signalIds,
-                                       std::uint32_t maxPoints) {
-    AnalysisHistoryRequest req;
-    req.queryId = queryId;
-    req.sessionId = sessionId;
-    req.fromMs = fromMs;
-    req.toMs = toMs;
-    req.signalIds = signalIds;
-    req.maxPoints = maxPoints;
-    requests_.push_back(req);
+namespace {
+// The recorded lists are for tests and debugging; a long session must not grow them.
+constexpr std::size_t kMaxRecorded = 1024;
+}  // namespace
+
+void AnalysisHistoryIO::requestTile(std::uint32_t queryId, const std::string& runId, std::uint32_t signalId,
+                                    int level, std::int64_t index, bool urgent) {
+    requests_.push_back(AnalysisTileRequest{queryId, runId, signalId, level, index, urgent});
+    if (requests_.size() > kMaxRecorded) {
+        requests_.erase(requests_.begin());
+    }
     if (forward_ != nullptr && forward_ != this) {
-        forward_->requestHistory(queryId, std::move(sessionId), fromMs, toMs, std::move(signalIds), maxPoints);
+        forward_->requestTile(queryId, runId, signalId, level, index, urgent);
     }
 }
 
-void AnalysisHistoryIO::cancelHistory(std::uint32_t queryId) {
+void AnalysisHistoryIO::cancelTile(std::uint32_t queryId) {
     cancels_.push_back(queryId);
-    if (forward_ != nullptr && forward_ != this) {
-        forward_->cancelHistory(queryId);
+    if (cancels_.size() > kMaxRecorded) {
+        cancels_.erase(cancels_.begin());
     }
+    if (forward_ != nullptr && forward_ != this) {
+        forward_->cancelTile(queryId);
+    }
+}
+
+bool AnalysisHistoryIO::queueFull() const {
+    return forward_ != nullptr && forward_ != this && forward_->queueFull();
 }
 
 AnalysisBoundRun::AnalysisBoundRun(AnalysisRunBinding binding, std::uint32_t queryOrigin)
@@ -50,7 +57,20 @@ void AnalysisBoundRun::setColor(std::string color) {
 }
 
 void AnalysisBoundRun::applySession() {
-    cache_.setSession(binding_.sessionId, binding_.dbcHash, binding_.minMs, binding_.maxMs);
+    cache_.setRun(binding_.sessionId, binding_.rev, binding_.dbcHash, binding_.minMs, binding_.maxMs);
+}
+
+void AnalysisBoundRun::setRev(std::int64_t rev) {
+    if (binding_.rev == rev) {
+        return;
+    }
+    cache_.cancelAll(io_);
+    binding_.rev = rev;
+    applySession();
+}
+
+void AnalysisBoundRun::setLevels(const std::vector<std::int64_t>& bucketMs) {
+    cache_.setLevels(bucketMs);
 }
 
 void AnalysisBoundRun::requestWindow(std::span<const std::uint32_t> signalIds, std::uint64_t fromMs,
@@ -79,21 +99,6 @@ bool AnalysisBoundRun::sampleAt(std::uint32_t signalId, std::uint64_t tMs, doubl
     return cache_.sampleAt(signalId, tMs, value);
 }
 
-bool AnalysisBoundRun::ingestResult(const ctrl::Message& msg) {
-    if (!cache_.hasInflight(msg.queryId)) {
-        return false;
-    }
-    cache_.ingestResult(msg);
-    return true;
-}
-
-bool AnalysisBoundRun::ingestChunk(const proto::HistoryChunk& chunk) {
-    if (!cache_.hasInflight(chunk.queryId)) {
-        return false;
-    }
-    cache_.ingestChunk(chunk);
-    return true;
-}
 
 AnalysisBoundRun* AnalysisRuntime::bind(AnalysisRunBinding binding) {
     if (binding.sessionId.empty()) {
@@ -132,6 +137,7 @@ AnalysisBoundRun* AnalysisRuntime::bind(AnalysisRunBinding binding) {
     if (transport_ != nullptr) {
         run->io().setForward(transport_);
     }
+    run->setLevels(levels_);
     auto* ptr = run.get();
     if (ptr->binding().role == AnalysisRunRole::Primary) {
         const auto maxMs = ptr->binding().maxMs;
@@ -365,22 +371,43 @@ bool AnalysisRuntime::sampleAt(std::uint32_t signalId, std::uint64_t tMs, double
     return false;
 }
 
-bool AnalysisRuntime::ingestResult(const ctrl::Message& msg) {
+void AnalysisRuntime::setLevels(const std::vector<std::int64_t>& bucketMs) {
+    levels_ = bucketMs;
     for (auto& run : runs_) {
-        if (run->ingestResult(msg)) {
-            return true;
-        }
+        run->setLevels(levels_);
     }
-    return false;
 }
 
-bool AnalysisRuntime::ingestChunk(const proto::HistoryChunk& chunk) {
+void AnalysisRuntime::applyRuns(const std::vector<ctrl2::Run>& runs) {
     for (auto& run : runs_) {
-        if (run->ingestChunk(chunk)) {
-            return true;
+        for (const auto& r : runs) {
+            if (r.id == run->binding().sessionId) {
+                run->setRev(r.rev);
+                break;
+            }
         }
     }
-    return false;
+}
+
+void AnalysisRuntime::abandonRequests() {
+    for (auto& run : runs_) {
+        run->abandonRequests();
+    }
+}
+
+void AnalysisRuntime::pump() {
+    for (auto& run : runs_) {
+        run->pump();
+    }
+}
+
+TileCache* AnalysisRuntime::cacheForQuery(std::uint32_t qid) {
+    for (auto& run : runs_) {
+        if (run->cache().owns(qid)) {
+            return &run->cache();
+        }
+    }
+    return nullptr;
 }
 
 void AnalysisRuntime::setCursorMs(std::uint64_t cursorMs) {

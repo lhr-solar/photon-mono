@@ -918,8 +918,8 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay, bool hostMap
                     !(tileLat == 0.0 && tileLon == 0.0)) {
                     return true;
                 }
-                const auto span = arena.tiles().sessionMaxMs() > arena.tiles().sessionMinMs()
-                                      ? arena.tiles().sessionMaxMs() - arena.tiles().sessionMinMs()
+                const auto span = arena.tiles().runMaxMs() > arena.tiles().runMinMs()
+                                      ? arena.tiles().runMaxMs() - arena.tiles().runMinMs()
                                       : 600000ull;
                 if (arena.tiles().sampleNear(latSlot->id, cursor, tileLat, span) &&
                     arena.tiles().sampleNear(lonSlot->id, cursor, tileLon, span) &&

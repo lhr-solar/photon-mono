@@ -2381,7 +2381,7 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
         static std::unordered_map<std::string, std::pair<std::string, GgPeaks>> heldByCell;
         const std::string imuKey = cell.sources.empty() ? "" : cell.sources[0].messageName;
         const std::string session =
-            ggPeakSessionKey(ui.arena.tiles().sessionId(), ui.arena.server.liveRun) + "|" + imuKey;
+            ggPeakSessionKey(ui.arena.tiles().runId(), ui.arena.server.liveRun) + "|" + imuKey;
         GgPeaks& heldPeaks = heldByCell[cell.id].second;
         if (heldByCell[cell.id].first != session) {
             heldByCell[cell.id].first = session;
@@ -2566,9 +2566,7 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
         const bool shiftRangeStarting = ImGui::GetIO().KeyShift && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         const bool pointerActive =
             ImGui::IsMouseDragging(ImGuiMouseButton_Left) || cell.rangeDragging || shiftRangeStarting;
-        ui.arena.tiles().setPlayback(1.0, tl.mode == static_cast<std::uint8_t>(proto::TimelineMode::Play) ||
-                                              tl.mode == static_cast<std::uint8_t>(proto::TimelineMode::Live));
-        if (!histIds.empty() && !live && unixMsLooksLikeWall(winFrom) && unixMsLooksLikeWall(winTo)) {
+        if (!histIds.empty() && unixMsLooksLikeWall(winFrom) && unixMsLooksLikeWall(winTo)) {
             if (pointerActive && !plotScrubbing_) {
                 ui.arena.tiles().cancelLeaving(ui.client, winFrom, winTo);
             } else {

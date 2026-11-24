@@ -111,10 +111,11 @@ std::vector<std::uint8_t> encodeTile(const PersistedTile& tile) {
     putU32(out, static_cast<std::uint32_t>(tile.maxV.size()));
     putU32(out, static_cast<std::uint32_t>(tile.meanV.size()));
     putU32(out, static_cast<std::uint32_t>(tile.rawV.size()));
-    putU32(out, static_cast<std::uint32_t>(tile.sessionId.size()));
-    putU32(out, static_cast<std::uint32_t>(tile.dbcHash.size()));
-    out.insert(out.end(), tile.sessionId.begin(), tile.sessionId.end());
-    out.insert(out.end(), tile.dbcHash.begin(), tile.dbcHash.end());
+    putU64(out, static_cast<std::uint64_t>(tile.rev));
+    putU32(out, static_cast<std::uint32_t>(tile.runId.size()));
+    putU32(out, static_cast<std::uint32_t>(tile.sha.size()));
+    out.insert(out.end(), tile.runId.begin(), tile.runId.end());
+    out.insert(out.end(), tile.sha.begin(), tile.sha.end());
     putF64Array(out, tile.t);
     putF32Array(out, tile.minV);
     putF32Array(out, tile.maxV);
@@ -143,30 +144,32 @@ bool decodeTile(const std::vector<std::uint8_t>& blob, PersistedTile& out) {
     std::uint32_t maxCount = 0;
     std::uint32_t meanCount = 0;
     std::uint32_t rawCount = 0;
-    std::uint32_t sessionLen = 0;
-    std::uint32_t dbcLen = 0;
+    std::uint64_t rev = 0;
+    std::uint32_t runLen = 0;
+    std::uint32_t shaLen = 0;
     PersistedTile t;
     t.formatVersion = version;
     if (!takeU32(blob, off, t.signalId) || !takeU32(blob, off, level) || !takeU64(blob, off, tileIndex) ||
         !takeU32(blob, off, t.bucketMs) || !takeU32(blob, off, sampleCount) || !takeU32(blob, off, minCount) ||
         !takeU32(blob, off, maxCount) || !takeU32(blob, off, meanCount) || !takeU32(blob, off, rawCount) ||
-        !takeU32(blob, off, sessionLen) || !takeU32(blob, off, dbcLen)) {
+        !takeU64(blob, off, rev) || !takeU32(blob, off, runLen) || !takeU32(blob, off, shaLen)) {
         return false;
     }
-    if (level > 5 || sessionLen > kMaxIdLen || dbcLen > kMaxIdLen) {
+    if (level > kTileBlobMaxLevel || runLen > kMaxIdLen || shaLen > kMaxIdLen) {
         return false;
     }
     t.level = static_cast<std::uint8_t>(level);
     t.tileIndex = static_cast<std::int64_t>(tileIndex);
-    if (off + sessionLen + dbcLen > blob.size()) {
+    t.rev = static_cast<std::int64_t>(rev);
+    if (off + runLen + shaLen > blob.size()) {
         return false;
     }
-    t.sessionId.assign(blob.begin() + static_cast<std::ptrdiff_t>(off),
-                       blob.begin() + static_cast<std::ptrdiff_t>(off + sessionLen));
-    off += sessionLen;
-    t.dbcHash.assign(blob.begin() + static_cast<std::ptrdiff_t>(off),
-                     blob.begin() + static_cast<std::ptrdiff_t>(off + dbcLen));
-    off += dbcLen;
+    t.runId.assign(blob.begin() + static_cast<std::ptrdiff_t>(off),
+                   blob.begin() + static_cast<std::ptrdiff_t>(off + runLen));
+    off += runLen;
+    t.sha.assign(blob.begin() + static_cast<std::ptrdiff_t>(off),
+                 blob.begin() + static_cast<std::ptrdiff_t>(off + shaLen));
+    off += shaLen;
     if (!takeF64Array(blob, off, sampleCount, t.t) || !takeF32Array(blob, off, minCount, t.minV) ||
         !takeF32Array(blob, off, maxCount, t.maxV) || !takeF32Array(blob, off, meanCount, t.meanV) ||
         !takeF32Array(blob, off, rawCount, t.rawV)) {
@@ -212,7 +215,7 @@ bool decodeLoadedRange(const std::vector<std::uint8_t>& blob, LoadedTileRange& o
     if (!takeU32(blob, off, r.signalId) || !takeU32(blob, off, level)) {
         return false;
     }
-    if (level > 5) {
+    if (level > kTileBlobMaxLevel) {
         return false;
     }
     r.level = static_cast<std::uint8_t>(level);

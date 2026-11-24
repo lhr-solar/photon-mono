@@ -1,6 +1,7 @@
 #include "photon_ui/client.hpp"
 
 #include "photon/protocol_v2.hpp"
+#include "photon_ui/analysis_runtime.hpp"
 #include "photon_ui/page_url.hpp"
 #include "photon_ui/platform.hpp"
 
@@ -29,6 +30,9 @@ constexpr int kBackoffCount = 4;
 constexpr double kPingMs = 1000.0;     // the server closes a socket silent for 5 s
 constexpr double kGapLogMs = 5000.0;   // gaps can come in bursts; log one line per interval
 constexpr std::uint16_t kCloseRefused = 1008;
+constexpr double kRunsRefreshMs = 30000.0;  // runs_list again this often (and on reconnect)
+constexpr double kTileTimeoutMs = 60000.0;  // a tile_request unanswered this long is given up
+constexpr double kTileErrorLogMs = 5000.0;  // tile errors can come in bursts; one log line per interval
 
 // Unix time in ns on this machine, for the live cursor offset.
 std::int64_t wallNs() {
@@ -182,6 +186,7 @@ void pumpNativeWs(Client& self, ws::Connection& conn, bool& handshakeOk) {
 #endif
 
 void Client::tick(double nowMs) {
+    nowMs_ = nowMs;
 #ifndef __EMSCRIPTEN__
     if (ws_) {
         pumpNativeWs(*this, *ws_, wsHandshakeOk_);
@@ -192,11 +197,32 @@ void Client::tick(double nowMs) {
             sendPing(nowMs);
             lastPingMs_ = nowMs;
         }
+        if (nowMs - lastRunsMs_ >= kRunsRefreshMs) {
+            lastRunsMs_ = nowMs;
+            requestRuns();
+        }
         // The live cursor is the server's now: this machine's clock plus the
         // offset measured at hello_ack.
         const auto serverNs = wallNs() + arena_.server.clockOffsetNs;
         arena_.setLiveCursor(static_cast<std::uint64_t>(std::max<std::int64_t>(serverNs, 0) / 1000000));
+        arena_.syncRun(this);
         flushSubscribe();
+        // A request nobody answered in time is given up, so its slot is not held for good.
+        std::vector<std::uint32_t> stalled;
+        for (const auto& [qid, sentMs] : tileSentMs_) {
+            if (nowMs - sentMs >= kTileTimeoutMs) {
+                stalled.push_back(qid);
+            }
+        }
+        for (const std::uint32_t qid : stalled) {
+            send(ctrl2::TileCancel{qid});
+            handleTileError(qid, "no answer in time");
+        }
+        pumpTiles();
+    }
+    arena_.tiles().pump();
+    if (analysisRuntime_ != nullptr) {
+        analysisRuntime_->pump();
     }
     if (askToken_) {
         // The server refused the password. The web page asks once; native has
@@ -351,10 +377,21 @@ void Client::handleOpen() {
     send(ctrl2::Hello{"photon-ui", token_});
 }
 
+void Client::dropTiles() {
+    // The requests died with the socket: the caches forget them and ask again later.
+    arena_.tiles().abandonRequests();
+    if (analysisRuntime_ != nullptr) {
+        analysisRuntime_->abandonRequests();
+    }
+    queue_.clear();
+    tileSentMs_.clear();
+}
+
 void Client::handleClose(const char* why, bool error, std::uint16_t closeCode, std::string_view reason) {
     if (state_ == State::Disconnected) {
         return;
     }
+    dropTiles();
     const bool refused = closeCode == kCloseRefused && reason == "bad token" && state_ != State::HelloOk;
 #ifdef __EMSCRIPTEN__
     const int sock = socket_;
@@ -430,15 +467,13 @@ void Client::handleText(std::string_view text) {
     } else if (const auto* catalog = std::get_if<ctrl2::Catalog>(&msg)) {
         applyCatalog(*catalog);
     } else if (const auto* runs = std::get_if<ctrl2::Runs>(&msg)) {
-        arena_.runs = runs->runs;
-        arena_.pushLog("runs " + std::to_string(runs->runs.size()));
+        applyRuns(runs->runs);
     } else if (const auto* ping = std::get_if<ctrl2::Ping>(&msg)) {
         send(ctrl2::Pong{ping->tMs});
     } else if (const auto* err = std::get_if<ctrl2::Error>(&msg)) {
         arena_.pushLog(err->code + ": " + err->message, true);
     } else if (const auto* tileErr = std::get_if<ctrl2::TileError>(&msg)) {
-        // Tiles are not requested in this step; an error here is stale.
-        arena_.pushLog("tile " + std::to_string(tileErr->qid) + ": " + tileErr->message, true);
+        handleTileError(tileErr->qid, tileErr->message);
     }
     // Pong and video_status need nothing here: video is off, and pongs
     // only confirm the socket is alive.
@@ -456,13 +491,38 @@ void Client::applyHelloAck(const ctrl2::HelloAck& ack) {
     arena_.server.liveRun = ack.liveRun;
     arena_.server.levels = ack.levels;
     arena_.server.clockOffsetNs = ack.serverTimeNs - wallNs();
+    arena_.tiles().setLevels(ack.levels);
+    if (analysisRuntime_ != nullptr) {
+        analysisRuntime_->setLevels(ack.levels);
+    }
+    arena_.syncRun(this);
     arena_.pushLog("hello_ack from " + (ack.server.empty() ? std::string("photon-server") : ack.server) +
                    " as " + ack.user + (ack.liveRun.empty() ? "" : " live run " + ack.liveRun));
     if (first) {
         arena_.pushLog("protocol " + std::to_string(ack.protocol) + ", features " +
                        std::to_string(ack.features.size()));
     }
+    lastRunsMs_ = nowMs_;
     requestRuns();
+    pumpTiles();
+}
+
+void Client::applyRuns(std::vector<ctrl2::Run> runs) {
+    arena_.runs = std::move(runs);
+    // The live run is the one the server flags live; hello_ack names it too.
+    for (const auto& run : arena_.runs) {
+        if (run.live) {
+            if (!run.id.empty() && arena_.server.liveRun != run.id) {
+                arena_.server.liveRun = run.id;
+            }
+            break;
+        }
+    }
+    arena_.syncRun(this);
+    if (analysisRuntime_ != nullptr) {
+        analysisRuntime_->applyRuns(arena_.runs);
+    }
+    arena_.pushLog("runs " + std::to_string(arena_.runs.size()));
 }
 
 void Client::applyCatalog(const ctrl2::Catalog& catalog) {
@@ -493,6 +553,7 @@ void Client::applyCatalog(const ctrl2::Catalog& catalog) {
         arena_.pushLog("catalog " + (catalog.sha.empty() ? std::string("(decoding off)") : catalog.sha.substr(0, 12)) +
                        ": " + std::to_string(change.serverCount) + " signals");
     }
+    arena_.syncRun(this);
 }
 
 void Client::applyLiveSamples(std::span<const std::uint8_t> bytes) {
@@ -544,9 +605,17 @@ void Client::handleBinary(std::span<const std::uint8_t> bytes) {
             }
             break;
         }
+        case static_cast<std::uint8_t>(proto2::MsgType::Tile): {
+            const auto piece = proto2::decodeTile(bytes);
+            if (!piece) {
+                arena_.pushLog("bad Tile piece", true);
+                return;
+            }
+            routeTilePiece(*piece);
+            break;
+        }
         default:
-            // Tile and VideoChunk pieces are only sent when requested. Neither is
-            // requested in this step.
+            // VideoChunk pieces come back in step 3 (video is off until then).
             break;
     }
 }
@@ -605,12 +674,87 @@ void Client::requestRuns() {
     send(ctrl2::RunsList{});
 }
 
-void Client::requestHistory(std::uint32_t, std::string, std::uint64_t, std::uint64_t,
-                            std::vector<std::uint32_t>, std::uint32_t) {
-    // Tiles arrive in step 2.
+void Client::requestTile(std::uint32_t queryId, const std::string& runId, std::uint32_t signalId, int level,
+                         std::int64_t index, bool urgent) {
+    if (queryId == 0 || signalId == 0) {
+        return;
+    }
+    queue_.push(TileRequestQueue::Request{queryId, runId, signalId, level, index, urgent});
+    pumpTiles();
 }
 
-void Client::cancelHistory(std::uint32_t) {}
+void Client::cancelTile(std::uint32_t queryId) {
+    if (queue_.dropQueued(queryId)) {
+        return;
+    }
+    if (queue_.isInflight(queryId)) {
+        send(ctrl2::TileCancel{queryId});
+        finishTile(queryId);
+    }
+}
+
+void Client::pumpTiles() {
+    if (state_ != State::HelloOk) {
+        return;
+    }
+    for (const auto& r : queue_.take()) {
+        tileSentMs_[r.qid] = nowMs_;
+        // The wire signal is the catalog index: the client id minus one.
+        send(ctrl2::TileRequest{r.qid, r.run, r.signal - 1, r.level, r.index});
+    }
+}
+
+void Client::finishTile(std::uint32_t qid) {
+    queue_.done(qid);
+    tileSentMs_.erase(qid);
+}
+
+TileCache* Client::cacheFor(std::uint32_t qid) {
+    if (isAnalysisQueryId(qid)) {
+        return analysisRuntime_ != nullptr ? analysisRuntime_->cacheForQuery(qid) : nullptr;
+    }
+    return &arena_.tiles();
+}
+
+void Client::routeTilePiece(const proto2::TilePiece& piece) {
+    const std::uint32_t qid = piece.qid;
+    if (!queue_.isInflight(qid)) {
+        // Cancelled, given up, or not ours: a late piece is dropped.
+        return;
+    }
+    const bool last = (piece.flags & proto2::kTileLast) != 0;
+    TileCache* cache = cacheFor(qid);
+    if (cache != nullptr) {
+        cache->ingestPiece(piece);
+    }
+    if (last) {
+        finishTile(qid);
+        pumpTiles();
+        return;
+    }
+    if (cache == nullptr || !cache->owns(qid)) {
+        // The cache failed the request (a gap in the offsets, or a bad piece). Stop
+        // the server from sending the rest.
+        send(ctrl2::TileCancel{qid});
+        finishTile(qid);
+        pumpTiles();
+    }
+}
+
+void Client::handleTileError(std::uint32_t qid, const std::string& message) {
+    if (!queue_.isInflight(qid)) {
+        return;
+    }
+    if (TileCache* cache = cacheFor(qid); cache != nullptr) {
+        cache->ingestError(qid);
+    }
+    finishTile(qid);
+    if (nowMs_ - lastTileErrorLogMs_ >= kTileErrorLogMs) {
+        lastTileErrorLogMs_ = nowMs_;
+        arena_.pushLog("tile " + std::to_string(qid) + ": " + message, true);
+    }
+    pumpTiles();
+}
 
 void Client::bindAnalysisRuntime(AnalysisRuntime* runtime) {
     analysisRuntime_ = runtime;

@@ -92,7 +92,7 @@ EM_JS(double, photon_tiles_bytes, (), {
     return s ? s.bytes : 0;
 });
 
-// Drops every record outside the new scope. A session or DBC change is a full
+// Drops every record outside the new scope. A run, rev or catalog change is a full
 // invalidation, so the old records are unreachable and must not keep occupying
 // the budget.
 EM_JS(void, photon_tiles_set_scope, (const char* scope), {
@@ -287,12 +287,12 @@ EM_JS(int, photon_tiles_put, (int signalId, int level, double tileIndex, int ptr
 
 class IdbTileStore final : public TileStore {
 public:
-    void setScope(const std::string& sessionId, const std::string& dbcHash) override {
+    void setScope(const std::string& runId, std::int64_t rev, const std::string& sha) override {
         ensureOpen();
-        // The scope prefix carries the blob format version as well as the session
-        // and DBC identity, so a format bump orphans old records and the scope
-        // sweep in photon_tiles_set_scope reclaims them.
-        scope_ = "v" + std::to_string(kTileBlobVersion) + "|" + sessionId + "|" + dbcHash;
+        // The scope prefix carries the blob format version as well as the run, its
+        // rev and the catalog sha, so a format bump or a new rev orphans the old
+        // records and the scope sweep in photon_tiles_set_scope reclaims them.
+        scope_ = "v" + std::to_string(kTileBlobVersion) + "|" + runId + "|" + std::to_string(rev) + "|" + sha;
         photon_tiles_set_scope(scope_.c_str());
     }
 

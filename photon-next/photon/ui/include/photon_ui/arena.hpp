@@ -127,6 +127,9 @@ public:
     CatalogChange applyCatalog(const ctrl2::Catalog& catalog);
     // Runs replay returns in step 2; until then no run is pinned.
     bool catalogPinned() const { return false; }
+    // Points the arena's TileCache at the run it should show: the pinned run, or
+    // the live run. A change drops the cache's tiles (cancelling them through io).
+    void syncRun(HistoryIO* io);
     float historyRateHz(std::uint32_t signalId) const;
     void updatePlaceholderCells(double nowMs);
     void holdReplayCells();
@@ -134,7 +137,6 @@ public:
     void resetSignalMap();
     void refreshMappedCells();
     void maybePrimeHistory(HistoryIO& io);
-    void invalidateHistoryPrime() { primedHistoryKey_.clear(); }
     void setMappedCells(std::vector<float> voltages, std::vector<float> temps,
                         std::vector<double> tapTs = {});
     std::vector<PlotSignal> plotCatalog() const;
@@ -198,7 +200,7 @@ public:
         if (timeline_.maxTimeMs != 0) {
             return timeline_.maxTimeMs;
         }
-        return tiles_.sessionMaxMs();
+        return tiles_.runMaxMs();
     }
     const CellPack& cells() const { return cells_; }
     const std::vector<LogLine>& logs() const { return logs_; }
@@ -229,7 +231,6 @@ private:
     bool sessionFollowPulse_ = false;
     bool mapsResetPulse_ = false;
     TileCache tiles_{};
-    std::string primedHistoryKey_;
 
     void syncRingSeams();
     void addDefaultRings();

@@ -674,9 +674,9 @@ void SignalMap::fillCells(ClientArena& arena) const {
     }
     const auto cursor = arena.effectiveCursorMs();
     if (!arena.timelineIsLive() && cursor != 0 &&
-        arena.tiles().sessionMaxMs() > arena.tiles().sessionMinMs()) {
+        arena.tiles().runMaxMs() > arena.tiles().runMinMs()) {
         const auto toMs = cursor;
-        const auto fromMs = toMs > 180000 ? toMs - 180000 : arena.tiles().sessionMinMs();
+        const auto fromMs = toMs > 180000 ? toMs - 180000 : arena.tiles().runMinMs();
         const auto idxPlot = arena.tiles().gatherL0(volt->indexId, fromMs, toMs);
         const auto valPlot = arena.tiles().gatherL0(volt->valueId, fromMs, toMs);
         applyMuxSeries(idxPlot.t.data(), idxPlot.y.data(), idxPlot.t.size(), valPlot.t.data(),

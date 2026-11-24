@@ -1,14 +1,17 @@
 #pragma once
 
 #include "photon/control_v2.hpp"
+#include "photon/protocol_v2.hpp"
 #include "photon_ui/arena.hpp"
 #include "photon_ui/history_io.hpp"
+#include "photon_ui/tile_queue.hpp"
 
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -54,14 +57,18 @@ public:
     const std::unordered_set<std::uint32_t>& subscribed() const { return subscribed_; }
 
     void requestRuns();
-    // Tiles arrive in step 2. Until then these send nothing and tiles stay empty.
-    void requestHistory(std::uint32_t queryId, std::string sessionId, std::uint64_t fromMs,
-                        std::uint64_t toMs, std::vector<std::uint32_t> signalIds,
-                        std::uint32_t maxPoints) override;
-    void cancelHistory(std::uint32_t queryId) override;
+    // Tile requests (HistoryIO). They go out through TileRequestQueue: at most 24 in
+    // flight, visible tiles first. Nothing is sent before hello_ack.
+    void requestTile(std::uint32_t queryId, const std::string& runId, std::uint32_t signalId, int level,
+                     std::int64_t index, bool urgent) override;
+    void cancelTile(std::uint32_t queryId) override;
+    bool queueFull() const override { return queue_.full(); }
 
     // Analysis-owned caches only.
     void bindAnalysisRuntime(AnalysisRuntime* runtime);
+
+    // Ends the requests of every cache when the socket is gone.
+    void dropTiles();
 
     State state() const { return state_; }
     const char* stateLabel() const;
@@ -100,6 +107,11 @@ private:
     bool subscribeDirty_ = true;
     bool catalogSeen_ = false;  // a catalog arrived on this connection
     std::uint32_t serverSignalCount_ = 0;  // signals in the server's catalog (indexes 0..n-1)
+    double nowMs_ = 0.0;                   // the time of the last tick
+    double lastRunsMs_ = 0.0;
+    double lastTileErrorLogMs_ = 0.0;
+    TileRequestQueue queue_;
+    std::unordered_map<std::uint32_t, double> tileSentMs_;  // sent tile requests, by qid
 
     void attachCallbacks();
     void scheduleReconnect(double nowMs);
@@ -108,6 +120,12 @@ private:
     void applyLiveSamples(std::span<const std::uint8_t> bytes);
     void flushSubscribe();
     void sendPing(double nowMs);
+    void pumpTiles();
+    void routeTilePiece(const proto2::TilePiece& piece);
+    void handleTileError(std::uint32_t qid, const std::string& message);
+    void finishTile(std::uint32_t qid);
+    TileCache* cacheFor(std::uint32_t qid);
+    void applyRuns(std::vector<ctrl2::Run> runs);
 };
 
 }  // namespace photon::ui

@@ -1,66 +1,73 @@
 #pragma once
 
-#include "photon/control.hpp"
-#include "photon/protocol.hpp"
-#include "photon/tsdb.hpp"
+#include "photon/protocol_v2.hpp"
 #include "photon_ui/history_io.hpp"
+#include "photon_ui/tile_levels.hpp"
 #include "photon_ui/tile_store.hpp"
 
+#include <cstddef>
 #include <cstdint>
-#include <optional>
+#include <functional>
 #include <span>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace photon::ui {
 
-enum class TileState : std::uint8_t { Missing, Requested, Open, Sealed, Empty };
+// Protocol v2 tiles of one run. The server decodes; a tile arrives as pieces (Tile
+// 0x22) that the cache assembles by offset until the last piece.
+//   Requested  a tile_request is out; pieces are being assembled
+//   Open       complete, not sealed yet (the live edge): asked again every kOpenRefreshMs
+//   Sealed     complete and sealed: never changes for this run's rev
+//   Empty      complete with no samples (sealed or not)
+//   Unknown    the last request failed: asked again after a backoff (1 s .. 30 s)
+// A tile in the map with haveData set has samples the plot can use, whatever its
+// state: a refresh that is still in flight does not hide the older data.
+enum class TileState : std::uint8_t { Requested, Open, Sealed, Empty, Unknown };
 
 struct TileKey {
-    std::string sessionId;
-    std::string dbcHash;
-    std::uint32_t signalId = 0;
+    std::string runId;
+    std::int64_t rev = 0;
+    std::string sha;
+    std::uint32_t signalId = 0;  // client id (catalog index + 1)
     std::uint8_t level = 0;
     std::int64_t tileIndex = 0;
 
     bool operator==(const TileKey& o) const {
-        return signalId == o.signalId && level == o.level && tileIndex == o.tileIndex && sessionId == o.sessionId &&
-               dbcHash == o.dbcHash;
+        return signalId == o.signalId && level == o.level && tileIndex == o.tileIndex && rev == o.rev &&
+               runId == o.runId && sha == o.sha;
     }
 };
 
 struct TileKeyHash {
     std::size_t operator()(const TileKey& k) const {
         std::size_t h = k.signalId;
-        h ^= static_cast<std::size_t>(k.level) << 16;
+        h ^= static_cast<std::size_t>(k.level) << 24;
         h ^= static_cast<std::size_t>(k.tileIndex) * 2654435761u;
-        h ^= std::hash<std::string>{}(k.sessionId);
+        h ^= static_cast<std::size_t>(k.rev) * 40503u;
+        h ^= std::hash<std::string>{}(k.runId);
+        h ^= std::hash<std::string>{}(k.sha) << 1;
         return h;
     }
 };
 
 struct Tile {
     TileKey key;
-    TileState state = TileState::Missing;
-    std::uint32_t queryId = 0;
-    std::uint32_t bucketMs = 0;
-    bool pinned = false;
-    bool overview = false;
-    // True once this tile's bytes are in the persistent store, whether they got
-    // there by a write or by being read back from it. Read by persistable() to
-    // keep a tile from being written on every frame it stays resident.
-    bool persisted = false;
-    std::vector<double> t;
-    std::vector<float> minV;
-    std::vector<float> maxV;
-    std::vector<float> meanV;
-    std::vector<float> rawV;
+    TileState state = TileState::Unknown;
+    bool haveData = false;  // the arrays below hold a complete response
+    bool sealed = false;
+    std::uint32_t qid = 0;  // the request in flight, when Requested
+    double lastRequestMs = 0.0;
+    double retryAtMs = 0.0;
+    std::uint32_t failures = 0;
     mutable std::uint64_t lastUsed = 0;
     std::size_t bytes = 0;
-    mutable Tile* lruPrev = nullptr;
-    mutable Tile* lruNext = nullptr;
+    std::vector<double> t;     // Unix ms of each sample
+    std::vector<float> rawV;   // level 0: the value
+    std::vector<float> minV;   // level > 0
+    std::vector<float> maxV;
+    std::vector<float> meanV;
 };
 
 struct PlotArrays {
@@ -69,193 +76,169 @@ struct PlotArrays {
     std::vector<double> yMin;
     std::vector<double> yMax;
     bool envelope = false;
+    // True when part of the window had no tile yet. Those spans are drawn from a
+    // coarser tile where one is cached, and otherwise left empty (loading).
     bool incomplete = false;
 };
 
 class TileCache {
 public:
     static constexpr std::size_t kDefaultBudget = 256 * 1024 * 1024;
-    // A pending disk read defers the network request for the tiles it covers, so
-    // it must not be able to defer forever if the bridge never answers.
+    // Live-edge tiles are asked again this often while they are visible.
+    static constexpr double kOpenRefreshMs = 2000.0;
+    static constexpr double kRetryFirstMs = 1000.0;
+    static constexpr double kRetryMaxMs = 30000.0;
+    // A window wider than this many tiles at its level is cut to its newest end.
+    static constexpr std::int64_t kMaxTilesPerWindow = 64;
+    // A disk read that has not answered in this many persistence pumps is abandoned
+    // for the network.
     static constexpr std::uint64_t kDiskDeadlinePumps = 240;
-    static constexpr std::size_t kMaxDiskPending = 32;
-    static constexpr std::size_t kMaxDiskAskedIntervals = 16;
     static constexpr std::size_t kWriteQueueCap = 256;
     static constexpr std::size_t kWritesPerPump = 24;
-    // A tile is only written once the session's write frontier has moved this
-    // far past its end, mirroring the "tileEndMs < liveMs - bucketMs" rule.
-    static constexpr std::uint64_t kSealMarginMs = 1000;
 
-    // Overrides the process-wide default store. Passing nullptr disables
-    // persistence entirely, which is the native default.
+    // Milliseconds on a monotonic clock. Tests replace it.
+    using Clock = double (*)();
+    static void setClock(Clock clock);
+
+    // Overrides the process-wide default store. nullptr disables persistence.
     void setTileStore(TileStore* store);
+    // Bucket widths from hello_ack.levels. Nothing is requested until these are set.
+    void setLevels(std::vector<std::int64_t> bucketMs);
+    const TileLevels& levels() const { return levels_; }
+    // Client id to catalog "period_ms" (0 unknown), for drawing gaps.
+    void setPeriods(std::unordered_map<std::uint32_t, double> periodMs) { periodMs_ = std::move(periodMs); }
 
-    void setSession(std::string sessionId, std::string dbcHash, std::uint64_t minMs, std::uint64_t maxMs);
+    // The run whose tiles this cache holds. A change of run, rev or sha drops every
+    // tile and every pending request; a change of min or max only moves the span.
+    void setRun(const std::string& runId, std::int64_t rev, const std::string& sha, std::uint64_t minMs,
+                std::uint64_t maxMs);
+    const std::string& runId() const { return runId_; }
+    std::int64_t rev() const { return rev_; }
+    const std::string& catalogSha() const { return sha_; }
+    std::uint64_t runMinMs() const { return minMs_; }
+    std::uint64_t runMaxMs() const { return maxMs_; }
+
+    // The live ring's oldest sample per signal. Tiles from that time on are not used:
+    // the ring draws them.
     void updateRingOldest(std::uint32_t signalId, std::uint64_t oldestMs);
-    void clearRingOldest();
-    void cancelAll(HistoryIO& client);
-    std::uint64_t seamFor(std::uint32_t signalId) const;
-    void setPlayback(double speed, bool playing);
-    void setCompactFetch(bool on) { compactFetch_ = on; }
+    void clearRingOldest() { ringOldest_.clear(); }
 
-    void requestWindow(HistoryIO& client, std::span<const std::uint32_t> signalIds, std::uint64_t fromMs,
-                       std::uint64_t toMs, std::uint32_t maxPoints, bool dragging);
-    void requestCursorWindow(HistoryIO& client, std::span<const std::uint32_t> signalIds, std::uint64_t cursorMs);
-    // Cold start: cursor L0 + one visible window. No neighbor / L±1 prefetch.
-    void primeStartup(HistoryIO& client, std::span<const std::uint32_t> signalIds, std::uint64_t cursorMs);
-    void ingestResult(const ctrl::Message& msg);
-    void ingestChunk(const proto::HistoryChunk& chunk);
-    void cancelLeaving(HistoryIO& client, std::uint64_t fromMs, std::uint64_t toMs);
+    // Requests the tiles covering [fromMs, toMs] at the level that fits pixels
+    // (chooseLevel). Nothing is sent while dragging.
+    void requestWindow(HistoryIO& io, std::span<const std::uint32_t> signalIds, std::uint64_t fromMs,
+                       std::uint64_t toMs, std::uint32_t pixels, bool dragging);
+    // The raw tile at cursorMs (and the one before it when the cursor is near its start).
+    void requestCursorWindow(HistoryIO& io, std::span<const std::uint32_t> signalIds, std::uint64_t cursorMs);
+    // Priming at startup: the cursor's raw tiles, not urgent.
+    void primeStartup(HistoryIO& io, std::span<const std::uint32_t> signalIds, std::uint64_t cursorMs);
+    // Cancels in-flight tiles that do not overlap [fromMs, toMs]. Only when the
+    // transport's queue is full, so a slow link does not cancel what it could still serve.
+    void cancelLeaving(HistoryIO& io, std::uint64_t fromMs, std::uint64_t toMs);
+    // Cancels every request in flight, then forgets them (run change, close).
+    void cancelAll(HistoryIO& io);
+    // Forgets every request in flight without telling anyone (the socket is gone).
+    void abandonRequests();
+    // The live stream skipped [fromMs, toMs]: unsealed tiles there are asked again now.
+    void noteGap(std::uint64_t fromMs, std::uint64_t toMs);
+    bool owns(std::uint32_t qid) const { return inflight_.contains(qid); }
+
+    // Piece and error routing. Both return false when the qid is not in flight here
+    // (cancelled, failed, or another cache's), so the caller drops the message.
+    bool ingestPiece(const proto2::TilePiece& piece);
+    bool ingestError(std::uint32_t qid);
 
     bool sampleAt(std::uint32_t signalId, std::uint64_t tMs, double& value) const;
-    // Nearest L0 sample within slackMs (before or after). Catalog pins start at
-    // session minMs, which is often a few seconds before the first GPS fix.
+    // Nearest raw sample within slackMs of tMs.
     bool sampleNear(std::uint32_t signalId, std::uint64_t tMs, double& value,
                     std::uint64_t slackMs = 120000) const;
-    // First |value| >= minAbs in any resident tile. Used when the playhead sits
-    // on logged 0,0 before the GPS receiver has a fix.
+    // First |value| >= minAbs in any resident raw tile. Used when the playhead sits
+    // on 0,0 before a GPS fix.
     bool sampleFirstAbs(std::uint32_t signalId, double& value, double minAbs) const;
+    // Plot arrays for a window at the level that fits maxPoints pixels, with line
+    // breaks at gaps (see the gap rules in protocol-v2.md).
     PlotArrays gatherPlot(std::uint32_t signalId, std::uint64_t fromMs, std::uint64_t toMs,
                           std::uint32_t maxPoints = 0) const;
-    // L0/raw only. Never min/max/mean. Used for threshold crossings (A5).
+    // Raw values only, no breaks. Used by threshold crossings and cell pairing.
     PlotArrays gatherL0(std::uint32_t signalId, std::uint64_t fromMs, std::uint64_t toMs) const;
+    // Appends the live ring after the tile samples in dest.
     void stitchRing(PlotArrays& dest, std::span<const double> t, std::span<const double> v, std::size_t count,
                     std::size_t cap, std::size_t write, std::uint64_t fromMs, std::uint64_t toMs,
                     std::uint32_t signalId) const;
 
-    std::uint32_t prepareQuery(std::uint32_t signalId, std::uint64_t fromMs, std::uint64_t toMs,
-                               std::uint8_t guessedLevel, bool pin, bool overview);
-    void bindQuery(std::uint32_t queryId, std::uint32_t signalId, std::uint64_t fromMs, std::uint64_t toMs,
-                   std::uint8_t guessedLevel);
-
-    // Analysis-owned caches start query ids in a reserved high range so they
-    // never collide with ClientArena::tiles_ (C3). 0 keeps the live default (1).
+    // Analysis-owned caches start query ids in a reserved high range so they never
+    // collide with the arena's (0 keeps the live default, 1).
     void setQueryOrigin(std::uint32_t origin) { nextQuery_ = origin == 0 ? 1u : origin; }
     std::uint32_t nextQueryId() const { return nextQuery_; }
-    bool hasInflight(std::uint32_t queryId) const { return inflight_.contains(queryId); }
 
-    const std::string& sessionId() const { return sessionId_; }
-    const std::string& dbcHash() const { return dbcHash_; }
-    std::uint64_t sessionMinMs() const { return sessionMinMs_; }
-    std::uint64_t sessionMaxMs() const { return sessionMaxMs_; }
-    std::size_t overshootBytes() const { return overshootBytes_; }
+    std::uint64_t pump();  // persistence: restores, writes and disk deadlines
+    std::size_t residentBytes() const { return usedBytes_; }
+    std::size_t overshootBytes() const { return usedBytes_ > budget_ ? usedBytes_ - budget_ : 0; }
     std::size_t usedBytes() const { return usedBytes_; }
-    std::size_t boundBytes() const;
-    std::size_t residentBytes() const;
     std::size_t budget() const { return budget_; }
-    std::size_t tileCount() const { return tiles_.size(); }
-    std::size_t overviewRefuseCount() const { return overviewRefuseCount_; }
     void setBudget(std::size_t bytes) { budget_ = bytes == 0 ? kDefaultBudget : bytes; }
-    bool hasOverview(std::uint32_t signalId) const { return overviewSignals_.contains(signalId); }
+    std::size_t tileCount() const { return tiles_.size(); }
+    std::size_t inflightCount() const { return inflight_.size(); }
+    const Tile* find(std::uint32_t signalId, int level, std::int64_t index) const;
 
     std::size_t persistRestoredCount() const { return persistRestored_; }
-    std::size_t persistRefusedCount() const { return persistRefused_; }
-    std::size_t persistRejectedCount() const { return persistRejected_; }
     std::size_t persistWrittenCount() const { return persistWritten_; }
-    std::size_t persistDroppedCount() const { return persistDropped_; }
-    std::size_t persistPendingReads() const { return diskPending_.size(); }
+    std::size_t persistPendingReads() const { return disk_.size(); }
 
 private:
-    struct InflightQuery {
-        std::uint32_t signalId = 0;
-        std::uint64_t fromMs = 0;
-        std::uint64_t toMs = 0;
-        std::uint32_t maxPoints = 0;
-        std::uint8_t guessedLevel = 0;
-        std::uint8_t servedLevel = 255;
-        std::uint32_t expectedSeq = 0;
-        ctrl::Message::HistoryPoint prior;
-        ctrl::Message::HistoryPoint next;
-        bool pin = false;
-        bool overview = false;
+    struct InFlight {
+        TileKey key;
+        std::uint32_t filled = 0;  // samples assembled so far (the next offset)
+        bool sealed = false;
+        double startedMs = 0.0;
+        std::vector<double> t;
+        std::vector<float> rawV;
+        std::vector<float> minV;
+        std::vector<float> maxV;
+        std::vector<float> meanV;
     };
 
-    struct PendingRange {
-        std::uint32_t signalId = 0;
-        std::uint8_t level = 0;
-        std::int64_t indexFrom = 0;
-        std::int64_t indexTo = 0;
+    struct DiskRead {
         std::uint64_t deadlinePump = 0;
+        bool pending = false;
     };
 
-    struct BoundSample {
-        std::uint32_t signalId = 0;
-        std::uint64_t t = 0;
-        double v = 0;
-        std::uint64_t fromMs = 0;
-        std::uint64_t toMs = 0;
-        bool prior = true;
-    };
-
-    std::string sessionId_;
-    std::string dbcHash_;
-    std::uint64_t sessionMinMs_ = 0;
-    std::uint64_t sessionMaxMs_ = 0;
-    mutable std::uint64_t clock_ = 1;
+    TileLevels levels_;
+    std::string runId_;
+    std::int64_t rev_ = 0;
+    std::string sha_;
+    std::uint64_t minMs_ = 0;
+    std::uint64_t maxMs_ = 0;
+    std::unordered_map<std::uint32_t, double> periodMs_;
+    std::unordered_map<std::uint32_t, std::uint64_t> ringOldest_;
+    std::unordered_map<TileKey, Tile, TileKeyHash> tiles_;
+    std::unordered_map<std::uint32_t, InFlight> inflight_;
+    std::unordered_map<TileKey, DiskRead, TileKeyHash> disk_;
+    std::vector<TileKey> writeQueue_;
     std::size_t usedBytes_ = 0;
-    std::size_t overshootBytes_ = 0;
     std::size_t budget_ = kDefaultBudget;
     std::uint32_t nextQuery_ = 1;
-    double panVel_ = 0.0;
-    std::uint64_t prevFromMs_ = 0;
-    std::uint64_t prevToMs_ = 0;
-    double playSpeed_ = 1.0;
-    bool playing_ = false;
-    bool compactFetch_ = false;
-    mutable std::unordered_map<TileKey, Tile, TileKeyHash> tiles_;
-    std::unordered_map<std::uint32_t, InflightQuery> inflight_;
-    std::vector<BoundSample> bounds_;
-    std::unordered_map<std::uint32_t, std::uint64_t> ringOldest_;
-    std::unordered_set<std::uint32_t> overviewSignals_;
-    std::vector<std::uint32_t> pendingCancels_;
-    std::size_t overviewRefuseCount_ = 0;
+    mutable std::uint64_t useClock_ = 1;
+    std::uint64_t pumps_ = 0;
     TileStore* store_ = nullptr;
     bool storeResolved_ = false;
-    bool scopePushed_ = false;
-    std::uint64_t pump_ = 0;
     std::size_t persistRestored_ = 0;
-    std::size_t persistRefused_ = 0;
-    std::size_t persistRejected_ = 0;
     std::size_t persistWritten_ = 0;
-    std::size_t persistDropped_ = 0;
-    std::vector<PendingRange> diskPending_;
-    std::unordered_map<std::uint64_t, std::vector<std::pair<std::int64_t, std::int64_t>>> diskAsked_;
-    std::vector<TileKey> writeQueue_;
-    std::vector<LoadedTileRange> loadedScratch_;
-    mutable Tile* regularMru_ = nullptr;
-    mutable Tile* regularLru_ = nullptr;
-    mutable Tile* overviewMru_ = nullptr;
-    mutable Tile* overviewLru_ = nullptr;
 
+    static double nowMs();
     TileKey makeKey(std::uint32_t signalId, int level, std::int64_t index) const;
-    void evict(std::size_t roomNeeded, bool forOverview, HistoryIO* io);
-    bool enqueue(HistoryIO& client, const TileKey& key, std::uint64_t fromMs, std::uint64_t toMs,
-                 std::uint32_t maxPoints, bool pin, bool overview);
-    void dropBoundOldest();
-    void requestOverview(HistoryIO& client, std::span<const std::uint32_t> signalIds);
-    void touch(const TileKey& key) const;
-    void lruUnlink(Tile& tile) const;
-    void lruTouch(Tile& tile) const;
-    void flushCancels(HistoryIO& client);
-    void noteCancel(std::uint32_t queryId, HistoryIO* io);
-    void eraseTile(std::unordered_map<TileKey, Tile, TileKeyHash>::iterator it, HistoryIO* io);
-    void repin(std::span<const std::uint32_t> signalIds, std::uint64_t fromMs, std::uint64_t toMs, int level);
-    void accountTile(Tile& tile, std::size_t nextBytes);
-    void markEmptyRange(std::uint32_t signalId, int level, std::uint64_t fromMs, std::uint64_t toMs,
-                        std::uint32_t queryId);
-    std::uint64_t contiguousSealedEnd(std::uint32_t signalId, std::uint64_t ringOldest) const;
-
-    void pumpPersistence();
+    void touch(const Tile& tile) const;
+    void want(HistoryIO& io, std::uint32_t signalId, int level, std::int64_t index, bool urgent);
+    void cursorTiles(HistoryIO& io, std::span<const std::uint32_t> signalIds, std::uint64_t cursorMs, bool urgent);
+    bool askDisk(const TileKey& key);
     void resolveStore();
-    void resetPersistState();
-    bool overlapsLiveRing(std::uint32_t signalId, int level, std::int64_t index) const;
-    void demoteLiveOverlap(std::uint32_t signalId, std::uint64_t ringOldest);
-    void askDisk(std::uint32_t signalId, int level, std::int64_t indexFrom, std::int64_t indexTo);
-    bool diskReadPending(const TileKey& key) const;
-    void admitPersisted(const PersistedTile& p, const LoadedTileRange& range);
-    bool persistable(const Tile& tile) const;
+    void accountTile(Tile& tile);
+    void evictIfNeeded();
+    void setSettledState(Tile& tile);
+    void complete(std::uint32_t qid);
+    void failRequest(std::uint32_t qid, double now);
     void queuePersist(const TileKey& key);
-    void flushPersistWrites();
+    void admitPersisted(const PersistedTile& p);
+    std::uint64_t ringClipMs(std::uint32_t signalId) const;
 };
 
 }  // namespace photon::ui
