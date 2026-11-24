@@ -758,7 +758,7 @@ func TestTilePiecesFitTheLimit(t *testing.T) {
 	for _, level := range []int{0, 2} {
 		const n = 10000
 		var pieces [][]byte
-		send := func(piece []byte, last bool) bool { pieces = append(pieces, piece); return true }
+		send := func(piece *pieceBuf, last bool) bool { pieces = append(pieces, piece.b); return true }
 		b := newTileBuilder(tileJob{qid: 9, signal: 3, level: level}, true, send)
 		vals := make([]float64, 1)
 		if level > 0 {
@@ -791,8 +791,8 @@ func TestTilePiecesFitTheLimit(t *testing.T) {
 		}
 	}
 	var empty [][]byte
-	eb := newTileBuilder(tileJob{qid: 1, signal: 1}, false, func(piece []byte, last bool) bool {
-		empty = append(empty, piece)
+	eb := newTileBuilder(tileJob{qid: 1, signal: 1}, false, func(piece *pieceBuf, last bool) bool {
+		empty = append(empty, piece.b)
 		return true
 	})
 	if err := eb.end(); err != nil {

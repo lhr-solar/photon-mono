@@ -315,10 +315,20 @@ type v2Client struct {
 }
 
 // outMsg is one message waiting for the writer. For a binary message the writer
-// stamps the seq field of the header, so data must be a whole message.
+// stamps the seq field of the header, so data must be a whole message. buf, when
+// set, is the pool buffer data is in; the writer gives it back once the message is
+// written.
 type outMsg struct {
 	typ  wsMessageType
 	data []byte
+	buf  *pieceBuf
+}
+
+// release gives back the pool buffer of m, if it has one.
+func (m outMsg) release() {
+	if m.buf != nil {
+		m.buf.release()
+	}
 }
 
 // newV2Client wraps a connection that has passed hello. Nothing is queued yet.
@@ -394,8 +404,11 @@ func (c *v2Client) next() (outMsg, bool) {
 
 // writeLoop sends queued messages until the handler returns. Each binary message
 // gets the next seq, in the order the messages go out. A failed write means the
-// connection is gone, so it is closed, which also ends the reads.
+// connection is gone, so it is closed, which also ends the reads. A pooled buffer
+// is given back once its message is written, or once the writer stops with the
+// message still queued.
 func (c *v2Client) writeLoop() {
+	defer c.releaseQueued()
 	var seq uint32
 	for {
 		m, ok := c.next()
@@ -406,8 +419,26 @@ func (c *v2Client) writeLoop() {
 			binary.LittleEndian.PutUint32(m.data[4:8], seq)
 			seq++
 		}
-		if err := writeWS(c.conn, m.typ, m.data); err != nil {
+		err := writeWS(c.conn, m.typ, m.data)
+		m.release()
+		if err != nil {
 			_ = c.conn.CloseNow()
+			return
+		}
+	}
+}
+
+// releaseQueued gives back the pool buffers of the live and bulk messages still
+// queued. Messages queued after this may keep their buffers; they are then left to
+// the garbage collector.
+func (c *v2Client) releaseQueued() {
+	for {
+		select {
+		case m := <-c.live:
+			m.release()
+		case m := <-c.bulk:
+			m.release()
+		default:
 			return
 		}
 	}

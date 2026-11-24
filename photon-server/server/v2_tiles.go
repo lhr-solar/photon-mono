@@ -179,8 +179,10 @@ func (h *v2Hub) tileTarget(signal int64, level int, index int64) (tileSignal, st
 }
 
 // tileSend hands one encoded piece of a tile on. last is set for the tile's last
-// piece. It returns false when the piece is not sent, which ends the tile.
-type tileSend func(piece []byte, last bool) bool
+// piece. The send owns the piece: it queues it, so the writer gives it back, or it
+// gives it back itself. It returns false when the piece is not sent, which ends the
+// tile.
+type tileSend func(piece *pieceBuf, last bool) bool
 
 // errTileStopped means a piece was not sent: the request was cancelled, or the
 // client is gone.
@@ -304,7 +306,9 @@ func (b *tileBuilder) flush(last bool) error {
 		flags |= v2TileLast
 	}
 	n := len(b.cur.tMS)
-	if !b.send(encodeTilePiece(b.qid, b.signal, flags, uint32(b.off), &b.cur), last) {
+	pb := tilePieces.get()
+	pb.b = appendTilePiece(pb.b, b.qid, b.signal, flags, uint32(b.off), &b.cur)
+	if !b.send(pb, last) {
 		return errTileStopped
 	}
 	b.off += n
@@ -509,14 +513,14 @@ func (c *v2Client) serveTile(ctx context.Context, me *tileRequest, job tileJob) 
 	var kept [][]byte
 	keptBytes := 0
 	stalled := false // the client took no piece for tileSendStall
-	send := func(piece []byte, last bool) bool {
+	send := func(piece *pieceBuf, last bool) bool {
 		if cacheable {
-			if keptBytes+len(piece) > tileCacheMax {
+			if keptBytes+len(piece.b) > tileCacheMax {
 				cacheable, kept = false, nil
 			} else {
-				keptBytes += len(piece)
+				keptBytes += len(piece.b)
 				// The cache keeps its own copies: the writer stamps seq into the piece it sends.
-				kept = append(kept, append([]byte(nil), piece...))
+				kept = append(kept, append([]byte(nil), piece.b...))
 			}
 		}
 		if last {
@@ -528,8 +532,11 @@ func (c *v2Client) serveTile(ctx context.Context, me *tileRequest, job tileJob) 
 			h.tilesServed.Add(1)
 			finish()
 		}
-		ok, timedOut := c.enqueueTileWithin(ctx, outMsg{typ: wsBinary, data: piece}, tileSendStall)
+		ok, timedOut := c.enqueueTileWithin(ctx, outMsg{typ: wsBinary, data: piece.b, buf: piece}, tileSendStall)
 		stalled = timedOut
+		if !ok {
+			piece.release() // not queued, so no writer will give it back
+		}
 		return ok
 	}
 	err := h.streamTile(ctx, job, sealed, send)
@@ -559,9 +566,11 @@ func (c *v2Client) sendCached(ctx context.Context, qid uint32, msgs [][]byte, be
 		if i == len(msgs)-1 {
 			beforeLast()
 		}
-		out := append([]byte(nil), m...)
-		binary.LittleEndian.PutUint32(out[v2HeaderSize:], qid)
-		if !c.enqueueTile(ctx, outMsg{typ: wsBinary, data: out}) {
+		pb := tilePieces.get()
+		pb.b = append(pb.b, m...)
+		binary.LittleEndian.PutUint32(pb.b[v2HeaderSize:], qid)
+		if !c.enqueueTile(ctx, outMsg{typ: wsBinary, data: pb.b, buf: pb}) {
+			pb.release()
 			return
 		}
 	}

@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"sync"
+	"sync/atomic"
 )
 
 // Binary messages of protocol v2 (photon-next/docs/protocol-v2.md). Every binary
@@ -119,14 +121,6 @@ type tileData struct {
 	mean  []float64 // level above 0: mean
 }
 
-// values returns the value arrays that follow the times on the wire.
-func (t *tileData) values() [][]float64 {
-	if t.level == 0 {
-		return [][]float64{t.raw}
-	}
-	return [][]float64{t.lo, t.hi, t.mean}
-}
-
 // tilePieceSamples is how many samples a Tile piece of level holds at most: as many
 // as fit in v2TilePieceMax bytes.
 func tilePieceSamples(level int) int {
@@ -137,14 +131,16 @@ func tilePieceSamples(level int) int {
 	return (v2TilePieceMax - v2HeaderSize - v2TileFixed) / (8 * cols)
 }
 
-// encodeTilePiece returns the Tile message with the samples of t. They are the
-// samples of the tile from off on. The message has seq 0: the writer stamps it when
-// it sends it.
-func encodeTilePiece(qid, signal uint32, flags byte, off uint32, t *tileData) []byte {
-	arrays := append([][]float64{t.tMS}, t.values()...)
+// appendTilePiece appends the Tile message with the samples of t to b, and returns
+// it. The samples are those of the tile from off on. The message has seq 0: the
+// writer stamps it when it sends it. Once b has room, it does not allocate.
+func appendTilePiece(b []byte, qid, signal uint32, flags byte, off uint32, t *tileData) []byte {
 	n := len(t.tMS)
-	size := v2HeaderSize + v2TileFixed + 8*n*len(arrays)
-	b := make([]byte, 0, size)
+	cols := 4 // t_ms, min, max, mean
+	if t.level == 0 {
+		cols = 2 // t_ms, raw
+	}
+	size := v2HeaderSize + v2TileFixed + 8*n*cols
 	b = appendV2Header(b, v2MsgTile, size-v2HeaderSize)
 	b = binary.LittleEndian.AppendUint32(b, qid)
 	b = binary.LittleEndian.AppendUint32(b, signal)
@@ -152,13 +148,69 @@ func encodeTilePiece(qid, signal uint32, flags byte, off uint32, t *tileData) []
 	b = binary.LittleEndian.AppendUint64(b, uint64(t.index))
 	b = binary.LittleEndian.AppendUint32(b, off)
 	b = binary.LittleEndian.AppendUint32(b, uint32(n))
-	for _, a := range arrays {
-		for _, v := range a {
-			b = binary.LittleEndian.AppendUint64(b, math.Float64bits(v))
-		}
+	b = appendFloats(b, t.tMS)
+	if t.level == 0 {
+		return appendFloats(b, t.raw)
+	}
+	b = appendFloats(b, t.lo)
+	b = appendFloats(b, t.hi)
+	return appendFloats(b, t.mean)
+}
+
+// appendFloats appends the little-endian bits of vs to b.
+func appendFloats(b []byte, vs []float64) []byte {
+	for _, v := range vs {
+		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(v))
 	}
 	return b
 }
+
+// pieceBuf is a message buffer from a piecePool. Its bytes are one whole message.
+// Whoever ends up with the message gives the buffer back with release, once the
+// bytes are no longer needed.
+type pieceBuf struct {
+	b    []byte
+	pool *piecePool
+}
+
+// release gives the buffer back to its pool. The buffer must not be used after.
+func (pb *pieceBuf) release() {
+	pb.pool.puts.Add(1)
+	pb.pool.pool.Put(pb)
+}
+
+// piecePool holds the message buffers of one size class, so that a tile piece or a
+// video piece is not allocated for each message. gets and puts count the buffers
+// taken and given back, for the tests.
+type piecePool struct {
+	pool       sync.Pool
+	gets, puts atomic.Int64
+}
+
+// newPiecePool returns a pool of buffers that start with room for size bytes.
+func newPiecePool(size int) *piecePool {
+	p := &piecePool{}
+	p.pool.New = func() any { return &pieceBuf{b: make([]byte, 0, size), pool: p} }
+	return p
+}
+
+// get takes a buffer, empty, from the pool.
+func (p *piecePool) get() *pieceBuf {
+	p.gets.Add(1)
+	pb := p.pool.Get().(*pieceBuf)
+	pb.b = pb.b[:0]
+	return pb
+}
+
+// tilePieces is the pool of Tile piece buffers, each big enough for a whole piece.
+var tilePieces = newPiecePool(v2TilePieceMax)
+
+// videoPieceBufs is the pool of VideoChunk buffers, each big enough for a whole
+// chunk. TODO(video): nothing takes these yet. videoPieces builds its chunks by
+// allocation, and v2_video.go queues them without a buffer, so the writer cannot
+// give them back. Build the chunks from this pool and set outMsg.buf in the video
+// sender to adopt it.
+var videoPieceBufs = newPiecePool(v2HeaderSize + v2VideoFixed + v2VideoPieceMax)
 
 var errV2Message = errors.New("protocol v2: malformed binary message")
 
