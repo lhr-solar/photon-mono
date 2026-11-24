@@ -112,7 +112,7 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
 | `tile_error` | S → C | `qid`, `message` |
 | `video_subscribe` | C → S | `mode`: `live` / `replay` / `off`, `from_ms` (replay) |
 | `video_seek` | C → S | `qid`, `t_ms` |
-| `video_status` | S → C | `mode`, `t_ms`, `clock` (provenance) |
+| `video_status` | S → C | `mode`, `t_ms`, `clock` (provenance), optional `qid` (after a seek), optional `gap` `{from_ms, to_ms, reason}`: `none` (no video recorded then; show "No video recorded HH:MM:SS–HH:MM:SS"), `archived` (stored elsewhere, not on the server), `stale` (live: camera silent since `from_ms`, `to_ms` 0). Replay keeps following the timeline through a gap; a plain status follows when video flows again |
 | `ping` / `pong` | both | `t_ms`; every 1 s, socket closed after 5 s silent |
 | `error` | S → C | `code`, `message` |
 | `downlink` | C → S | **reserved**: a payload for the car, sent back over its :6100 socket |
