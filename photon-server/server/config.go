@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -44,8 +45,15 @@ const (
 	// DefaultIngestLatency is half the car's own 20 ms batching (FLUSH_INTERVAL_US).
 	DefaultIngestLatency = 10 * time.Millisecond
 	// DefaultIngestStall is a choice: how long the decoder may stall (disk
-	// append, GC) before readers stop and TCP pushes back on the car.
-	DefaultIngestStall = 10 * time.Second
+	// append, GC) before readers stop and TCP pushes back on the car. At 10 ms
+	// latency it gives 300 buffers of 16 KiB, about 4.7 MiB.
+	DefaultIngestStall = 3 * time.Second
+
+	// DefaultMemLimit is the Go heap's soft limit (debug.SetMemoryLimit), sized
+	// for a server with about 1 GB of RAM: photon-server needs 50 to 70 MB.
+	DefaultMemLimit = 96 << 20
+	// MinMemLimit is the smallest limit that is not 0 (off).
+	MinMemLimit = 16 << 20
 	// DefaultLiveSeconds is how far back the live ring reaches. It covers
 	// InfluxDB's ~0.5 s write delay, so a client that joins live loses no frames
 	// to that delay, plus slack for a client that reads slowly. A choice: a
@@ -93,6 +101,7 @@ type Config struct {
 	InfluxQueries    int           // history queries to InfluxDB in flight at once, 1 to 64
 	CAN              CANConfig
 	Ingest           poolSizing    // sizes the ingest buffer pool
+	MemLimit         int64         // Go heap soft limit in bytes (debug.SetMemoryLimit); 0 = off
 	LiveSeconds      time.Duration // how far back the live ring for protocol v2 clients reaches
 	Archive          bool          // compress sealed chunks to .segz files in the background
 	ArchiveRemote    string        // rclone destination for the .segz files, e.g. sharepoint:photon/segments; empty = no upload
@@ -253,6 +262,9 @@ func (c *Config) Validate() error {
 	if c.LiveSeconds <= 0 {
 		return fmt.Errorf("invalid live window: %s (must be above zero)", c.LiveSeconds)
 	}
+	if c.MemLimit < 0 || (c.MemLimit > 0 && c.MemLimit < MinMemLimit) {
+		return fmt.Errorf("invalid mem limit: %d bytes (must be 0 for off, or at least %d)", c.MemLimit, MinMemLimit)
+	}
 	if c.CAN.Decode && strings.TrimSpace(c.CAN.DBCDir) == "" {
 		return fmt.Errorf("CAN decoding is on but no DBC directory is set")
 	}
@@ -284,6 +296,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		InfluxQueries:    DefaultInfluxQueries,
 		CAN:              DefaultCANConfig(),
 		Ingest:           poolSizing{Rate: DefaultIngestRate, Latency: DefaultIngestLatency, Stall: DefaultIngestStall},
+		MemLimit:         DefaultMemLimit,
 		LiveSeconds:      DefaultLiveSeconds,
 		Archive:          DefaultArchive,
 		Rclone:           DefaultRclone,
@@ -412,6 +425,13 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 			cfg.LiveSeconds = d
 		}
 	}
+	if v := getenvFirst(getenv, "PHOTON_MEM_LIMIT"); v != "" {
+		n, err := parseByteSize(v)
+		if err != nil {
+			return nil, fmt.Errorf("PHOTON_MEM_LIMIT: %w", err)
+		}
+		cfg.MemLimit = n
+	}
 	if v := getenvFirst(getenv, "PHOTON_ARCHIVE"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
@@ -454,6 +474,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	var ingestRateFlag int
 	var ingestLatencyFlag, ingestStallFlag time.Duration
 	var liveSecondsFlag time.Duration
+	memLimitFlag := byteSizeFlag(cfg.MemLimit)
 	var archiveFlag bool
 	var archiveRemoteFlag, rcloneFlag string
 
@@ -494,6 +515,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	fs.DurationVar(&ingestLatencyFlag, "ingest-latency", cfg.Ingest.Latency, "hand a buffer to the decoder at most this long after its first batch")
 	fs.DurationVar(&ingestStallFlag, "ingest-stall", cfg.Ingest.Stall, "decoder stall the ingest pool absorbs before TCP pushes back")
 	fs.DurationVar(&liveSecondsFlag, "live-seconds", cfg.LiveSeconds, "how far back the live ring for protocol v2 clients reaches; a client that falls further behind gets a gap")
+	fs.Var(&memLimitFlag, "mem-limit", "Go heap soft limit, e.g. 96MiB; 0 = off (env PHOTON_MEM_LIMIT)")
 	fs.BoolVar(&archiveFlag, "archive", cfg.Archive, "compress sealed chunks to .segz files in the background (env PHOTON_ARCHIVE)")
 	fs.StringVar(&archiveRemoteFlag, "archive-remote", cfg.ArchiveRemote, "rclone destination for the compressed chunks, e.g. sharepoint:photon/segments; empty = no upload (env PHOTON_ARCHIVE_REMOTE)")
 	fs.StringVar(&rcloneFlag, "rclone", cfg.Rclone, "rclone program used to upload compressed chunks (env PHOTON_RCLONE)")
@@ -531,6 +553,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 		fmt.Fprintf(output, "  -ingest-latency duration     max wait before a buffer goes to the decoder (default %s, env: PHOTON_INGEST_LATENCY)\n", DefaultIngestLatency)
 		fmt.Fprintf(output, "  -ingest-stall duration       decoder stall the pool absorbs (default %s, env: PHOTON_INGEST_STALL)\n", DefaultIngestStall)
 		fmt.Fprintf(output, "  -live-seconds duration       live ring window for protocol v2 clients (default %s, env: PHOTON_LIVE_SECONDS)\n", DefaultLiveSeconds)
+		fmt.Fprintf(output, "  -mem-limit size              Go heap soft limit, e.g. 96MiB; 0 = off (default 96MiB, env: PHOTON_MEM_LIMIT)\n")
 		fmt.Fprintf(output, "  -archive                     compress sealed chunks to .segz in the background (default %t, env: PHOTON_ARCHIVE)\n", true)
 		fmt.Fprintf(output, "  -archive-remote string       rclone destination for compressed chunks, empty = no upload (env: PHOTON_ARCHIVE_REMOTE)\n")
 		fmt.Fprintf(output, "  -rclone string               rclone program for uploads (default %q, env: PHOTON_RCLONE)\n", DefaultRclone)
@@ -568,6 +591,7 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	cfg.InfluxQueries = influxQueriesFlag
 	cfg.Ingest = poolSizing{Rate: ingestRateFlag, Latency: ingestLatencyFlag, Stall: ingestStallFlag}
 	cfg.LiveSeconds = liveSecondsFlag
+	cfg.MemLimit = int64(memLimitFlag)
 	cfg.Archive = archiveFlag
 	cfg.ArchiveRemote = archiveRemoteFlag
 	cfg.Rclone = rcloneFlag
@@ -577,6 +601,50 @@ func ParseConfigWithEnv(getenv func(string) string, args []string, output io.Wri
 	}
 
 	return cfg, nil
+}
+
+// byteSizeFlag is a flag whose value is a size such as 96MiB, held in bytes.
+type byteSizeFlag int64
+
+func (b *byteSizeFlag) String() string {
+	if b == nil {
+		return "0"
+	}
+	return strconv.FormatInt(int64(*b), 10)
+}
+
+func (b *byteSizeFlag) Set(v string) error {
+	n, err := parseByteSize(v)
+	if err != nil {
+		return err
+	}
+	*b = byteSizeFlag(n)
+	return nil
+}
+
+// parseByteSize reads a size of bytes: a plain number, or one with a suffix of
+// B, K, KiB, M, MiB, G or GiB. The units are binary, so 1 MiB is 1<<20 bytes.
+func parseByteSize(s string) (int64, error) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	units := []struct {
+		suffix string
+		mult   int64
+	}{
+		{"gib", 1 << 30}, {"mib", 1 << 20}, {"kib", 1 << 10},
+		{"g", 1 << 30}, {"m", 1 << 20}, {"k", 1 << 10}, {"b", 1},
+	}
+	mult := int64(1)
+	for _, u := range units {
+		if strings.HasSuffix(t, u.suffix) {
+			t, mult = strings.TrimSpace(strings.TrimSuffix(t, u.suffix)), u.mult
+			break
+		}
+	}
+	n, err := strconv.ParseInt(t, 10, 64)
+	if err != nil || n < 0 || n > math.MaxInt64/mult {
+		return 0, fmt.Errorf("%q is not a size like 96MiB, or 0 for off", s)
+	}
+	return n * mult, nil
 }
 
 func getenvFirst(getenv func(string) string, keys ...string) string {

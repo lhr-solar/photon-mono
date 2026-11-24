@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,14 @@ import (
 // influxWriter is the InfluxDB writer, or nil when InfluxDB writes are off. The
 // metadata reads it.
 var influxWriter atomic.Pointer[dbWriter]
+
+// applyMemLimit sets the Go runtime's soft heap limit, when limit is above zero.
+// The collector works harder as the heap nears it, so the process stays near it.
+func applyMemLimit(limit int64) {
+	if limit > 0 {
+		debug.SetMemoryLimit(limit)
+	}
+}
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -34,6 +43,12 @@ func main() {
 			os.Exit(0)
 		}
 		log.Fatalf("[photon-server] Configuration error: %v", err)
+	}
+	applyMemLimit(cfg.MemLimit)
+	if cfg.MemLimit > 0 {
+		log.Printf("[photon-server] Go memory limit %d MiB (-mem-limit)", cfg.MemLimit>>20)
+	} else {
+		log.Printf("[photon-server] Go memory limit off (-mem-limit 0)")
 	}
 
 	startedAt := time.Now()

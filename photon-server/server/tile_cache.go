@@ -6,8 +6,9 @@ import (
 )
 
 const (
-	// tileCacheMax caps the bytes of cached tiles. A user decision: 8 to 16 MB.
-	tileCacheMax = 16 << 20
+	// tileCacheMax caps the bytes of cached tiles: 8 MiB, half the old budget, to
+	// fit the ~1 GB server (see -mem-limit).
+	tileCacheMax = 8 << 20
 	// tileCacheWindowMS is how long a tile stays cached after it ends: the live
 	// view window, about 10 minutes.
 	tileCacheWindowMS = 10 * 60 * 1000

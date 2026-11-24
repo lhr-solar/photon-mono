@@ -26,12 +26,15 @@ func testBatch(count int, tsMS uint64) []byte {
 
 func TestPoolSizingFromInputs(t *testing.T) {
 	s := poolSizing{Rate: DefaultIngestRate, Latency: DefaultIngestLatency, Stall: DefaultIngestStall}
-	// 1.16 MB/s x 10 ms = 11.6 KB -> 16 KiB; 10 s / 10 ms = 1000 buffers.
+	// 1.16 MB/s x 10 ms = 11.6 KB -> 16 KiB; 3 s / 10 ms = 300 buffers.
 	if got := s.bufferSize(); got != 16<<10 {
 		t.Fatalf("bufferSize = %d, want 16 KiB", got)
 	}
-	if got := s.count(); got != 1000 {
-		t.Fatalf("count = %d, want 1000", got)
+	if got := s.count(); got != 300 {
+		t.Fatalf("count = %d, want 300", got)
+	}
+	if DefaultIngestStall != 3*time.Second {
+		t.Fatalf("DefaultIngestStall = %s, want 3s", DefaultIngestStall)
 	}
 	tiny := poolSizing{Rate: 1, Latency: time.Millisecond, Stall: time.Millisecond}
 	if got := tiny.bufferSize(); got < canpHeaderSize+canpFrameSize {
