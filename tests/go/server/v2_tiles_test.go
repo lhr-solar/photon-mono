@@ -38,7 +38,7 @@ func newTileHubOn(t *testing.T, fake *fakeQueries, live func() string, cat *dbc.
 func newTileHubURL(t *testing.T, url string, live func() string, cat *dbc.Catalog) *v2Hub {
 	t.Helper()
 	q := newInfluxQuerier(url, "photon_test", "", 6)
-	h := newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), live, newLiveRing(liveRingMinFrames), q)
+	h := newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), live, newLiveRing(liveRingMinFrames), q, nil)
 	h.SetCatalog(cat)
 	return h
 }
@@ -549,7 +549,7 @@ func TestTileRequestMalformedIsBadRequest(t *testing.T) {
 // Without a catalog there are no signals, so a tile request is refused.
 func TestTileWithoutCatalogIsTileError(t *testing.T) {
 	h := newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), fixedLive(tileTestRun), newLiveRing(liveRingMinFrames),
-		newInfluxQuerier("http://127.0.0.1:1", "photon_test", "", 1))
+		newInfluxQuerier("http://127.0.0.1:1", "photon_test", "", 1), nil)
 	conn := dialV2(t, serveHub(t, h, false), nil)
 	sendV2(t, conn, hello(2, "secret"))
 	var ack helloAck

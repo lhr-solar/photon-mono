@@ -221,7 +221,7 @@ func main() {
 	if !strings.EqualFold(cfg.InfluxURL, "off") {
 		querier = newInfluxQuerier(cfg.InfluxURL, cfg.InfluxDB, cfg.InfluxToken, cfg.InfluxQueries)
 	}
-	hub := newV2Hub(cfg, gate, liveRun, ring, querier)
+	hub := newV2Hub(cfg, gate, liveRun, ring, querier, videoStore)
 	v2Current.Store(hub)
 
 	decoder := startCANDecoder(cfg.CAN, session)

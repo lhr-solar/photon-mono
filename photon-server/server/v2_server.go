@@ -45,6 +45,11 @@ type v2Hub struct {
 	tilesServed atomic.Uint64   // tile requests answered
 	tileStalls  atomic.Uint64   // streaming tiles stopped because the client read nothing
 
+	video       *VideoStore   // the video clients read; nil when there is none
+	videoFrames atomic.Uint64 // video frames queued for clients
+	videoBytes  atomic.Uint64 // payload bytes of those frames
+	videoSkips  atomic.Uint64 // live video skips: a client fell behind or took no piece for v2VideoStall
+
 	helloTimeout time.Duration
 	idleTimeout  time.Duration
 
@@ -66,14 +71,16 @@ type v2Hub struct {
 // Cloudflare Access is checked only when both cfg.CFTeam and cfg.CFAud are set.
 // liveRun gives the frame session ID for hello_ack, or "" when there is none; nil
 // means "". ring is the live frame ring the clients read; it must not be nil.
-// querier answers the history requests; nil means history is off.
-func newV2Hub(cfg *Config, gate *ClientGate, liveRun func() string, ring *liveRing, querier *influxQuerier) *v2Hub {
+// querier answers the history requests; nil means history is off. video is the
+// store the clients' video comes from; nil means there is no video.
+func newV2Hub(cfg *Config, gate *ClientGate, liveRun func() string, ring *liveRing, querier *influxQuerier, video *VideoStore) *v2Hub {
 	h := &v2Hub{
 		gate:         gate,
 		webDir:       cfg.WebDir,
 		liveRun:      liveRun,
 		ring:         ring,
 		querier:      querier,
+		video:        video,
 		tiles:        newTileCache(),
 		helloTimeout: v2HelloTimeout,
 		idleTimeout:  v2IdleTimeout,
@@ -231,6 +238,10 @@ func (h *v2Hub) reject(conn *wsConn, ip, reason string) {
 func (h *v2Hub) register(c *v2Client, user string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	features := []string{"catalog", "live", "runs", "tiles"}
+	if h.video != nil {
+		features = append(features, "video")
+	}
 	c.enqueue(encodeV2(v2HelloAck{
 		Type:         "hello_ack",
 		Protocol:     v2Protocol,
@@ -240,7 +251,7 @@ func (h *v2Hub) register(c *v2Client, user string) {
 		CatalogSHA:   h.catalogSHA,
 		LiveRun:      h.liveRun(),
 		Levels:       tileLevelMS,
-		Features:     []string{"catalog", "live", "runs", "tiles"},
+		Features:     features,
 	}))
 	if h.catalog != nil {
 		c.enqueue(h.catalog)
@@ -296,6 +307,9 @@ type v2Client struct {
 
 	tileMu sync.Mutex
 	tiles  map[uint32]*tileRequest // tile requests in flight, by qid
+
+	videoMu sync.Mutex   // guards vid
+	vid     *videoPusher // the client's video pusher, or nil
 }
 
 // outMsg is one message waiting for the writer. For a binary message the writer
@@ -437,6 +451,10 @@ func (c *v2Client) handle(typ wsMessageType, data []byte) {
 		c.startTile(data)
 	case "tile_cancel":
 		c.cancelTile(data)
+	case "video_subscribe":
+		c.subscribeVideo(data)
+	case "video_seek":
+		c.seekVideo(data)
 	case "":
 		c.enqueueError("unknown_type", "message has no type")
 	default:

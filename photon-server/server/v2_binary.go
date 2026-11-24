@@ -16,6 +16,7 @@ const (
 	v2MsgLiveSamples = 0x20
 	v2MsgGap         = 0x21
 	v2MsgTile        = 0x22
+	v2MsgVideoChunk  = 0x23
 
 	// v2LiveSamplesMax is the most records in one LiveSamples message: 64 KiB of them.
 	v2LiveSamplesMax = 4096
@@ -207,6 +208,75 @@ func decodeGap(b []byte) (fromNS, toNS int64, err error) {
 		return 0, 0, errV2Message
 	}
 	return int64(binary.LittleEndian.Uint64(b[12:20])), int64(binary.LittleEndian.Uint64(b[20:28])), nil
+}
+
+// VideoChunk flags beyond the keyframe and config bits, which are VideoFlagKeyframe
+// (bit 0) and VideoFlagConfig (bit 1) as the store has them. Replay marks the video
+// a video_subscribe replay or video_seek asked for.
+const (
+	v2VideoFirst    = 1 << 2   // the first piece of a frame
+	v2VideoLast     = 1 << 3   // the last piece of a frame
+	v2VideoReplay   = 1 << 4   // replayed video, not live
+	v2VideoPieceMax = 16 << 10 // payload bytes in one VideoChunk, at most
+	v2VideoFixed    = 16       // the VideoChunk payload before its bytes: t_ms to reserved
+)
+
+// videoChunk is one piece of a frame as it goes on the wire.
+type videoChunk struct {
+	TMS     uint64 // Unix ms of the frame
+	Frame   uint32 // the store's sequence number of the frame; 0 for a config NAL sent from the store's latest copy
+	Flags   uint8
+	Stream  uint8  // camera index
+	Payload []byte // this piece of the frame's Annex-B bytes
+}
+
+// encodeVideoChunk returns the VideoChunk message for ch. It has seq 0: the writer
+// stamps it when it sends the message.
+func encodeVideoChunk(ch videoChunk) []byte {
+	size := v2HeaderSize + v2VideoFixed + len(ch.Payload)
+	b := make([]byte, 0, size)
+	b = appendV2Header(b, v2MsgVideoChunk, size-v2HeaderSize)
+	b = binary.LittleEndian.AppendUint64(b, ch.TMS)
+	b = binary.LittleEndian.AppendUint32(b, ch.Frame)
+	b = append(b, ch.Flags, ch.Stream, 0, 0) // flags, stream, reserved
+	return append(b, ch.Payload...)
+}
+
+// decodeVideoChunk reads a VideoChunk message back into its piece. The payload is a copy.
+func decodeVideoChunk(b []byte) (videoChunk, error) {
+	h, err := decodeV2Header(b)
+	if err != nil || h.Type != v2MsgVideoChunk || h.Len < v2VideoFixed {
+		return videoChunk{}, errV2Message
+	}
+	p := b[v2HeaderSize:]
+	return videoChunk{
+		TMS:     binary.LittleEndian.Uint64(p[0:8]),
+		Frame:   binary.LittleEndian.Uint32(p[8:12]),
+		Flags:   p[12],
+		Stream:  p[13],
+		Payload: append([]byte(nil), p[v2VideoFixed:]...),
+	}, nil
+}
+
+// videoPieces cuts one frame into VideoChunk messages of at most v2VideoPieceMax
+// payload bytes each. flags holds the frame's own bits; the first and last bits are
+// set here, so a frame that fits is one piece with both. Each message has seq 0.
+func videoPieces(tms uint64, frame uint32, flags uint8, payload []byte) [][]byte {
+	n := max(1, (len(payload)+v2VideoPieceMax-1)/v2VideoPieceMax)
+	pieces := make([][]byte, 0, n)
+	for i := range n {
+		lo := min(i*v2VideoPieceMax, len(payload))
+		hi := min(lo+v2VideoPieceMax, len(payload))
+		f := flags
+		if i == 0 {
+			f |= v2VideoFirst
+		}
+		if i == n-1 {
+			f |= v2VideoLast
+		}
+		pieces = append(pieces, encodeVideoChunk(videoChunk{TMS: tms, Frame: frame, Flags: f, Payload: payload[lo:hi]}))
+	}
+	return pieces
 }
 
 // v2Tile is one Tile message as the tests read it. Raw is set for level 0; Min,

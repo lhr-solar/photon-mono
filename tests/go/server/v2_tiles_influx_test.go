@@ -138,7 +138,7 @@ func TestHistoryFromRealInfluxDB(t *testing.T) {
 	}
 
 	h := newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), func() string { return "" },
-		newLiveRing(liveRingMinFrames), newInfluxQuerier(url, db, "", 4))
+		newLiveRing(liveRingMinFrames), newInfluxQuerier(url, db, "", 4), nil)
 	h.SetCatalog(cat)
 	conn := tileConn(t, h)
 

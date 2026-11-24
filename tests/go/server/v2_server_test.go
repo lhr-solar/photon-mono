@@ -32,7 +32,7 @@ func loadTestCatalog(t *testing.T) *dbc.Catalog {
 // "run-test".
 func newTestHub(t *testing.T) *v2Hub {
 	t.Helper()
-	return newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), func() string { return "run-test" }, newLiveRing(liveRingMinFrames), nil)
+	return newV2Hub(&Config{Password: "secret"}, NewClientGate("secret"), func() string { return "run-test" }, newLiveRing(liveRingMinFrames), nil, nil)
 }
 
 // serveHub serves h on a test server and returns the WebSocket URL of /v2.
@@ -313,7 +313,7 @@ func TestV2UnknownTypeGetsError(t *testing.T) {
 	var ack helloAck
 	readInto(t, conn, &ack)
 
-	sendV2(t, conn, map[string]any{"type": "video_subscribe"})
+	sendV2(t, conn, map[string]any{"type": "no_such_type"})
 	var e struct {
 		Type string `json:"type"`
 		Code string `json:"code"`

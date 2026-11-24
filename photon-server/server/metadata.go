@@ -113,6 +113,11 @@ type V2Metadata struct {
 	TileCacheBytes        int64  `json:"tile_cache_bytes"`         // bytes of tiles in the cache
 	InfluxQueriesInFlight int    `json:"influx_queries_in_flight"` // history queries running now
 	InfluxQueryErrors     uint64 `json:"influx_query_errors"`      // history queries that failed
+
+	VideoClients int    `json:"video_clients"` // clients with video running now
+	VideoFrames  uint64 `json:"video_frames"`  // video frames queued for clients, config included
+	VideoBytes   uint64 `json:"video_bytes"`   // payload bytes of those frames
+	VideoSkips   uint64 `json:"video_skips"`   // live video skips: a client fell behind or took no piece for 2 s
 }
 
 // v2Metadata reads the protocol v2 counts; h is nil when v2 is not running.
@@ -121,10 +126,13 @@ func v2Metadata(h *v2Hub) V2Metadata {
 		return V2Metadata{}
 	}
 	h.mu.Lock()
-	clients, subscribers := len(h.clients), 0
+	clients, subscribers, videoClients := len(h.clients), 0, 0
 	for c := range h.clients {
 		if sub := c.sub.Load(); sub != nil && sub.any {
 			subscribers++
+		}
+		if c.videoStreaming() {
+			videoClients++
 		}
 	}
 	h.mu.Unlock()
@@ -141,6 +149,10 @@ func v2Metadata(h *v2Hub) V2Metadata {
 		LiveSamplesSent: h.liveSamples.Load(),
 		TilesServed:     h.tilesServed.Load(),
 		TileStalls:      h.tileStalls.Load(),
+		VideoClients:    videoClients,
+		VideoFrames:     h.videoFrames.Load(),
+		VideoBytes:      h.videoBytes.Load(),
+		VideoSkips:      h.videoSkips.Load(),
 	}
 	meta.TileCacheBytes, meta.TileCacheHits = h.tiles.stats()
 	if h.querier != nil {
