@@ -108,7 +108,7 @@ type archiver struct {
 	remote string // rclone destination; empty means compress only
 	now    func() time.Time
 
-	worker  *chunkzWorker    // made when a chunk is to be compressed, freed when idle
+	worker  *chunkzWorker    // made for the first chunk to compress, kept until Stop
 	skipped map[string]bool  // .seg paths given up on until restart
 	removal map[*chunk]int64 // .seg files still to remove, with their size
 	stale   map[string]bool  // runs whose manifest did not reach the remote
@@ -176,9 +176,9 @@ func (a *archiver) run(ctx context.Context) {
 		if a.step(ctx) {
 			continue
 		}
-		// Nothing to do: give back the encoder's ~20-30 MiB until the next chunk is
-		// sealed, so the server's memory stays flat between chunks.
-		a.close()
+		// Nothing to do. The encoder stays allocated (~20-30 MiB): the server's
+		// memory is paid for anyway, and making it again per chunk costs a cold
+		// start each time (user decision 2026-11-23).
 		t := time.NewTimer(archivePoll)
 		select {
 		case <-ctx.Done():
@@ -189,7 +189,7 @@ func (a *archiver) run(ctx context.Context) {
 }
 
 // close frees the encoder and decoder, when there are any. The archiver calls it
-// when it is idle and when it stops.
+// when it stops.
 func (a *archiver) close() {
 	if a.worker != nil {
 		a.worker.close()
