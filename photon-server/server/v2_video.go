@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 )
@@ -52,10 +53,20 @@ type videoPusher struct {
 	exited chan struct{} // closed when the pusher has returned
 
 	mu   sync.Mutex
-	mode string // videoOff, videoLive or videoReplay
-	tMS  uint64 // time of the last frame queued
-	qid  uint32 // the qid of the last video_seek
-	echo bool   // qid has not been echoed in a status yet
+	mode string      // videoOff, videoLive or videoReplay
+	tMS  uint64      // time of the last frame queued
+	qid  uint32      // the qid of the last video_seek
+	echo bool        // qid has not been echoed in a status yet
+	gap  *v2VideoGap // the gap the statuses report, nil when there is none
+}
+
+// v2VideoGap is the span a video_status reports with no video: from_ms to to_ms,
+// and why. reason is "none" (nothing was recorded), "archived" (the segment is
+// stored elsewhere) or "stale" (live: the camera has been silent since from_ms).
+type v2VideoGap struct {
+	FromMS uint64 `json:"from_ms"`
+	ToMS   uint64 `json:"to_ms"`
+	Reason string `json:"reason"`
 }
 
 // newVideoPusher returns a pusher with no command yet.
@@ -91,11 +102,12 @@ func (p *videoPusher) getMode() string {
 
 // v2VideoStatus is the video_status message.
 type v2VideoStatus struct {
-	Type  string  `json:"type"`
-	Mode  string  `json:"mode"`
-	TMS   uint64  `json:"t_ms"`
-	Clock string  `json:"clock"`
-	QID   *uint32 `json:"qid,omitempty"`
+	Type  string      `json:"type"`
+	Mode  string      `json:"mode"`
+	TMS   uint64      `json:"t_ms"`
+	Clock string      `json:"clock"`
+	QID   *uint32     `json:"qid,omitempty"`
+	Gap   *v2VideoGap `json:"gap,omitempty"`
 }
 
 // subscribeVideo handles video_subscribe: live, replay from from_ms, or off.
@@ -252,6 +264,7 @@ func (c *v2Client) beginVideo(p *videoPusher, mode string, qid *uint32) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.mode = mode
+	p.gap = nil
 	if qid != nil {
 		p.qid, p.echo = *qid, true
 	}
@@ -265,6 +278,7 @@ func (c *v2Client) endVideo(p *videoPusher) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.mode = videoOff
+	p.gap = nil
 	c.videoStatusLocked(p)
 }
 
@@ -275,6 +289,7 @@ func (c *v2Client) videoStatusLocked(p *videoPusher) {
 		Mode:  p.mode,
 		TMS:   p.tMS,
 		Clock: clockProvenanceName(c.hub.video.ClockProvenance()),
+		Gap:   p.gap,
 	}
 	if p.echo {
 		q := p.qid
@@ -282,6 +297,26 @@ func (c *v2Client) videoStatusLocked(p *videoPusher) {
 		p.echo = false
 	}
 	c.enqueue(encodeV2(msg))
+}
+
+// sendGap sets the gap that the statuses report, and sends a status now. The gap
+// stays in the statuses until video flows again (clearGap).
+func (c *v2Client) sendGap(p *videoPusher, gap *v2VideoGap) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.gap = gap
+	c.videoStatusLocked(p)
+}
+
+// clearGap ends a gap once video flows again, and says so in a plain status.
+func (c *v2Client) clearGap(p *videoPusher) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.gap == nil {
+		return
+	}
+	p.gap = nil
+	c.videoStatusLocked(p)
 }
 
 // dropVideo empties the bulk queue, which only the pusher fills.
@@ -331,9 +366,17 @@ func (c *v2Client) playLive(p *videoPusher) (videoCmd, bool) {
 				next, needKey = store.NextSeq(), true
 				continue
 			}
+			if age := int64(videoNowMS()) - int64(kf.TimestampMs); age > int64(videoLiveKeyframeFreshMs) {
+				// Too old to start on. Say the camera has been silent since the
+				// newest frame, and wait for the next keyframe.
+				c.sendGap(p, &v2VideoGap{FromMS: store.NewestMs(), ToMS: 0, Reason: "stale"})
+				next, needKey = store.NextSeq(), true
+				continue
+			}
 			switch stop := c.startLive(p, kf, kfSeq); stop {
 			case stopNone:
 				lastSent, next, needKey = kfSeq, kfSeq+1, false
+				c.clearGap(p)
 			case stopStalled:
 				c.skipStalled()
 				restart = true
@@ -434,32 +477,56 @@ func (c *v2Client) playReplay(p *videoPusher, cmd videoCmd) (videoCmd, bool) {
 	}
 }
 
-// replayFrom sends the stored video from the keyframe that covers fromMS, with the
-// config NALs before it. Each frame goes out when its time comes, up to v2VideoLead
-// early. It returns stopNone at the end of the stored video.
+// replayFrom sends the stored video from the keyframe that covers fromMS, paced to
+// real time: each frame goes out when its time comes, up to v2VideoLead early. A
+// recording hole is reported as a gap, and replay goes on from the keyframe after
+// it; so does a segment that is archived. It returns stopNone at the end of the
+// stored video.
 func (c *v2Client) replayFrom(p *videoPusher, fromMS int64) videoStop {
 	store := c.hub.video
-	seq, sps, pps, ok := store.ReplayStart(uint64(max(fromMS, 0)))
+	t := uint64(max(fromMS, 0))
+	seq, _, _, ok := store.ReplayStart(t)
 	if !ok {
 		return stopNone
 	}
-	first, found, err := store.ReadSeq(seq)
-	if err != nil || !found {
-		return stopNone
+	if from, to, next, hole := store.ReplayHole(t); hole {
+		c.sendGap(p, &v2VideoGap{FromMS: from, ToMS: to, Reason: "none"})
+		seq = next
 	}
-	base := first.TimestampMs
-	for _, nal := range [][]byte{sps, pps} {
-		if len(nal) > 0 {
-			if stop := c.queueFrame(p, base, 0, VideoFlagConfig|v2VideoReplay, nal, 0); stop != stopNone {
-				return stop
-			}
-		}
-	}
-	wall := time.Now()
+
+	var (
+		base   uint64    // time of the first frame; pacing runs from there
+		wall   time.Time // real time at base
+		begun  bool
+		prev   uint64 // time of the last picture queued in this run; 0 for none
+		newRun = true // the next keyframe starts a run, so its config goes first
+	)
 	for {
 		f, found, err := store.ReadSeq(seq)
+		if errors.Is(err, errVideoArchived) {
+			from, to, next, more := store.ArchivedSpan(seq)
+			c.sendGap(p, &v2VideoGap{FromMS: from, ToMS: to, Reason: "archived"})
+			if !more {
+				return stopNone
+			}
+			seq, prev, newRun = next, 0, true
+			continue
+		}
 		if err != nil || !found {
 			return stopNone
+		}
+		if !begun {
+			base, wall, begun = f.TimestampMs, time.Now(), true
+		}
+		if newRun && f.IsKeyframe() {
+			sps, pps := store.ConfigBefore(seq)
+			if stop := c.queueConfig(p, sps, pps, f.TimestampMs); stop != stopNone {
+				return stop
+			}
+			newRun = false
+		}
+		if !f.IsConfig() && prev != 0 && f.TimestampMs > prev+videoGapMs {
+			c.sendGap(p, &v2VideoGap{FromMS: prev, ToMS: f.TimestampMs, Reason: "none"})
 		}
 		due := wall.Add(time.Duration(int64(f.TimestampMs)-int64(base))*time.Millisecond - v2VideoLead)
 		if stop := c.waitUntil(p, due); stop != stopNone {
@@ -468,8 +535,25 @@ func (c *v2Client) replayFrom(p *videoPusher, fromMS int64) videoStop {
 		if stop := c.queueFrame(p, f.TimestampMs, uint32(seq), f.Flags|v2VideoReplay, f.Payload, 0); stop != stopNone {
 			return stop
 		}
+		c.clearGap(p)
+		if !f.IsConfig() {
+			prev = f.TimestampMs
+		}
 		seq++
 	}
+}
+
+// queueConfig queues the SPS and PPS that a decoder needs before a keyframe, stamped
+// ts. A missing one is skipped.
+func (c *v2Client) queueConfig(p *videoPusher, sps, pps []byte, ts uint64) videoStop {
+	for _, nal := range [][]byte{sps, pps} {
+		if len(nal) > 0 {
+			if stop := c.queueFrame(p, ts, 0, VideoFlagConfig|v2VideoReplay, nal, 0); stop != stopNone {
+				return stop
+			}
+		}
+	}
+	return stopNone
 }
 
 // queueFrame queues the pieces of one frame on the bulk queue, waiting for room. A

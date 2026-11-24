@@ -117,10 +117,19 @@ func (s *VideoStore) Locate(streamID uint8, atMs uint64, prefetch int) VideoLoca
 	// SPS/PPS as of the entry keyframe, so a decoder configured from this
 	// reply matches the bytes it is about to be fed.
 	if e := s.entryIndexInRowLocked(out.Entry); e >= 0 {
-		out.SPS = s.configForEntryLocked(e, nalTypeSPS)
-		out.PPS = s.configForEntryLocked(e, nalTypePPS)
-		out.ClockProv = s.entries[e].clockProv
-		out.ResidualMs = int64(s.entries[e].timestampMs) - int64(s.entries[e].receiveMs)
+		kf := s.keyframes[e]
+		rec, _, ok, err := s.recordForSeqLocked(kf.seq)
+		if err != nil || !ok {
+			// The keyframe's record cannot be read (its segment is archived or
+			// its index is damaged), so there is no entry to start on.
+			out.Found = false
+			out.Entry = GopRow{}
+			out.Prefetch = nil
+			return out
+		}
+		out.ClockProv = rec.ClockProv
+		out.ResidualMs = int64(rec.TimestampMs) - int64(rec.ReceiveMs)
+		out.SPS, out.PPS = s.configBeforeLocked(kf.seq)
 	} else {
 		out.SPS = cloneBytes(s.sps)
 		out.PPS = cloneBytes(s.pps)
@@ -128,29 +137,24 @@ func (s *VideoStore) Locate(streamID uint8, atMs uint64, prefetch int) VideoLoca
 	return out
 }
 
-// entryIndexInRowLocked finds the keyframe NAL inside a GOP row.
+// entryIndexInRowLocked finds the keyframe inside a GOP row, as an index into
+// keyframes. A GOP row holds one keyframe, so it is the first one in the row's
+// byte span.
 //
-// Entries are appended in (segment, offset) order, so this is a binary search
-// rather than a scan.
+// Keyframes are kept in (segment, offset) order, so this is a binary search.
 func (s *VideoStore) entryIndexInRowLocked(row GopRow) int {
-	seg := uint64(row.SegmentID)
-	start := int64(row.ByteOffset)
-	end := start + int64(row.ByteLength)
-	i := sort.Search(len(s.entries), func(k int) bool {
-		e := s.entries[k]
-		if e.segmentID != seg {
-			return e.segmentID > seg
+	seg := row.SegmentID
+	start := row.ByteOffset
+	end := start + uint64(row.ByteLength)
+	i := sort.Search(len(s.keyframes), func(k int) bool {
+		kf := s.keyframes[k]
+		if kf.segmentID != seg {
+			return kf.segmentID > seg
 		}
-		return e.offset >= start
+		return kf.offset >= start
 	})
-	for ; i < len(s.entries); i++ {
-		e := s.entries[i]
-		if e.segmentID != seg || e.offset >= end {
-			break
-		}
-		if e.flags&VideoFlagKeyframe != 0 {
-			return i
-		}
+	if i < len(s.keyframes) && s.keyframes[i].segmentID == seg && s.keyframes[i].offset < end {
+		return i
 	}
 	return -1
 }
@@ -197,23 +201,29 @@ func (s *VideoStore) PointerRows() []GopRow {
 	return s.vpt.snapshot()
 }
 
-// rebuildVptLocked regenerates every row from the .idx-derived entries.
+// rebuildVptLocked regenerates the rows of the active segment from its .idx
+// records. The rows of sealed segments are kept as they are.
 //
 // The table is derived state, so this is both the recovery path and the
 // self-heal for a truncated or deleted video.vpt.
 func (s *VideoStore) rebuildVptLocked() {
-	rows := s.vpt.rows
-	_ = rows
 	path := s.vpt.path
 	offset := s.vpt.clockOffset
 	prov := s.vpt.clockProv
+	sealed := s.vpt.rows[:s.activeRows]
 	s.vpt.reset(path)
+	s.vpt.rows = sealed
 	s.vpt.clockOffset = offset
 	s.vpt.clockProv = prov
 	s.vpt.persisted = 0
-	for _, e := range s.entries {
-		s.vpt.add(videoDefaultStreamID, uint32(e.segmentID), e.timestampMs, uint64(e.offset), uint32(e.size),
-			e.flags, e.nalType)
+	if s.active != nil {
+		records, err := s.readRecordsLocked(s.active)
+		if err != nil {
+			fmt.Printf("[photon-server] video index: cannot read segment %d: %v\n", s.active.id, err)
+		}
+		for _, r := range records {
+			s.vpt.add(videoDefaultStreamID, uint32(s.active.id), r.TimestampMs, r.Offset, r.Size, r.Flags, r.NALType)
+		}
 	}
 	// Truncate the file so stale rows behind the rebuilt set cannot survive.
 	if path != "" {
@@ -237,69 +247,60 @@ func (s *VideoStore) backfillClockLocked() error {
 	if s.clock == nil || s.active == nil {
 		return nil
 	}
-	activeID := s.active.id
+	records, err := s.readRecordsLocked(s.active)
+	if err != nil {
+		return err
+	}
 	changed := 0
-	for i := range s.entries {
-		e := &s.entries[i]
-		if e.segmentID != activeID || e.clockProv != clockProvReceive || e.rtpTimestamp == 0 {
+	for i := range records {
+		r := &records[i]
+		if r.ClockProv != clockProvReceive || r.RTPTimestamp == 0 {
 			continue
 		}
-		mapped, prov := s.clock.WallMs(e.rtpTimestamp, e.receiveMs)
+		mapped, prov := s.clock.WallMs(r.RTPTimestamp, r.ReceiveMs)
 		if prov != clockProvRTCP {
 			continue
 		}
-		e.timestampMs = mapped
-		e.clockProv = prov
+		r.TimestampMs = mapped
+		r.ClockProv = prov
 		changed++
 	}
 	if changed == 0 {
 		return nil
 	}
 	// Rewrite the segment's records so the correction survives a restart.
-	if err := s.rewriteActiveIndexLocked(); err != nil {
+	if err := s.writeActiveRecordsLocked(records); err != nil {
 		return err
+	}
+	first := s.active.firstSeq
+	for k := s.active.kfFrom; k < len(s.keyframes); k++ {
+		s.keyframes[k].timestampMs = records[s.keyframes[k].seq-first].TimestampMs
 	}
 	s.rebuildVptLocked()
 	fmt.Printf("[photon-server] video clock backfill: %d NALs in segment %d re-stamped from RTP\n",
-		changed, activeID)
+		changed, s.active.id)
 	return nil
 }
 
-func (s *VideoStore) rewriteActiveIndexLocked() error {
+// writeActiveRecordsLocked rewrites every record of the active segment's .idx,
+// and moves the segment's time bounds with the timestamps.
+func (s *VideoStore) writeActiveRecordsLocked(records []videoNALRecord) error {
 	if s.active == nil || s.active.idxFile == nil {
 		return nil
-	}
-	activeID := s.active.id
-	var records []videoNALRecord
-	for _, e := range s.entries {
-		if e.segmentID != activeID {
-			continue
-		}
-		records = append(records, videoNALRecord{
-			TimestampMs:  e.timestampMs,
-			Offset:       uint64(e.offset),
-			Size:         uint32(e.size),
-			Flags:        e.flags,
-			NALType:      e.nalType,
-			ClockProv:    e.clockProv,
-			RTPTimestamp: e.rtpTimestamp,
-			ReceiveMs:    e.receiveMs,
-		})
 	}
 	buf := make([]byte, len(records)*videoNALRecordSizeV2)
 	for i, rec := range records {
 		encodeNALRecord(buf[i*videoNALRecordSizeV2:(i+1)*videoNALRecordSizeV2], rec)
 	}
-	if _, err := s.active.idxFile.WriteAt(buf, int64(videoIndexHeaderSize)); err != nil {
+	if _, err := s.active.idxFile.WriteAt(buf, int64(s.active.idxHead)); err != nil {
 		return err
 	}
 	if _, err := s.active.idxFile.Seek(0, io.SeekEnd); err != nil {
 		return err
 	}
-	// Segment bounds move with the timestamps.
 	if len(records) > 0 {
 		s.active.startMs = records[0].TimestampMs
-		s.active.endMs = records[len(records)-1].TimestampMs
+		s.active.endMs = records[0].TimestampMs
 		for _, rec := range records {
 			if rec.TimestampMs < s.active.startMs {
 				s.active.startMs = rec.TimestampMs
