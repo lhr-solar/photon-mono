@@ -716,19 +716,22 @@ void upsertOverlayBinding(AnalysisWorkbook& doc, const AnalysisRunBinding& bind)
     doc.runBindings.push_back(std::move(row));
 }
 
-AnalysisRunBinding bindingFromCatalog(const ctrl::Message::CatalogSession& row) {
+AnalysisRunBinding bindingFromRun(const ctrl2::Run& row) {
     AnalysisRunBinding bind;
     bind.sessionId = row.id;
-    bind.dbcHash = row.dbcHash;
+    bind.dbcHash = row.dbcSha;
+    bind.rev = row.rev;
     bind.role = AnalysisRunRole::Primary;
-    bind.minMs = row.minMs;
-    bind.maxMs = row.maxMs;
+    bind.minMs = row.startMs > 0 ? static_cast<std::uint64_t>(row.startMs) : std::uint64_t{0};
+    bind.maxMs = row.endMs > 0 ? static_cast<std::uint64_t>(row.endMs) : std::uint64_t{0};
     return bind;
 }
 
-bool catalogMatchesListing(const ctrl::Message::CatalogSession& row, std::string_view id, std::uint64_t minMs,
-                           std::uint64_t maxMs, std::string_view dbcHash) {
-    return row.id == id && row.minMs == minMs && row.maxMs == maxMs && row.dbcHash == dbcHash;
+bool runMatchesBinding(const ctrl2::Run& row, const AnalysisRunBinding& bind) {
+    if (row.id != bind.sessionId) {
+        return false;
+    }
+    return bind.dbcHash.empty() || row.dbcSha == bind.dbcHash;
 }
 
 namespace {

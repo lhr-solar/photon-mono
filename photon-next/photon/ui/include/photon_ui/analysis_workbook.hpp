@@ -1,6 +1,7 @@
 #pragma once
 
 #include "photon/control.hpp"
+#include "photon/control_v2.hpp"
 #include "photon_ui/analysis_runtime.hpp"
 #include "photon_ui/tile_cache.hpp"
 #include "photon_ui/view_types.hpp"
@@ -135,10 +136,11 @@ std::vector<std::uint32_t> collectWorkbookSignalIds(const AnalysisWorkbook& doc)
 
 void upsertPrimaryBinding(AnalysisWorkbook& doc, const AnalysisRunBinding& bind);
 void upsertOverlayBinding(AnalysisWorkbook& doc, const AnalysisRunBinding& bind);
-// Still used by tests/native/test_analysis_workbook.cpp (v1 CatalogSession).
-AnalysisRunBinding bindingFromCatalog(const ctrl::Message::CatalogSession& row);
-bool catalogMatchesListing(const ctrl::Message::CatalogSession& row, std::string_view id, std::uint64_t minMs,
-                           std::uint64_t maxMs, std::string_view dbcHash);
+// The binding a run from runs_list gives: run id, catalog sha, bounds.
+AnalysisRunBinding bindingFromRun(const ctrl2::Run& row);
+// A stored binding names its run by id and catalog sha. A run with the same id
+// and another sha is not the same recording, so it does not match.
+bool runMatchesBinding(const ctrl2::Run& row, const AnalysisRunBinding& bind);
 
 inline constexpr double kPlotScatterPairMinTolMs = 1.0;
 inline constexpr double kPlotScatterPairDefaultTolMs = 50.0;

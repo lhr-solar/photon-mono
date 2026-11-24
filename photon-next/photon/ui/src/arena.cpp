@@ -178,6 +178,10 @@ void ClientArena::ingestGap(std::int64_t fromNs, std::int64_t toNs) {
 }
 
 void ClientArena::setLiveCursor(std::uint64_t serverNowMs) {
+    if (pinned_) {
+        // A pinned run owns the timeline; the live clock does not move it.
+        return;
+    }
     // Live: the cursor is the server's now. min is the oldest sample the rings
     // hold, so the timeline never reads as empty while data arrives.
     std::uint64_t oldest = serverNowMs;
@@ -241,8 +245,8 @@ CatalogChange ClientArena::applyCatalog(const ctrl2::Catalog& catalog) {
 }
 
 void ClientArena::syncRun(HistoryIO* io) {
-    // Live for now: the run the server says is live, with its rev and start from runs_list.
-    std::string runId = server.liveRun;
+    // The pinned run while replaying, else the live run; rev and start come from runs_list.
+    std::string runId = pinned_ ? pinnedRun_ : server.liveRun;
     std::int64_t rev = 0;
     std::uint64_t minMs = 0;
     for (const auto& run : runs) {
@@ -332,6 +336,105 @@ void ClientArena::refreshMappedCells() {
     }
 }
 
+void ClientArena::pinRun(const ctrl2::Run& run) {
+    const auto start = run.startMs > 0 ? static_cast<std::uint64_t>(run.startMs) : std::uint64_t{0};
+    auto end = run.endMs > 0 ? static_cast<std::uint64_t>(run.endMs) : std::uint64_t{0};
+    if (end == 0 || end < start) {
+        // A live run has no end yet: replay runs up to now.
+        end = wallMs();
+    }
+    pinned_ = true;
+    pinnedRun_ = run.id;
+    timeline_.minTimeMs = start;
+    timeline_.maxTimeMs = end;
+    // Start at the beginning so Play walks the run. Pinning at the end would leave
+    // the playhead at the last sample, paused.
+    timeline_.cursorMs = start != 0 ? start : end;
+    timeline_.mode = static_cast<std::uint8_t>(proto::TimelineMode::Play);
+    pinnedPlayWallMs_ = 0.0;
+    setPreviewCursor(0, false);
+    setVideoFollowMs(timeline_.cursorMs);
+    tiles_.clearRingOldest();
+    sessionFollowPulse_ = true;
+    // The live rings hold the DAQ, not this run: drop them so gauges and plots cannot mix the two.
+    for (auto& [id, ring] : rings_) {
+        (void)id;
+        ring.resetSeries();
+        ring.hasLatest = false;
+        ring.latest = 0.0;
+        ring.latestTs = 0.0;
+    }
+    holdReplayCells();
+    pushLog("replay " + run.id);
+}
+
+void ClientArena::unpinRun() {
+    if (!pinned_) {
+        return;
+    }
+    pinned_ = false;
+    pinnedRun_.clear();
+    pinnedPlayWallMs_ = 0.0;
+    sessionFollowPulse_ = true;
+    // Back to the live clock; the next tick sets the live cursor.
+    timeline_.mode = static_cast<std::uint8_t>(proto::TimelineMode::Live);
+    timeline_.cursorMs = wallMs();
+    timeline_.minTimeMs = 0;
+    timeline_.maxTimeMs = 0;
+    setPreviewCursor(0, false);
+    clearVideoFollow();
+    pushLog("live");
+}
+
+void ClientArena::applyPinnedTimeline(proto::TimelineMode mode, std::uint64_t cursorMs) {
+    if (!pinned_) {
+        return;
+    }
+    if (timeline_.minTimeMs != 0 && cursorMs < timeline_.minTimeMs) {
+        cursorMs = timeline_.minTimeMs;
+    }
+    if (timeline_.maxTimeMs != 0 && cursorMs > timeline_.maxTimeMs) {
+        cursorMs = timeline_.maxTimeMs;
+    }
+    timeline_.cursorMs = cursorMs;
+    timeline_.mode = static_cast<std::uint8_t>(mode);
+    setVideoFollowMs(cursorMs);
+    if (mode != proto::TimelineMode::Play) {
+        pinnedPlayWallMs_ = 0.0;
+    }
+    setPreviewCursor(0, false);
+}
+
+void ClientArena::tickPinnedPlayback(double nowMs) {
+    if (!pinned_) {
+        return;
+    }
+    if (static_cast<proto::TimelineMode>(timeline_.mode) != proto::TimelineMode::Play) {
+        pinnedPlayWallMs_ = 0.0;
+        return;
+    }
+    if (pinnedPlayWallMs_ <= 0.0) {
+        pinnedPlayWallMs_ = nowMs;
+        return;
+    }
+    const double dt = nowMs - pinnedPlayWallMs_;
+    pinnedPlayWallMs_ = nowMs;
+    if (!(dt > 0.0) || dt > 250.0) {
+        return;
+    }
+    const auto step = static_cast<std::uint64_t>(dt + 0.5);
+    const std::uint64_t next = timeline_.cursorMs + step;
+    if (timeline_.maxTimeMs != 0 && next >= timeline_.maxTimeMs) {
+        timeline_.cursorMs = timeline_.maxTimeMs;
+        setVideoFollowMs(timeline_.maxTimeMs);
+        timeline_.mode = static_cast<std::uint8_t>(proto::TimelineMode::Pause);
+        pinnedPlayWallMs_ = 0.0;
+        return;
+    }
+    timeline_.cursorMs = next;
+    setVideoFollowMs(next);
+}
+
 void ClientArena::maybePrimeHistory(HistoryIO& io) {
     if (!haveSignalCatalog || tiles_.runId().empty()) {
         return;
@@ -385,6 +488,14 @@ void ClientArena::maybePrimeHistory(HistoryIO& io) {
     const std::uint64_t cursor = effectiveCursorMs();
     tiles_.requestCursorWindow(io, urgent, cursor);
     tiles_.primeStartup(io, ids, cursor);
+    if (catalogPinned() && !urgent.empty()) {
+        // The cell pack reads the last three minutes at the playhead.
+        constexpr std::uint64_t kCellWindowMs = 180000;
+        const std::uint64_t from = cursor > kCellWindowMs ? cursor - kCellWindowMs : tiles_.runMinMs();
+        if (cursor > from) {
+            tiles_.requestWindow(io, urgent, from, cursor, 0, false);
+        }
+    }
 }
 
 void ClientArena::setMappedCells(std::vector<float> voltages, std::vector<float> temps,

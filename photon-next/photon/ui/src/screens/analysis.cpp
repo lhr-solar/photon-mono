@@ -224,16 +224,6 @@ void markDirty(AnalysisScreen::State& st) {
     saveWorkbook(st.doc);
 }
 
-// A run from the server's runs list. Bounds are Unix ms.
-AnalysisRunBinding bindingFromRun(const ctrl2::Run& row) {
-    AnalysisRunBinding bind;
-    bind.sessionId = row.id;
-    bind.dbcHash = row.dbcSha;
-    bind.minMs = row.startMs > 0 ? static_cast<std::uint64_t>(row.startMs) : std::uint64_t{0};
-    bind.maxMs = row.endMs > 0 ? static_cast<std::uint64_t>(row.endMs) : std::uint64_t{0};
-    return bind;
-}
-
 void bindPrimary(AnalysisRuntime& runtime, AnalysisScreen::State& st, const ctrl2::Run& row) {
     const AnalysisRunBinding bind = bindingFromRun(row);
     auto* run = runtime.bind(bind);
@@ -1187,7 +1177,7 @@ void AnalysisScreen::draw(UiContext& ui) {
                     continue;
                 }
                 for (const auto& row : ui.arena.runs) {
-                    if (row.id == bind.sessionId) {
+                    if (runMatchesBinding(row, bind)) {
                         bindPrimary(*runtime_, st, row);
                         break;
                     }
@@ -1200,7 +1190,7 @@ void AnalysisScreen::draw(UiContext& ui) {
                     continue;
                 }
                 for (const auto& row : ui.arena.runs) {
-                    if (row.id == bind.sessionId) {
+                    if (runMatchesBinding(row, bind)) {
                         bindOverlay(*runtime_, st, row);
                         runtime_->setOverlayOffsetMs(bind.timeOffsetMs);
                         if (auto* ov = runtime_->overlay()) {

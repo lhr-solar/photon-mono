@@ -125,8 +125,15 @@ public:
     // Replaces the catalog. A new sha clears the rings and re-resolves the
     // signal map and the alarms by name.
     CatalogChange applyCatalog(const ctrl2::Catalog& catalog);
-    // Runs replay returns in step 2; until then no run is pinned.
-    bool catalogPinned() const { return false; }
+    // A past run is pinned for replay: its tiles, a local cursor, play and pause.
+    bool catalogPinned() const { return pinned_; }
+    const std::string& pinnedRunId() const { return pinnedRun_; }
+    void pinRun(const ctrl2::Run& run);
+    void unpinRun();
+    // A local playhead for the pinned run (scrub and play/pause). Clamped to the run.
+    void applyPinnedTimeline(proto::TimelineMode mode, std::uint64_t cursorMs);
+    // Advances the pinned playhead by the wall time since the last call.
+    void tickPinnedPlayback(double nowMs);
     // Points the arena's TileCache at the run it should show: the pinned run, or
     // the live run. A change drops the cache's tiles (cancelling them through io).
     void syncRun(HistoryIO* io);
@@ -231,6 +238,9 @@ private:
     bool sessionFollowPulse_ = false;
     bool mapsResetPulse_ = false;
     TileCache tiles_{};
+    bool pinned_ = false;
+    std::string pinnedRun_;
+    double pinnedPlayWallMs_ = 0.0;
 
     void syncRingSeams();
     void addDefaultRings();

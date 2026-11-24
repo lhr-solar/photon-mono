@@ -231,6 +231,7 @@ void App::frame() {
 #endif
 
     client_.tick(nowMs());
+    arena_.tickPinnedPlayback(nowMs());
     if (arena_.consumeSessionFollow()) {
         for (auto& screen : screens_) {
             screen->onSessionChanged();
@@ -298,7 +299,7 @@ void App::drawShell() {
     const ImVec2 rest = ImGui::GetContentRegionAvail();
     UiContext ctx{arena_, client_};
     ImGui::SetCursorScreenPos(ImGui::GetCursorScreenPos());
-    logDrawer_.draw(rest);
+    logDrawer_.draw(rest, arena_);
     const float drawerW = logDrawer_.occupiedWidth();
     ImGui::SetCursorPos(ImVec2(drawerW, barH + alarmH));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, theme::kContentWindowPadding);
