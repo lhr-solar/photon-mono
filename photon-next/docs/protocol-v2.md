@@ -150,7 +150,7 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
 
 ### Server rules
 - At most 4–8 InfluxDB queries run at once across all clients; cancelled ones are dropped.
-- Only the **live run's** sealed tiles are cached, once, shared by every client (~8–16 MB). A tile leaves
+- Only the **live run's** sealed tiles are cached, once, shared by every client (8 MiB). A tile leaves
   the cache when it is older than the live view window (~10 min) or the cap is reached, and the cache
   empties when the run ends. Tiles of past runs come straight from InfluxDB. There is no video replay cache.
 - A client whose live cursor falls off the ring jumps to the newest frame and gets a `Gap`.
