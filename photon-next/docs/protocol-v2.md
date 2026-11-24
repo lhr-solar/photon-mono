@@ -136,9 +136,9 @@ A frame with a missing piece is dropped; the decoder waits for the next keyframe
 
 ### Gaps and missing tiles
 - **No data** (car off, link down, rows dropped): the points are simply absent. Do not draw a line across a
-  hole: break the line when two neighbouring points are more than **3 × `period_ms`** apart (with
-  `period_ms` 0, more than 3 × the median spacing of that tile), and on a level > 0 also when more than **2
-  bucket widths** apart.
+  hole: on raw samples (level 0) break the line when two neighbouring points are more than **3 ×
+  `period_ms`** apart (with `period_ms` 0, more than 3 × the median spacing of that tile); on a level > 0
+  break it when they are more than **2 bucket widths** apart.
 - **Tile not here** (not received yet, `tile_error`): unknown, not empty. Draw that span from a coarser tile
   the client already has, or show it as loading; retry after a `tile_error` with backoff (1 s, 2 s, 4 s, … up
   to 30 s).
