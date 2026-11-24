@@ -9,6 +9,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"server/dbc"
@@ -190,17 +191,138 @@ var errTileStopped = errors.New("tile request stopped")
 
 // streamTile reads the samples of the tile of job from InfluxDB, and hands its
 // pieces to send as they fill. A tile with nothing written in its window is one
-// empty piece. It returns errTileStopped when send refuses a piece.
+// empty piece. The window is first clamped to the run's span, so a tile outside the
+// run is answered without a query. A tile of a second or more is read from
+// rollup_1s. A run written before rollup_1s existed has no rollup rows, so when that
+// query gives none, the frame rows answer instead; for an empty tile that costs a
+// second query. It returns errTileStopped when send refuses a piece.
 func (h *v2Hub) streamTile(ctx context.Context, job tileJob, sealed bool, send tileSend) error {
 	spanNS := tileSpanMS(job.level) * nsPerMs
-	fromNS := job.index * spanNS
-	sql, params := tileSQL(job.ts, job.run, job.level, fromNS, fromNS+spanNS)
+	fromNS, toNS, inRun, err := h.clampToRun(ctx, job.run, job.index*spanNS, (job.index+1)*spanNS)
+	if err != nil {
+		return err
+	}
 	b := newTileBuilder(job, sealed, send)
-	err := h.querier.stream(ctx, sql, params, tileColumns(job.level), b.addRow)
+	if !inRun {
+		return b.end()
+	}
+	if usesRollup(job.level) {
+		sql, params := rollupTileSQL(job.ts, job.run, job.level, fromNS, toNS)
+		err := h.querier.stream(ctx, sql, params, tileColumns(job.level), b.addRow)
+		if err != nil && !errors.Is(err, errNoData) {
+			return err
+		}
+		if b.rows > 0 {
+			return b.end()
+		}
+	}
+	sql, params := tileSQL(job.ts, job.run, job.level, fromNS, toNS)
+	err = h.querier.stream(ctx, sql, params, tileColumns(job.level), b.addRow)
 	if err != nil && !errors.Is(err, errNoData) {
 		return err
 	}
 	return b.end()
+}
+
+// usesRollup reports whether tiles of level are read from rollup_1s: the levels
+// whose bucket is a second or more. Finer levels read the frame rows.
+func usesRollup(level int) bool {
+	return tileLevelMS[level] >= 1000
+}
+
+// runSpanQuery is the span of one run: the first start and the last end of its
+// session rows. It has one row, with NULLs when the run has no session row.
+const runSpanQuery = `SELECT min(start) AS start, max("end") AS "end" FROM session WHERE id = $run`
+
+// runSpan is the span of a run on the frame clock, in ns: from the second of its
+// first frame, to the time of its last.
+type runSpan struct {
+	startNS, endNS int64
+}
+
+// cachedSpan is a run's span as it was read. open says the run was live then: its
+// end is not known, and the run's end is now while it is live.
+type cachedSpan struct {
+	runSpan
+	open bool
+}
+
+// runSpanMax caps the runs whose spans are kept. The cache empties when it is full,
+// and the next request for a run reads its span again.
+const runSpanMax = 256
+
+// runSpans caches the spans of runs that the hub has read from the session table.
+type runSpans struct {
+	mu sync.Mutex
+	m  map[string]cachedSpan
+}
+
+// store keeps the span of run.
+func (r *runSpans) store(run string, c cachedSpan) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.m) >= runSpanMax {
+		clear(r.m)
+	}
+	r.m[run] = c
+}
+
+// runSpanOf returns the span of run, and whether InfluxDB has a session row for it.
+// A finished run's span is read once and kept. The live run keeps its start, and its
+// end is now.
+func (h *v2Hub) runSpanOf(ctx context.Context, run string) (runSpan, bool, error) {
+	live := run != "" && run == h.liveRun()
+	h.spans.mu.Lock()
+	c, cached := h.spans.m[run]
+	h.spans.mu.Unlock()
+	if cached && c.open == live {
+		return spanOf(c, live), true, nil
+	}
+	rows, err := h.querier.query(ctx, runSpanQuery, map[string]string{"run": run})
+	if errors.Is(err, errNoData) {
+		return runSpan{}, false, nil
+	}
+	if err != nil {
+		return runSpan{}, false, err
+	}
+	if len(rows) == 0 || rows[0]["start"] == nil || rows[0]["end"] == nil {
+		return runSpan{}, false, nil
+	}
+	startMS, err := rowInt(rows[0], "start")
+	if err != nil {
+		return runSpan{}, false, err
+	}
+	endMS, err := rowInt(rows[0], "end")
+	if err != nil {
+		return runSpan{}, false, err
+	}
+	c = cachedSpan{runSpan: runSpan{startNS: rollupSecond(startMS * nsPerMs), endNS: endMS * nsPerMs}, open: live}
+	h.spans.store(run, c)
+	return spanOf(c, live), true, nil
+}
+
+// spanOf is the span of a cached run; a live run ends now.
+func spanOf(c cachedSpan, live bool) runSpan {
+	if live {
+		return runSpan{startNS: c.startNS, endNS: time.Now().UnixNano()}
+	}
+	return c.runSpan
+}
+
+// clampToRun returns the part of [fromNS, toNS) that the run can hold, as the bounds
+// of its query: its span, from the second of its first frame to one second past its
+// last. inRun is false when none of the window is in the run. A run with no session
+// row is not clamped.
+func (h *v2Hub) clampToRun(ctx context.Context, run string, fromNS, toNS int64) (lo, hi int64, inRun bool, err error) {
+	span, known, err := h.runSpanOf(ctx, run)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if !known {
+		return fromNS, toNS, true, nil
+	}
+	lo, hi = max(fromNS, span.startNS), min(toNS, span.endNS+rollupNS)
+	return lo, hi, lo < hi, nil
 }
 
 // tileBuilder turns the rows of one tile into its Tile pieces. It holds the samples
@@ -338,27 +460,52 @@ func tileColumns(level int) []string {
 	return []string{"t_ns", "lo", "hi", "mean"}
 }
 
-// tileSQL returns the query for the samples of one tile of ts in run, and its
-// parameters. Level 0 gives each raw sample. A higher level gives one row per
-// bucket, with its min, max and mean. The time bounds are literals, since
+// tileSQL returns the query for the samples of one tile of ts in run, from the frame
+// rows, and its parameters. Level 0 gives each raw sample. A higher level gives one
+// row per bucket, with its min, max and mean. The time bounds are literals, since
 // parameters cannot carry them.
 func tileSQL(ts tileSignal, run string, level int, fromNS, toNS int64) (string, map[string]string) {
-	col := `"` + strings.ReplaceAll(ts.sig.Name, `"`, `""`) + `"`
+	col := quoteIdent(ts.sig.Name)
+	params, where := tileFilter(ts, run, fromNS, toNS, col+" IS NOT NULL")
+	if level == 0 {
+		return fmt.Sprintf("SELECT CAST(time AS BIGINT) AS t_ns, %s AS v FROM frame WHERE %s ORDER BY time LIMIT %d",
+			col, where, tileRawRows), params
+	}
+	frame := `SELECT CAST(date_bin(INTERVAL '%[1]d milliseconds', time, TIMESTAMP '1970-01-01T00:00:00Z') AS BIGINT) AS t_ns, ` +
+		`min(%[2]s) AS lo, max(%[2]s) AS hi, avg(CAST(%[2]s AS DOUBLE)) AS mean FROM frame WHERE %[3]s GROUP BY 1 ORDER BY 1`
+	return fmt.Sprintf(frame, tileLevelMS[level], col, where), params
+}
+
+// rollupTileSQL returns the query for the samples of one tile of ts in run, of a
+// level of a second or more, from the rollup_1s rows: one row per bucket, with the
+// min of the seconds' minimums, the max of their maximums, and the mean of all the
+// values, which is the sum over the count. Its parameters are those of tileSQL.
+func rollupTileSQL(ts tileSignal, run string, level int, fromNS, toNS int64) (string, map[string]string) {
+	name := ts.sig.Name
+	params, where := tileFilter(ts, run, fromNS, toNS, quoteIdent(name+"_n")+" IS NOT NULL")
+	rollup := `SELECT CAST(date_bin(INTERVAL '%[1]d milliseconds', time, TIMESTAMP '1970-01-01T00:00:00Z') AS BIGINT) AS t_ns, ` +
+		`min(%[2]s) AS lo, max(%[3]s) AS hi, sum(%[4]s) / sum(%[5]s) AS mean FROM rollup_1s WHERE %[6]s GROUP BY 1 ORDER BY 1`
+	return fmt.Sprintf(rollup, tileLevelMS[level],
+		quoteIdent(name+"_min"), quoteIdent(name+"_max"), quoteIdent(name+"_sum"), quoteIdent(name+"_n"), where), params
+}
+
+// tileFilter returns the parameters and the WHERE clause of a tile query: the run,
+// the message, and the page for a multiplexed signal, the window, and present, which
+// must hold for a row to count.
+func tileFilter(ts tileSignal, run string, fromNS, toNS int64, present string) (map[string]string, string) {
 	params := map[string]string{"run": run, "msg": ts.msg.Name}
 	where := "session = $run AND msg = $msg"
 	if ts.sig.Mux >= 0 {
 		where += " AND tap = $tap"
 		params["tap"] = strconv.Itoa(int(ts.sig.Mux))
 	}
-	where += fmt.Sprintf(" AND time >= to_timestamp_nanos(%d) AND time < to_timestamp_nanos(%d) AND %s IS NOT NULL",
-		fromNS, toNS, col)
-	if level == 0 {
-		return fmt.Sprintf("SELECT CAST(time AS BIGINT) AS t_ns, %s AS v FROM frame WHERE %s ORDER BY time LIMIT %d",
-			col, where, tileRawRows), params
-	}
-	rollup := `SELECT CAST(date_bin(INTERVAL '%[1]d milliseconds', time, TIMESTAMP '1970-01-01T00:00:00Z') AS BIGINT) AS t_ns, ` +
-		`min(%[2]s) AS lo, max(%[2]s) AS hi, avg(CAST(%[2]s AS DOUBLE)) AS mean FROM frame WHERE %[3]s GROUP BY 1 ORDER BY 1`
-	return fmt.Sprintf(rollup, tileLevelMS[level], col, where), params
+	where += fmt.Sprintf(" AND time >= to_timestamp_nanos(%d) AND time < to_timestamp_nanos(%d) AND %s", fromNS, toNS, present)
+	return params, where
+}
+
+// quoteIdent quotes an InfluxDB column name.
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 // nsToMS is a Unix time in ns, as ms. Whole ms are exact; the rest is a fraction.

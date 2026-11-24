@@ -45,6 +45,7 @@ type v2Hub struct {
 	tiles       *tileCache      // the sealed tiles of the live run
 	tilesServed atomic.Uint64   // tile requests answered
 	tileStalls  atomic.Uint64   // streaming tiles stopped because the client read nothing
+	spans       runSpans        // the spans of runs, read from the session table
 
 	video       *VideoStore   // the video clients read; nil when there is none
 	videoFrames atomic.Uint64 // video frames queued for clients
@@ -84,6 +85,7 @@ func newV2Hub(cfg *Config, gate *ClientGate, liveRun func() string, ring *liveRi
 		querier:      querier,
 		video:        video,
 		tiles:        newTileCache(),
+		spans:        runSpans{m: make(map[string]cachedSpan)},
 		helloTimeout: v2HelloTimeout,
 		idleTimeout:  v2IdleTimeout,
 		clients:      make(map[*v2Client]struct{}),

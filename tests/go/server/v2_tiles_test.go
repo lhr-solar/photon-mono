@@ -114,6 +114,10 @@ func newPausingQueryServer(t *testing.T, head, tail string, release <-chan struc
 	t.Helper()
 	returned := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isSpanQueryBody(r) {
+			w.WriteHeader(http.StatusOK) // a run's span is not the query under test
+			return
+		}
 		defer close(returned)
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, head)
@@ -213,22 +217,38 @@ func tileBounds(level int, index int64) (int64, int64) {
 	return index * span, index*span + span
 }
 
-// wantTileSQL is the query a tile of ts should send, written out in full.
+// wantTileSQL is the query a tile of ts should send, written out in full: the frame
+// rows for levels up to 10 ms, and the rollup_1s rows from the second up.
 func wantTileSQL(ts tileSignal, level int, fromNS, toNS int64) string {
 	name := ts.sig.Name
 	filter := "session = $run AND msg = $msg"
 	if ts.sig.Mux >= 0 {
 		filter += " AND tap = $tap"
 	}
+	present := name
+	if level >= 3 {
+		present = name + "_n" // a rollup row has the count of a signal, not the signal
+	}
 	filter += fmt.Sprintf(" AND time >= to_timestamp_nanos(%d) AND time < to_timestamp_nanos(%d) AND \"%s\" IS NOT NULL",
-		fromNS, toNS, name)
+		fromNS, toNS, present)
 	if level == 0 {
 		return fmt.Sprintf(`SELECT CAST(time AS BIGINT) AS t_ns, "%s" AS v FROM frame WHERE %s ORDER BY time LIMIT 200000`,
 			name, filter)
 	}
+	if level >= 3 {
+		return fmt.Sprintf(`SELECT CAST(date_bin(INTERVAL '%d milliseconds', time, TIMESTAMP '1970-01-01T00:00:00Z') AS BIGINT) AS t_ns, `+
+			`min("%[2]s_min") AS lo, max("%[2]s_max") AS hi, sum("%[2]s_sum") / sum("%[2]s_n") AS mean FROM rollup_1s WHERE %[3]s GROUP BY 1 ORDER BY 1`,
+			tileLevelMS[level], name, filter)
+	}
 	return fmt.Sprintf(`SELECT CAST(date_bin(INTERVAL '%d milliseconds', time, TIMESTAMP '1970-01-01T00:00:00Z') AS BIGINT) AS t_ns, `+
 		`min("%[2]s") AS lo, max("%[2]s") AS hi, avg(CAST("%[2]s" AS DOUBLE)) AS mean FROM frame WHERE %[3]s GROUP BY 1 ORDER BY 1`,
 		tileLevelMS[level], name, filter)
+}
+
+// isSpanQueryBody reports whether the query in r is a run's span query.
+func isSpanQueryBody(r *http.Request) bool {
+	body, _ := io.ReadAll(r.Body)
+	return strings.Contains(string(body), "FROM session WHERE")
 }
 
 // rawRows is the CSV reply to a level 0 tile query of n rows: one sample per ms from
@@ -982,7 +1002,11 @@ func TestTileConnectionBreakMidReplyIsTileError(t *testing.T) {
 	index := pastIndex(0)
 	from, _ := tileBounds(0, index)
 	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isSpanQueryBody(r) {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		if calls.Add(1) > 1 {
 			_, _ = io.WriteString(w, rawRows(3, from))
@@ -1131,7 +1155,6 @@ func TestLiveRunMultiPieceTileIsCachedOnce(t *testing.T) {
 		t.Fatalf("%d queries, want 1: the second request should come from the cache", n)
 	}
 }
-
 
 // A streaming tile gives up when the client's live queue takes nothing for the
 // stall limit, so a client that stops reading does not keep an InfluxDB slot.

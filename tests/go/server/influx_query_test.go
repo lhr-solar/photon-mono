@@ -17,11 +17,20 @@ import (
 )
 
 // fakeQueries is an InfluxDB query endpoint for the tests. It records each query
-// and answers with reply, which gets the request's context, so it can block.
+// and answers with reply, which gets the request's context, so it can block. The
+// span queries of runs (the session table) are answered with span, a JSON line or
+// nothing, and are not recorded: most tests do not ask for them.
 type fakeQueries struct {
-	mu    sync.Mutex
-	reqs  []fakeQuery
-	reply func(ctx context.Context, q fakeQuery) (status int, body string)
+	mu        sync.Mutex
+	reqs      []fakeQuery
+	reply     func(ctx context.Context, q fakeQuery) (status int, body string)
+	span      string
+	spanReads atomic.Int32 // span queries answered
+}
+
+// isSpanQuery reports whether sql is a run's span query, which the fake answers apart.
+func isSpanQuery(sql string) bool {
+	return strings.Contains(sql, "FROM session WHERE")
 }
 
 // fakeQuery is one query the fake received, with the headers the tests check.
@@ -39,6 +48,11 @@ func (f *fakeQueries) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	_ = json.Unmarshal(body, &q)
 	q.Path, q.Auth = r.URL.Path, r.Header.Get("Authorization")
+	if isSpanQuery(q.SQL) {
+		f.spanReads.Add(1)
+		_, _ = io.WriteString(w, f.span)
+		return
+	}
 	f.mu.Lock()
 	f.reqs = append(f.reqs, q)
 	reply := f.reply
