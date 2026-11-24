@@ -8,6 +8,11 @@
 //                                                         coarse tiles over it. The fed interval is the span of the
 //                                                         live samples the probe sees, unless --window gives it:
 //   photon-v2-probe <token> <seconds> --tiles --window <fromMs> <toMs>
+//   photon-v2-probe <token> <seconds> --video [--replay-from <fromMs> <replaySeconds>]
+//                                                         the live run's video for <seconds>; with --replay-from,
+//                                                         the live run is pinned and played from fromMs, with a
+//                                                         seek half way. Frames are taken from the arena as the
+//                                                         decoder takes them; video_status lines print on change.
 //
 // Exit 0 on PASS, 1 on FAIL, 2 on bad arguments.
 
@@ -16,6 +21,7 @@
 #include "photon_ui/client.hpp"
 #include "photon_ui/platform.hpp"
 #include "photon_ui/tile_cache.hpp"
+#include "photon_ui/video_v2.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -24,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -503,6 +510,178 @@ int runTiles(ClientArena& arena, Client& client, double seconds, bool haveWindow
 
 }  // namespace
 
+// --video: the video of the live run, live and then replayed from a time, with a seek. Frames
+// are taken from the arena's queue the way the decoder takes them; video_status lines print
+// when the mode, the seek qid or the gap changes.
+struct VideoTally {
+    int frames = 0;
+    int keys = 0;
+    int configs = 0;
+    std::uint64_t bytes = 0;
+    std::set<std::uint64_t> times;      // distinct frame times
+    std::set<std::uint64_t> keyTimes;   // distinct keyframe times
+    std::uint64_t firstMs = 0;
+    std::uint64_t lastMs = 0;
+};
+
+std::string flagText(std::uint8_t flags) {
+    std::string out;
+    if ((flags & photon::proto::kVideoFlagKeyframe) != 0) {
+        out += "key";
+    }
+    if ((flags & photon::proto::kVideoFlagConfig) != 0) {
+        out += out.empty() ? "cfg" : ",cfg";
+    }
+    return out.empty() ? "-" : out;
+}
+
+void drainVideo(ClientArena& arena, VideoTally& tally, const char* phase, int printFirst, int& printed) {
+    for (const auto& ev : arena.takeVideoEvents()) {
+        if (ev.kind == photon::ui::VideoEvent::Kind::Restart) {
+            continue;
+        }
+        tally.firstMs = tally.frames == 0 ? ev.tMs : std::min(tally.firstMs, ev.tMs);
+        tally.lastMs = std::max(tally.lastMs, ev.tMs);
+        tally.times.insert(ev.tMs);
+        if ((ev.flags & photon::proto::kVideoFlagKeyframe) != 0) {
+            tally.keyTimes.insert(ev.tMs);
+        }
+        ++tally.frames;
+        tally.bytes += ev.payload.size();
+        if ((ev.flags & photon::proto::kVideoFlagKeyframe) != 0) {
+            ++tally.keys;
+        }
+        if ((ev.flags & photon::proto::kVideoFlagConfig) != 0) {
+            ++tally.configs;
+        }
+        if (printed < printFirst) {
+            std::printf("%s frame t_ms=%llu flags=%s bytes=%zu\n", phase, static_cast<unsigned long long>(ev.tMs),
+                        flagText(ev.flags).c_str(), ev.payload.size());
+            ++printed;
+        }
+    }
+}
+
+// Prints the video status when what a viewer sees changed: the mode, the seek qid or the gap.
+void printVideoStatus(const ClientArena& arena, std::string& lastKey) {
+    if (!arena.video.haveStatus) {
+        return;
+    }
+    std::string key = arena.video.mode;
+    if (arena.video.qid) {
+        key += " qid=" + std::to_string(*arena.video.qid);
+    }
+    if (arena.video.gap) {
+        key += " gap=" + arena.video.gap->reason;
+    }
+    if (key == lastKey) {
+        return;
+    }
+    lastKey = key;
+    std::string line = "video_status mode=" + arena.video.mode + " t_ms=" + std::to_string(arena.video.tMs) +
+                       " clock=" + arena.video.clock;
+    if (arena.video.qid) {
+        line += " qid=" + std::to_string(*arena.video.qid);
+    }
+    if (arena.video.gap) {
+        line += " gap=" + arena.video.gap->reason + " from_ms=" + std::to_string(arena.video.gap->fromMs) +
+                " to_ms=" + std::to_string(arena.video.gap->toMs) + " \"" +
+                photon::ui::videoGapText(*arena.video.gap) + "\"";
+    }
+    std::printf("%s\n", line.c_str());
+}
+
+void printTally(const char* name, const VideoTally& t) {
+    std::printf("%s: frames=%d keyframes=%d config=%d bytes=%llu\n", name, t.frames, t.keys, t.configs,
+                static_cast<unsigned long long>(t.bytes));
+    if (!t.times.empty()) {
+        // Pictures per second over the span of the frame times: the camera rate, when the
+        // stream is whole.
+        const double spanS = static_cast<double>(t.lastMs - t.firstMs) / 1000.0;
+        std::printf("%s: distinct t_ms=%zu span=%.2f s rate=%.1f per s, keyframe times=%zu\n", name, t.times.size(),
+                    spanS, spanS > 0.0 ? static_cast<double>(t.times.size()) / spanS : 0.0, t.keyTimes.size());
+    }
+}
+
+int runVideo(ClientArena& arena, Client& client, double liveSeconds, bool replay, std::uint64_t replayFrom,
+             double replaySeconds) {
+    VideoTally live;
+    VideoTally rep;
+    std::string lastKey;
+    int printed = 0;
+    std::printf("video: live for %.1f s\n", liveSeconds);
+    const double liveStart = photon::ui::nowMs();
+    while (photon::ui::nowMs() - liveStart < liveSeconds * 1000.0) {
+        client.tick(photon::ui::nowMs());
+        arena.markVideoWanted();  // no screen here: the probe is what wants video
+        drainVideo(arena, live, "live", 6, printed);
+        printVideoStatus(arena, lastKey);
+        sleepMs(1);
+    }
+    printTally("live", live);
+    const bool liveOk = live.frames > 0 && live.keys > 0;
+
+    bool repOk = true;
+    if (replay) {
+        const photon::ctrl2::Run* target = nullptr;
+        for (const auto& r : arena.runs) {
+            if (r.live) {
+                target = &r;
+                break;
+            }
+        }
+        if (target == nullptr && !arena.runs.empty()) {
+            target = &arena.runs.front();
+        }
+        photon::ctrl2::Run liveByName;
+        if (target == nullptr && !arena.server.liveRun.empty()) {
+            // The server lists no runs (its history is not written), but hello_ack names the
+            // live run. Pin it by that id, starting 60 s before now unless --replay-from gives a time.
+            liveByName.id = arena.server.liveRun;
+            liveByName.live = true;
+            liveByName.startMs = static_cast<std::int64_t>(wallMs()) - 60000;
+            target = &liveByName;
+        }
+        if (target == nullptr) {
+            std::printf("video: no run to replay\n");
+            return 1;
+        }
+        if (replayFrom == 0) {
+            replayFrom = target->startMs > 0 ? static_cast<std::uint64_t>(target->startMs) : 0;
+        }
+        std::printf("video: replay run %s from t_ms=%llu for %.1f s\n", target->id.c_str(),
+                    static_cast<unsigned long long>(replayFrom), replaySeconds);
+        arena.pinRun(*target);
+        arena.applyPinnedTimeline(photon::proto::TimelineMode::Play, replayFrom);
+        const double repStart = photon::ui::nowMs();
+        bool seeked = false;
+        printed = 0;
+        lastKey.clear();
+        while (photon::ui::nowMs() - repStart < replaySeconds * 1000.0) {
+            client.tick(photon::ui::nowMs());
+            arena.markVideoWanted();
+            arena.tickPinnedPlayback(photon::ui::nowMs());
+            if (!seeked && photon::ui::nowMs() - repStart > replaySeconds * 500.0) {
+                // A jump of 5 s while playing: the server is told where to go with video_seek.
+                const std::uint64_t to = arena.timeline().cursorMs + 5000;
+                std::printf("video: seek to t_ms=%llu\n", static_cast<unsigned long long>(to));
+                arena.applyPinnedTimeline(photon::proto::TimelineMode::Play, to);
+                seeked = true;
+            }
+            drainVideo(arena, rep, "replay", 6, printed);
+            printVideoStatus(arena, lastKey);
+            sleepMs(1);
+        }
+        printTally("replay", rep);
+        repOk = rep.frames > 0 && rep.keys > 0;
+        arena.unpinRun();
+    }
+    const bool pass = liveOk && repOk;
+    std::printf("video result: %s (live %s%s)\n", pass ? "PASS" : "FAIL", liveOk ? "ok" : "no keyframes",
+                replay ? (repOk ? ", replay ok" : ", replay no keyframes") : "");
+    return pass ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "usage: photon-v2-probe <token> <seconds> [--expect-refused | --tiles [--window <fromMs> <toMs>]]\n");
@@ -512,6 +691,23 @@ int main(int argc, char** argv) {
     const double seconds = std::atof(argv[2]);
     const bool expectRefused = argc > 3 && std::strcmp(argv[3], "--expect-refused") == 0;
     const bool tiles = argc > 3 && std::strcmp(argv[3], "--tiles") == 0;
+    const bool video = argc > 3 && std::strcmp(argv[3], "--video") == 0;
+    bool replay = false;
+    std::uint64_t replayFrom = 0;
+    double replaySeconds = 0.0;
+    if (video) {
+        for (int i = 4; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--replay-from") == 0 && i + 2 < argc) {
+                replay = true;
+                replayFrom = std::strtoull(argv[i + 1], nullptr, 10);
+                replaySeconds = std::atof(argv[i + 2]);
+                i += 2;
+            } else {
+                std::fprintf(stderr, "usage: photon-v2-probe <token> <seconds> --video [--replay-from <fromMs> <replaySeconds>]\n");
+                return 2;
+            }
+        }
+    }
     // --window takes the fed interval from the caller instead of the live samples the probe sees.
     bool haveWindow = false;
     std::uint64_t winFrom = 0;
@@ -546,6 +742,7 @@ int main(int argc, char** argv) {
     client.setUrl("ws://127.0.0.1:6900/v2");
     const int rc = expectRefused ? runRefused(arena, client, seconds)
                  : tiles         ? runTiles(arena, client, seconds, haveWindow, winFrom, winTo)
+                 : video         ? runVideo(arena, client, seconds, replay, replayFrom, replaySeconds)
                                  : runTest(arena, client, seconds);
     std::fflush(stdout);
     return rc;
