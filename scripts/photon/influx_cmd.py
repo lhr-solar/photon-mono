@@ -35,14 +35,23 @@ ENTERPRISE_CORES = "2"
 
 # Memory caps for a ~1 GB machine shared with photon-server (see the module doc).
 MEMORY_CAPS = [
-    "--exec-mem-pool-size", "192MB",      # query execution; over it a query fails
-    "--file-cache-size", "64MB",          # in-memory data file cache
-    "--force-snapshot-mem-size", "128MB",  # write buffer before a forced snapshot
+    "--exec-mem-pool-size", "192MB",  # query execution; over it a query fails
+    "--file-cache-size", "64MB",      # in-memory data file cache
 ]
-# Enterprise compaction would otherwise budget 50% of RAM for its inputs.
+# Core's Parquet engine: write buffer before a forced snapshot (Enterprise's
+# PachaTree engine ignores this flag and warns about it).
+CORE_MEMORY_CAPS = [
+    "--force-snapshot-mem-size", "128MB",
+]
+# Enterprise (PachaTree engine). Its defaults scale with the machine: the replica
+# buffer takes 50% of RAM (up to 16 GB), a snapshot bucket 250 MB, compaction 50%
+# of RAM, and at least 50 queries may run at once (photon-server sends at most 6).
 ENTERPRISE_MEMORY_CAPS = [
+    "--replica-max-buffer-size", "128MB",
+    "--snapshot-size", "64MB",
     "--compactor-input-size-budget", "128MB",
     "--compactor-max-concurrent-merges", "1",
+    "--max-concurrent-queries", "16",  # its advisory minimum; photon-server sends at most 6
 ]
 
 
@@ -138,6 +147,8 @@ def main(words) -> None:
            "--wal-flush-interval", WAL_FLUSH]
     if caps:
         cmd += MEMORY_CAPS
+        if edition != "enterprise":
+            cmd += CORE_MEMORY_CAPS
     if edition == "enterprise":
         cmd += ["--cluster-id", CLUSTER_ID, "--num-cores", ENTERPRISE_CORES]
         if caps:
