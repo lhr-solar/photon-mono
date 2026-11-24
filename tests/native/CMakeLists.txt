@@ -9,6 +9,7 @@ add_executable(photon-tests
     test_protocol_v2.cpp
     test_live_v2.cpp
     test_control_v2.cpp
+    test_video_v2.cpp
     test_dbc.cpp
     test_log_sessions.cpp
     test_pcan.cpp
@@ -33,6 +34,7 @@ add_executable(photon-tests
     ${CMAKE_SOURCE_DIR}/photon/ui/src/analysis_eval.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/tile_store.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/live_v2.cpp
+    ${CMAKE_SOURCE_DIR}/photon/ui/src/video_v2.cpp
 )
 
 target_link_libraries(photon-tests PRIVATE photon-core photon-export-lib photon_daemon)
