@@ -144,6 +144,22 @@ public:
         out = std::move(items);
     }
 
+    bool has(std::string_view key) const { return field(key) != nullptr; }
+
+    // Calls fn with a Fields for the object at key. A field that is not an object sets err.
+    template <class Fn>
+    void object(std::string_view key, Fn&& fn) const {
+        const json::Value* v = field(key);
+        if (!v) {
+            return;
+        }
+        if (!v->isObject()) {
+            fail(key, "an object");
+            return;
+        }
+        fn(Fields(*v, err_));
+    }
+
     // Calls fn with a Fields for each object in the array at key.
     template <class Fn>
     void objects(std::string_view key, Fn&& fn) const {
@@ -340,6 +356,16 @@ json::Object toJson(const VideoStatus& m) {
     obj.emplace("mode", json::Value(m.mode));
     obj.emplace("t_ms", json::Value(m.tMs));
     obj.emplace("clock", json::Value(m.clock));
+    if (m.qid) {
+        obj.emplace("qid", json::Value(*m.qid));
+    }
+    if (m.gap) {
+        json::Object gap;
+        gap.emplace("from_ms", json::Value(m.gap->fromMs));
+        gap.emplace("to_ms", json::Value(m.gap->toMs));
+        gap.emplace("reason", json::Value(m.gap->reason));
+        obj.emplace("gap", json::Value(std::move(gap)));
+    }
     return obj;
 }
 
@@ -476,6 +502,20 @@ VideoStatus readVideoStatus(const Fields& f) {
     f.text("mode", m.mode);
     f.integer("t_ms", m.tMs);
     f.text("clock", m.clock);
+    if (f.has("qid")) {
+        std::uint32_t qid = 0;
+        f.integer("qid", qid);
+        m.qid = qid;
+    }
+    if (f.has("gap")) {
+        VideoGap gap;
+        f.object("gap", [&gap](const Fields& g) {
+            g.integer("from_ms", gap.fromMs);
+            g.integer("to_ms", gap.toMs);
+            g.text("reason", gap.reason);
+        });
+        m.gap = gap;
+    }
     return m;
 }
 

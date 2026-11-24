@@ -113,11 +113,23 @@ struct VideoSeek {
     std::int64_t tMs = 0;
 };
 
-// S -> C. clock says where the time came from.
+// What has no video between fromMs and toMs. reason is "none" (nothing was
+// recorded), "archived" (stored elsewhere, not on the server) or "stale" (live:
+// the camera has been silent since fromMs; toMs is 0).
+struct VideoGap {
+    std::int64_t fromMs = 0;
+    std::int64_t toMs = 0;
+    std::string reason;
+};
+
+// S -> C. clock says where the time came from. qid is set when the status answers
+// a video_seek; gap is set while the stream has no video to show.
 struct VideoStatus {
     std::string mode;
     std::int64_t tMs = 0;
     std::string clock;
+    std::optional<std::uint32_t> qid;
+    std::optional<VideoGap> gap;
 };
 
 // Both directions. tMs is echoed back by the server's pong.

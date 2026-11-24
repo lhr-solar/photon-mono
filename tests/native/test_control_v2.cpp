@@ -423,6 +423,50 @@ void testParseDeepNesting() {
     CHECK(escaped.has_value());
 }
 
+// video_status carries an optional qid (after a video_seek) and an optional gap.
+void testVideoStatusGap() {
+    c2::VideoStatus withGap;
+    withGap.mode = "replay";
+    withGap.tMs = 3;
+    withGap.clock = "frame";
+    withGap.qid = 0x40000001u;
+    withGap.gap = c2::VideoGap{1, 2, "none"};
+    CHECK(c2::serialize(withGap) ==
+          R"({"clock":"frame","gap":{"from_ms":1,"reason":"none","to_ms":2},"mode":"replay","qid":1073741825,"t_ms":3,"type":"video_status"})");
+    expectRoundTrip(withGap);
+
+    // A plain status has neither field, so the text is the same as before the gap existed.
+    c2::VideoStatus plain;
+    plain.mode = "live";
+    plain.clock = "receive";
+    CHECK(c2::serialize(plain) == R"({"clock":"receive","mode":"live","t_ms":0,"type":"video_status"})");
+
+    const auto stale = c2::parse(
+        R"({"type":"video_status","mode":"live","t_ms":5,"clock":"receive","gap":{"from_ms":100,"to_ms":0,"reason":"stale"}})");
+    CHECK(stale.has_value());
+    if (stale) {
+        const auto& st = std::get<c2::VideoStatus>(*stale);
+        CHECK(st.gap.has_value());
+        CHECK(st.gap && st.gap->reason == "stale");
+        CHECK(st.gap && st.gap->fromMs == 100 && st.gap->toMs == 0);
+        CHECK(!st.qid.has_value());
+    }
+
+    const auto archived = c2::parse(
+        R"({"type":"video_status","mode":"replay","t_ms":5,"clock":"ntp","qid":7,"gap":{"from_ms":1,"to_ms":9,"reason":"archived"}})");
+    CHECK(archived.has_value());
+    if (archived) {
+        const auto& st = std::get<c2::VideoStatus>(*archived);
+        CHECK(st.qid.has_value() && *st.qid == 7u);
+        CHECK(st.gap && st.gap->reason == "archived");
+    }
+
+    CHECK(!c2::parse(R"({"type":"video_status","mode":"live","t_ms":5,"clock":"x","gap":5})").has_value());
+    CHECK(!c2::parse(R"({"type":"video_status","mode":"live","t_ms":5,"clock":"x","gap":{"from_ms":"a"}})")
+               .has_value());
+    CHECK(!c2::parse(R"({"type":"video_status","mode":"live","t_ms":5,"clock":"x","qid":-1})").has_value());
+}
+
 }  // namespace
 
 void runControlV2Tests() {
@@ -436,4 +480,5 @@ void runControlV2Tests() {
     testParseDefaults();
     testParseRejectsBadInput();
     testParseDeepNesting();
+    testVideoStatusGap();
 }
