@@ -40,3 +40,11 @@ func TestTileCacheDropsTilesPastTheWindow(t *testing.T) {
 		t.Fatalf("bytes %d hits %d, want 2 and 1", bytes, hits)
 	}
 }
+
+// The live run's tiles take at most 8 MiB, a half of the budget they had before the
+// server had a memory limit.
+func TestTileCacheBudgetIs8MiB(t *testing.T) {
+	if tileCacheMax != 8<<20 {
+		t.Fatalf("tileCacheMax = %d, want 8 MiB", tileCacheMax)
+	}
+}
