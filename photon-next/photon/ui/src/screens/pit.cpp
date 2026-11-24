@@ -1,3 +1,4 @@
+#include "photon_ui/catalog.hpp"
 #include "photon_ui/client.hpp"
 #include "photon_ui/screen.hpp"
 #include "photon_ui/signal_map.hpp"
@@ -16,6 +17,15 @@
 
 namespace photon::ui {
 namespace {
+
+// Video is off in this step (kVideoEnabled): a tile of the same size with a note.
+void drawVideoOff(ImVec2 size) {
+    theme::beginCard("videotile-off", size, theme::card());
+    ImGui::TextColored(theme::primary(), "Live View");
+    ImGui::SameLine();
+    ImGui::TextColored(theme::mutedFg(), "video coming back");
+    theme::endCard();
+}
 
 // Li-ion pit limits in Fahrenheit (DBC temps are Celsius).
 //   < 95 F  (~35 C)  green  — typical pack comfort
@@ -504,10 +514,6 @@ void drawPedalCard(const Vital& throttle, const Vital& front, const Vital& rear,
 }  // namespace
 
 void PitScreen::draw(UiContext& ui) {
-    ui.client.markVideoWanted();
-    if (ui.client.helloOk() && !ui.arena.video.subscribed && !ui.arena.catalogPinned()) {
-        ui.client.goLive();
-    }
     ui.arena.signalMap().subscribe(ui.client, MapScreen::Pit | MapScreen::Scene3d);
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -588,7 +594,11 @@ void PitScreen::draw(UiContext& ui) {
     const float embedW = (avail.x - gap) * 0.5f;
     drawScene3DTile(ui.arena, ImVec2(embedW, embedH));
     ImGui::SameLine(0.0f, gap);
-    drawVideoTile(ui.arena, ImVec2(embedW, embedH));
+    if (kVideoEnabled) {
+        drawVideoTile(ui.arena, ImVec2(embedW, embedH));
+    } else {
+        drawVideoOff(ImVec2(embedW, embedH));
+    }
 
     drawCellStrip(ui.arena.cells(), ui.arena.signalMap().heat(), ImVec2(avail.x, kCellStripH));
     ImGui::PopStyleVar();

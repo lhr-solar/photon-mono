@@ -560,9 +560,8 @@ private:
                                 (rpmFr.mapped && rpmFr.have) || (suspFl.mapped && suspFl.have) ||
                                 (suspFr.mapped && suspFr.have) || (suspRr.mapped && suspRr.have) ||
                                 (speed.mapped && speed.have);
-        const bool liveSource = arena.source == ctrl::SourceKind::LogReplay ||
-                                arena.source == ctrl::SourceKind::DaqTcp ||
-                                arena.source == ctrl::SourceKind::Pcan;
+        // Connected to the server is the live source now.
+        const bool liveSource = arena.server.helloOk;
         // A catalog pin is the log. Do not keep the sine-wave car running
         // beside history tiles.
         synthetic_ = !arena.catalogPinned() && !mappedLive && !liveSource;
@@ -822,7 +821,7 @@ void drawScene3DView(ClientArena& arena, ImVec2 size, bool overlay, bool hostMap
         return;
     }
     // Parsing newCar.glb on the first frame blocked the WS hello for ~40s.
-    if (!arena.haveActiveSource) {
+    if (!arena.server.helloOk) {
         ImGui::BeginChild("gl3d-wait", size, ImGuiChildFlags_None);
         ImGui::TextColored(theme::mutedFg(), "Connecting…");
         ImGui::EndChild();

@@ -25,19 +25,18 @@ std::string assetRoot();
 std::string assetPath(std::string_view relative);
 
 struct NativePageOptions {
-    std::string liveUrl = "ws://127.0.0.1:8765";
+    std::string liveUrl = "ws://127.0.0.1:6900/v2";
     bool sharedConsole = true;
     std::string publicHost;
     std::string screen;
-    std::string basicUser = "photon";
-    std::string basicPassword;
+    std::string password;  // LAN password, sent as hello.token
     double quitAfterMs = 0.0;
 };
 
 // No-op under Emscripten. Call before ClientArena is constructed.
 void configureNativePage(NativePageOptions opt);
 std::string nativeScreenParam();
-std::string nativeWsBasicB64();
+std::string nativePassword();
 #ifndef __EMSCRIPTEN__
 const NativePageOptions& nativePageOptions();
 void nativeHostAttach(void* hwnd);

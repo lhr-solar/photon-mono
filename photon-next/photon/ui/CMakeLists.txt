@@ -64,6 +64,7 @@ set(PHOTON_UI_SOURCES
     src/main.cpp
     src/app.cpp
     src/arena.cpp
+    src/live_v2.cpp
     src/page_url.cpp
     src/client.cpp
     src/signal_map.cpp
@@ -95,7 +96,6 @@ set(PHOTON_UI_SOURCES
     src/screens/plots.cpp
     src/screens/scene3d.cpp
     src/screens/stubs.cpp
-    src/screens/tracksim.cpp
 )
 
 set(PHOTON_MODELS_DIR "${CMAKE_SOURCE_DIR}/assets/models")

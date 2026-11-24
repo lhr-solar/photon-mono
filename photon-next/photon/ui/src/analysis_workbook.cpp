@@ -590,12 +590,22 @@ const CustomView& activeAnalysisView(const AnalysisWorkbook& doc) {
     return doc.views[static_cast<std::size_t>(doc.active)];
 }
 
-bool sameAnalysisSignal(const ViewSignal& src, const ctrl::CatalogSignal& sig) {
+namespace {
+
+// Name match only: CAN message id plus signal name, or message name plus signal name.
+bool sameAnalysisName(const ViewSignal& src, const ctrl::CatalogSignal& sig) {
     if (src.messageId != 0 && sig.messageId != 0 && !src.signalName.empty()) {
         return src.messageId == sig.messageId && src.signalName == sig.name;
     }
-    if (!src.messageName.empty() && !src.signalName.empty()) {
-        return src.messageName == sig.message && src.signalName == sig.name;
+    return !src.messageName.empty() && !src.signalName.empty() && src.messageName == sig.message &&
+           src.signalName == sig.name;
+}
+
+}  // namespace
+
+bool sameAnalysisSignal(const ViewSignal& src, const ctrl::CatalogSignal& sig) {
+    if (sameAnalysisName(src, sig)) {
+        return true;
     }
     return src.id != 0 && src.id == sig.id;
 }
@@ -614,20 +624,35 @@ void resolveAnalysisSignals(AnalysisWorkbook& doc, const std::vector<ctrl::Catal
     for (CustomView& view : doc.views) {
         for (ViewCell& cell : view.cells) {
             for (ViewSignal& src : cell.sources) {
+                // Names first, across the whole catalog. The stored id is only a
+                // fallback, because a new sha renumbers the ids.
+                const ctrl::CatalogSignal* hit = nullptr;
                 for (const ctrl::CatalogSignal& sig : catalog) {
-                    if (sameAnalysisSignal(src, sig)) {
-                        src.id = sig.id;
-                        if (src.messageId == 0) {
-                            src.messageId = sig.messageId;
-                        }
-                        if (src.messageName.empty()) {
-                            src.messageName = sig.message;
-                        }
-                        if (src.signalName.empty()) {
-                            src.signalName = sig.name;
-                        }
+                    if (sameAnalysisName(src, sig)) {
+                        hit = &sig;
                         break;
                     }
+                }
+                if (hit == nullptr && src.id != 0) {
+                    for (const ctrl::CatalogSignal& sig : catalog) {
+                        if (sig.id == src.id) {
+                            hit = &sig;
+                            break;
+                        }
+                    }
+                }
+                if (hit == nullptr) {
+                    continue;
+                }
+                src.id = hit->id;
+                if (src.messageId == 0) {
+                    src.messageId = hit->messageId;
+                }
+                if (src.messageName.empty()) {
+                    src.messageName = hit->message;
+                }
+                if (src.signalName.empty()) {
+                    src.signalName = hit->name;
                 }
             }
         }

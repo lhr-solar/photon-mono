@@ -1,9 +1,11 @@
 #include "photon_ui/screen.hpp"
 
 #include "photon_ui/arena.hpp"
+#include "photon_ui/catalog.hpp"
 #include "photon_ui/client.hpp"
 #include "photon_ui/scene3d.hpp"
 #include "photon_ui/signal_map.hpp"
+#include "photon_ui/theme.hpp"
 #include "photon_ui/video.hpp"
 
 #include "imgui.h"
@@ -16,6 +18,15 @@
 
 namespace photon::ui {
 namespace {
+
+// Video is off in this step (kVideoEnabled): a tile of the same size with a note.
+void drawVideoOff(ImVec2 size) {
+    theme::beginCard("videotile-off", size, theme::card());
+    ImGui::TextColored(theme::primary(), "Live View");
+    ImGui::SameLine();
+    ImGui::TextColored(theme::mutedFg(), "video coming back");
+    theme::endCard();
+}
 
 struct Series {
     std::vector<double> t;
@@ -81,10 +92,6 @@ void status(const char* label, const SignalRing* ring, const char* unit, double 
 }  // namespace
 
 void MechanicalScreen::draw(UiContext& ui) {
-    ui.client.markVideoWanted();
-    if (ui.client.helloOk() && !ui.arena.video.subscribed && !ui.arena.catalogPinned()) {
-        ui.client.goLive();
-    }
     ui.arena.signalMap().subscribe(ui.client, MapScreen::Pit | MapScreen::Dynamics |
                                                   MapScreen::Dashboard | MapScreen::Scene3d);
     const double end = static_cast<double>(ui.arena.displayCursorMs());
@@ -96,7 +103,12 @@ void MechanicalScreen::draw(UiContext& ui) {
     ImGui::TextUnformatted("RACE CONTEXT");
     const float tileWidth = std::max(200.0f, ImGui::GetContentRegionAvail().x);
     drawScene3DTile(ui.arena, ImVec2(tileWidth, std::max(170.0f, side * 0.62f)));
-    drawVideoTile(ui.arena, ImVec2(tileWidth, std::max(155.0f, side * 0.56f)));
+    const ImVec2 videoSize(tileWidth, std::max(155.0f, side * 0.56f));
+    if (kVideoEnabled) {
+        drawVideoTile(ui.arena, videoSize);
+    } else {
+        drawVideoOff(videoSize);
+    }
     status("Speed", ringFor(ui, "vehicle_speed"), "mph", kMpsToMph);
     ImGui::TextUnformatted("Driver inputs | 15 s");
     const auto throttle = seriesFor(ui, "throttle", start, end);

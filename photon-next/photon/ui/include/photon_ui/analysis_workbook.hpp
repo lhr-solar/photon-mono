@@ -135,6 +135,7 @@ std::vector<std::uint32_t> collectWorkbookSignalIds(const AnalysisWorkbook& doc)
 
 void upsertPrimaryBinding(AnalysisWorkbook& doc, const AnalysisRunBinding& bind);
 void upsertOverlayBinding(AnalysisWorkbook& doc, const AnalysisRunBinding& bind);
+// Still used by tests/native/test_analysis_workbook.cpp (v1 CatalogSession).
 AnalysisRunBinding bindingFromCatalog(const ctrl::Message::CatalogSession& row);
 bool catalogMatchesListing(const ctrl::Message::CatalogSession& row, std::string_view id, std::uint64_t minMs,
                            std::uint64_t maxMs, std::string_view dbcHash);

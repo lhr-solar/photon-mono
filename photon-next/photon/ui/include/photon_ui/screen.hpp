@@ -114,7 +114,6 @@ public:
     void draw(UiContext& ui) override;
 
 private:
-    std::uint64_t replayMs_ = 0;
     bool showScene_ = true;
     bool showVideo_ = true;
     float sceneFraction_ = 0.5f;
@@ -125,29 +124,6 @@ public:
     const char* id() const override { return "scene3d"; }
     const char* label() const override { return "3D"; }
     void draw(UiContext& ui) override;
-};
-
-class TrackSimScreen final : public Screen {
-public:
-    const char* id() const override { return "tracksim"; }
-    const char* label() const override { return "Track Sim"; }
-    void draw(UiContext& ui) override;
-
-private:
-    bool pickedDefault_ = false;
-    int trackIndex_ = 0;
-    int budgetMin_ = 6;
-    int budgetSec_ = 40;
-    float budgetS_ = 400.0f;
-    bool useMph_ = true;
-    bool debouncePending_ = false;
-    double debounceUntilS_ = 0.0;
-    double lastMeasurePollS_ = -10.0;
-
-    void syncBudgetFromParts();
-    void syncPartsFromBudget();
-    void queueSolve();
-    void sendSolve(UiContext& ui);
 };
 
 class CanScreen final : public Screen {
@@ -167,23 +143,8 @@ public:
     void draw(UiContext& ui) override;
 
 private:
-    int sourceIndex_ = 1;
-    char host_[64] = "127.0.0.1";
-    int port_ = 6500;
-    char path_[512] = "";
-    char url_[128] = "ws://127.0.0.1:8765";
-    int pcanChannel_ = 1;
-    int pcanBaudIndex_ = 1;
-    bool pcanListenOnly_ = true;
+    char url_[128] = "";
     bool hydrated_ = false;
-    ctrl::SourceKind syncedSource_ = ctrl::SourceKind::None;
-    std::string syncedHost_;
-    std::uint16_t syncedPort_ = 0;
-    std::string syncedPath_;
-    int dbcIndex_ = 0;
-    char dbcPath_[512] = "";
-    std::string syncedDbcId_;
-    std::string syncedDbcPath_;
 };
 
 class AnalysisRuntime;

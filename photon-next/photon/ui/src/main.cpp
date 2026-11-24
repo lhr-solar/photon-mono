@@ -100,8 +100,8 @@ void printUsage() {
                  "\n"
                  "  photon-ui [--ws URL] [--password PASS] [--private|--shared] [--screen ID]\n"
                  "\n"
-                 "  --ws URL        WebSocket (default ws://127.0.0.1:8765, or PHOTON_WS)\n"
-                 "  --password P    HTTP Basic password (user photon). Needed for :8080/ws\n"
+                 "  --ws URL        protocol v2 WebSocket (default ws://127.0.0.1:6900/v2, or PHOTON_WS)\n"
+                 "  --password P    LAN password sent in the hello (or PHOTON_PASSWORD); Cloudflare needs none\n"
                  "  --shared        Shared-console path (default). Catalog pin matches laptop UI\n"
                  "  --private       Loopback console path\n"
                  "  --screen ID     Open this tab (pit, plots, live, analysis, ...)\n");
@@ -115,7 +115,7 @@ bool parseArgs(int argc, char** argv, photon::ui::NativePageOptions& opt) {
     }
     if (const char* env = std::getenv("PHOTON_PASSWORD")) {
         if (env[0] != '\0') {
-            opt.basicPassword = env;
+            opt.password = env;
         }
     }
     for (int i = 1; i < argc; ++i) {
@@ -146,7 +146,7 @@ bool parseArgs(int argc, char** argv, photon::ui::NativePageOptions& opt) {
             continue;
         }
         if (const char* v = take("--password")) {
-            opt.basicPassword = v;
+            opt.password = v;
             continue;
         }
         if (const char* v = take("--screen")) {

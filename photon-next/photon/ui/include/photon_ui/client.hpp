@@ -1,6 +1,6 @@
 #pragma once
 
-#include "photon/control.hpp"
+#include "photon/control_v2.hpp"
 #include "photon_ui/arena.hpp"
 #include "photon_ui/history_io.hpp"
 
@@ -20,6 +20,9 @@ namespace photon::ui {
 
 class AnalysisRuntime;
 
+// Protocol v2 client: one WebSocket to the server's /v2. The server decodes
+// everything; this client only subscribes to catalog signal indexes (client id
+// minus one) and reads decoded values.
 class Client : public HistoryIO {
 public:
     enum class State { Disconnected, Connecting, Connected, HelloOk };
@@ -31,56 +34,53 @@ public:
     void connect();
     void disconnect(const char* why);
     void setUrl(std::string url);
+    // The LAN password, sent as hello.token. Empty when there is none.
+    void setToken(std::string token);
+    const std::string& token() const { return token_; }
+    // True after the server refused the hello for its token. Reconnects stop
+    // until setToken is called.
+    bool loginRefused() const { return loginRefused_; }
 
-    bool send(const ctrl::Message& msg);
-    void selectSource(ctrl::SourceKind kind, std::string host, std::uint16_t port, std::string path,
-                      int channel = 1, int baud = 250000, bool listenOnly = true);
-    void selectDbc(std::string idOrPath, bool bundledId);
-    void setSubscribed(std::uint32_t id, bool on);
-    void ensureSubscribed(std::span<const std::uint32_t> ids);
+    bool send(const ctrl2::Message& msg);
+
+    // Live interest. Ids are client ids (catalog index + 1); 0 is ignored. The
+    // subscribe message carries the whole set, sent at most once per tick. The
+    // set is trimmed to the ids named between beginInterest and commitInterest
+    // when that bracket is used.
     void beginInterest();
-    void markCanWanted();
-    void markVideoWanted();
+    void ensureSubscribed(std::span<const std::uint32_t> ids);
+    void setSubscribed(std::uint32_t id, bool on);
     void commitInterest();
-    void sendTimeline(ctrl::TimelineMode mode, std::uint64_t cursorMs);
-    void playLog(std::string path, std::uint64_t cursorMs = 0);
-    void playCatalogSession(const ctrl::Message::CatalogSession& row, std::uint64_t cursorMs = 0);
-    void playDate(std::string ymd);
-    void goLive();
-    void requestTrackSimList();
-    void requestTrackSim(std::string trackId, double timeBudgetS, double initialSoc,
-                         tracksim::CarOverride car = {});
-    void subscribeVideo(ctrl::VideoMode mode, std::uint64_t startMs = 0);
-    void stopVideo();
-    void flushVideoLocate();
-    void setVideoClock(std::int64_t offsetMs);
-    void requestHistory(std::uint32_t queryId, std::string sessionId, std::uint64_t fromMs, std::uint64_t toMs,
-                        std::vector<std::uint32_t> signalIds, std::uint32_t maxPoints) override;
+    const std::unordered_set<std::uint32_t>& subscribed() const { return subscribed_; }
+
+    void requestRuns();
+    // Tiles arrive in step 2. Until then these send nothing and tiles stay empty.
+    void requestHistory(std::uint32_t queryId, std::string sessionId, std::uint64_t fromMs,
+                        std::uint64_t toMs, std::vector<std::uint32_t> signalIds,
+                        std::uint32_t maxPoints) override;
     void cancelHistory(std::uint32_t queryId) override;
 
-    // Analysis-owned caches only. Never setSession / selectSource on arena.
+    // Analysis-owned caches only.
     void bindAnalysisRuntime(AnalysisRuntime* runtime);
-    void requestCatalogList();
-    const std::vector<ctrl::Message::CatalogSession>& historyCatalog() const { return historyCatalog_; }
-    bool haveHistoryCatalog() const { return haveHistoryCatalog_; }
 
     State state() const { return state_; }
     const char* stateLabel() const;
     bool helloOk() const { return state_ == State::HelloOk; }
-    const std::unordered_set<std::uint32_t>& subscribed() const { return subscribed_; }
     const std::string& url() const { return url_; }
 
     void handleOpen();
-    void handleClose(const char* why, bool error);
+    // closeCode and reason are the WebSocket close status and text, when the socket gave them.
+    void handleClose(const char* why, bool error, std::uint16_t closeCode = 0, std::string_view reason = {});
     void handleText(std::string_view text);
     void handleBinary(std::span<const std::uint8_t> bytes);
 
 private:
     ClientArena& arena_;
     AnalysisRuntime* analysisRuntime_ = nullptr;
-    std::vector<ctrl::Message::CatalogSession> historyCatalog_;
-    bool haveHistoryCatalog_ = false;
     std::string url_;
+    std::string token_;
+    bool loginRefused_ = false;
+    bool askToken_ = false;  // the web page should ask for the password (from tick)
 #ifdef __EMSCRIPTEN__
     int socket_ = 0;
 #else
@@ -90,50 +90,24 @@ private:
     State state_ = State::Disconnected;
     int backoffIndex_ = 0;
     double nextReconnectMs_ = 0.0;
-    double lastHeartbeatMs_ = 0.0;
+    double lastPingMs_ = 0.0;
+    double lastGapLogMs_ = 0.0;
+    // Wanted live signals (client ids), and the set the server was last sent.
     std::unordered_set<std::uint32_t> subscribed_;
     std::unordered_set<std::uint32_t> interest_;
+    std::vector<std::uint32_t> sentSubscribed_;
     bool interestOpen_ = false;
-    bool canWanted_ = false;
-    bool canInterest_ = false;
-    bool videoInterest_ = false;
-    ctrl::SourceKind pendingSource_ = ctrl::SourceKind::None;
-    bool userPickedSource_ = false;
-    std::string pendingHost_ = "127.0.0.1";
-    std::uint16_t pendingPort_ = 6500;
-    std::string lastDaqHost_ = "127.0.0.1";
-    std::uint16_t lastDaqPort_ = 6500;
-    std::string pendingPath_;
-    int pendingChannel_ = 1;
-    int pendingBaud_ = 250000;
-    bool pendingListenOnly_ = true;
-    bool userPickedDbc_ = false;
-    bool pendingDbcBundled_ = true;
-    std::string pendingDbc_;
-    bool videoWanted_ = false;
-    ctrl::VideoMode videoMode_ = ctrl::VideoMode::Live;
-    std::uint64_t videoStartMs_ = 0;
-    bool locateSent_ = false;
-    double lastLiveLocateMs_ = 0.0;
-    std::uint64_t lastReplayLocateAtMs_ = 0;
-    std::uint64_t lastReplayLocateNewestMs_ = 0;
-    double locateBackoffMs_ = 0.0;
-    // The live t=0 poll runs 2.5x a second. One log line per poll buried
-    // everything else in the drawer, so live locates log on this interval.
-    double lastLocateLogMs_ = 0.0;
+    bool subscribeDirty_ = true;
+    bool catalogSeen_ = false;  // a catalog arrived on this connection
+    std::uint32_t serverSignalCount_ = 0;  // signals in the server's catalog (indexes 0..n-1)
 
     void attachCallbacks();
     void scheduleReconnect(double nowMs);
-    void resubscribe();
-    void sendSubscriptions();
-    void sendCanMonitor(bool on);
-    void adoptActiveSource(const ctrl::Message::ActiveSource& active);
-    void applyHelloAck(const ctrl::Message& msg);
-    void maybeAdoptDriveDay();
-    const ctrl::Message::CatalogSession* bestCatalogForYmd(const std::string& ymd) const;
-    const ctrl::Message::CatalogSession* bestCatalogOverlapping(std::uint64_t minMs,
-                                                                std::uint64_t maxMs) const;
-    void openExtractLog(std::string path, std::uint64_t cursorMs);
+    void applyHelloAck(const ctrl2::HelloAck& ack);
+    void applyCatalog(const ctrl2::Catalog& catalog);
+    void applyLiveSamples(std::span<const std::uint8_t> bytes);
+    void flushSubscribe();
+    void sendPing(double nowMs);
 };
 
 }  // namespace photon::ui

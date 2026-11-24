@@ -174,7 +174,7 @@ struct AnalysisScreen::State {
     float threshold = 0.0f;
     int edge = 0;
     bool loaded = false;
-    bool catalogAsked = false;
+    bool runsAsked = false;
     bool eventsOpen = true;
     bool plotScrubbing = false;
     std::string status;
@@ -224,28 +224,39 @@ void markDirty(AnalysisScreen::State& st) {
     saveWorkbook(st.doc);
 }
 
-void bindPrimary(AnalysisRuntime& runtime, AnalysisScreen::State& st, const ctrl::Message::CatalogSession& row) {
-    auto* run = runtime.bind(bindingFromCatalog(row));
+// A run from the server's runs list. Bounds are Unix ms.
+AnalysisRunBinding bindingFromRun(const ctrl2::Run& row) {
+    AnalysisRunBinding bind;
+    bind.sessionId = row.id;
+    bind.dbcHash = row.dbcSha;
+    bind.minMs = row.startMs > 0 ? static_cast<std::uint64_t>(row.startMs) : std::uint64_t{0};
+    bind.maxMs = row.endMs > 0 ? static_cast<std::uint64_t>(row.endMs) : std::uint64_t{0};
+    return bind;
+}
+
+void bindPrimary(AnalysisRuntime& runtime, AnalysisScreen::State& st, const ctrl2::Run& row) {
+    const AnalysisRunBinding bind = bindingFromRun(row);
+    auto* run = runtime.bind(bind);
     if (run == nullptr) {
         st.status = "Could not bind run";
         return;
     }
     upsertPrimaryBinding(st.doc, run->binding());
-    runtime.setCursorMs(row.maxMs == 0 ? row.minMs : row.maxMs);
-    if (row.maxMs > row.minMs) {
-        const auto span = row.maxMs - row.minMs;
+    runtime.setCursorMs(bind.maxMs == 0 ? bind.minMs : bind.maxMs);
+    if (bind.maxMs > bind.minMs) {
+        const auto span = bind.maxMs - bind.minMs;
         runtime.setWindowMs(std::min<std::uint64_t>(span, 60000));
     }
     markDirty(st);
     st.status = "Bound " + row.id;
 }
 
-void bindOverlay(AnalysisRuntime& runtime, AnalysisScreen::State& st, const ctrl::Message::CatalogSession& row) {
-    AnalysisRunBinding bind = bindingFromCatalog(row);
+void bindOverlay(AnalysisRuntime& runtime, AnalysisScreen::State& st, const ctrl2::Run& row) {
+    AnalysisRunBinding bind = bindingFromRun(row);
     bind.role = AnalysisRunRole::Overlay;
     if (const auto* primary = runtime.primary()) {
         bind.timeOffsetMs = static_cast<std::int64_t>(primary->binding().minMs) -
-                            static_cast<std::int64_t>(row.minMs);
+                            static_cast<std::int64_t>(bind.minMs);
     }
     for (const auto& existing : st.doc.runBindings) {
         if (existing.role == AnalysisRunRole::Overlay && existing.sessionId == row.id) {
@@ -353,23 +364,21 @@ void drawCatalogRail(UiContext& ui, AnalysisRuntime& runtime, AnalysisScreen::St
                       ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::Text("Runs");
     ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputTextWithHint("##cat-search", "Filter session id", st.catalogFilter, sizeof(st.catalogFilter));
+    ImGui::InputTextWithHint("##cat-search", "Filter run id or dbc", st.catalogFilter, sizeof(st.catalogFilter));
     theme::pushSmallFont();
-    ImGui::TextWrapped("Pick a historical run. Pit keeps the titlebar session.");
+    ImGui::TextWrapped("Pick a run to analyze. O adds it as an overlay.");
     theme::popSmallFont();
     ImGui::Separator();
 
-    if (!ui.client.haveHistoryCatalog()) {
-        ImGui::TextColored(theme::mutedFg(), "Loading catalog.json…");
-    } else if (ui.client.historyCatalog().empty()) {
-        ImGui::TextWrapped("No sessions in catalog.json. Analysis lists historical TSDB runs with bounds and DBC hash.");
+    if (ui.arena.runs.empty()) {
+        ImGui::TextColored(theme::mutedFg(), "No runs yet.");
     } else {
         ImGui::BeginChild("##catalog-list", ImVec2(0.0f, ImGui::GetContentRegionAvail().y * 0.48f),
                           ImGuiChildFlags_None);
         const auto* primary = runtime.primary();
         const auto* overlay = runtime.overlay();
-        for (const auto& row : ui.client.historyCatalog()) {
-            if (!containsI(row.id, st.catalogFilter) && !containsI(row.dbcHash, st.catalogFilter)) {
+        for (const auto& row : ui.arena.runs) {
+            if (!containsI(row.id, st.catalogFilter) && !containsI(row.dbcSha, st.catalogFilter)) {
                 continue;
             }
             ImGui::PushID(row.id.c_str());
@@ -381,11 +390,9 @@ void drawCatalogRail(UiContext& ui, AnalysisRuntime& runtime, AnalysisScreen::St
                 bindPrimary(runtime, st, row);
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("t=[%llu, %llu]\ndbc=%s\nsamples=%llu%s\nClick = primary. O = overlay.",
-                                  static_cast<unsigned long long>(row.minMs),
-                                  static_cast<unsigned long long>(row.maxMs), row.dbcHash.c_str(),
-                                  static_cast<unsigned long long>(row.sampleCount),
-                                  row.hasVideo ? "\nvideo" : "");
+                ImGui::SetTooltip("t=[%lld, %lld]\ndbc=%s%s\nClick = primary. O = overlay.",
+                                  static_cast<long long>(row.startMs), static_cast<long long>(row.endMs),
+                                  row.dbcSha.c_str(), row.live ? "\nlive" : "");
             }
             ImGui::SameLine();
             if (ImGui::SmallButton(isOverlay ? "O*" : "O")) {
@@ -1166,18 +1173,20 @@ void AnalysisScreen::draw(UiContext& ui) {
         gPendingImport.clear();
         gHaveImport = false;
     }
-    if (ui.client.helloOk() && !st.catalogAsked) {
-        ui.client.requestCatalogList();
-        st.catalogAsked = true;
+    if (!ui.client.helloOk()) {
+        st.runsAsked = false;
+    } else if (!st.runsAsked) {
+        ui.client.requestRuns();
+        st.runsAsked = true;
     }
     resolveAnalysisSignals(st.doc, ui.arena.signalCatalog);
-    if (!st.doc.runBindings.empty() && ui.client.haveHistoryCatalog()) {
+    if (!st.doc.runBindings.empty() && !ui.arena.runs.empty()) {
         if (!runtime_->hasBoundRun()) {
             for (const auto& bind : st.doc.runBindings) {
                 if (bind.role != AnalysisRunRole::Primary) {
                     continue;
                 }
-                for (const auto& row : ui.client.historyCatalog()) {
+                for (const auto& row : ui.arena.runs) {
                     if (row.id == bind.sessionId) {
                         bindPrimary(*runtime_, st, row);
                         break;
@@ -1190,7 +1199,7 @@ void AnalysisScreen::draw(UiContext& ui) {
                 if (bind.role != AnalysisRunRole::Overlay) {
                     continue;
                 }
-                for (const auto& row : ui.client.historyCatalog()) {
+                for (const auto& row : ui.arena.runs) {
                     if (row.id == bind.sessionId) {
                         bindOverlay(*runtime_, st, row);
                         runtime_->setOverlayOffsetMs(bind.timeOffsetMs);

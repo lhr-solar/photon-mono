@@ -4,7 +4,6 @@
 #include "photon_ui/clock_format.hpp"
 #include "photon_ui/custom_view.hpp"
 #include "photon_ui/gl_api.hpp"
-#include "photon_ui/page_url.hpp"
 #include "photon_ui/platform.hpp"
 #include "photon_ui/scene3d.hpp"
 #include "photon_ui/theme.hpp"
@@ -30,7 +29,6 @@
 #include <span>
 #include <cstring>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #ifdef __EMSCRIPTEN__
@@ -49,97 +47,15 @@ extern "C" void photon_copy_screen_param(char* buf, int n);
 namespace photon::ui {
 namespace {
 
-const char* timelineLabel(std::uint8_t mode) {
-    switch (static_cast<proto::TimelineMode>(mode)) {
-        case proto::TimelineMode::Pause:
-            return "PAUSE";
-        case proto::TimelineMode::Play:
-            return "PLAY";
-        case proto::TimelineMode::Live:
-            return "LIVE";
-        case proto::TimelineMode::Buffering:
-            return "BUFFERING";
-        default:
-            return "----";
-    }
-}
-
-std::string_view baseName(std::string_view path) {
-    const auto slash = path.find_last_of("/\\");
-    if (slash == std::string_view::npos) {
-        return path;
-    }
-    return path.substr(slash + 1);
-}
-
-bool pathMentionsDay(const std::string& path, const ctrl::Message::DriveDay& day) {
-    if (path.empty()) {
-        return false;
-    }
-    if (!day.path.empty() && path == day.path) {
-        return true;
-    }
-    return !day.date.empty() && path.find(day.date) != std::string::npos;
-}
-
-bool liveFeed(const ClientArena& arena) {
-    if (arena.catalogPinned()) {
-        return false;
-    }
-    return arena.source == ctrl::SourceKind::DaqTcp || arena.source == ctrl::SourceKind::Pcan ||
-           arena.source == ctrl::SourceKind::Synthetic;
-}
-
-const ctrl::Message::DriveDay* replayDay(const ClientArena& arena) {
-    if (arena.source != ctrl::SourceKind::LogReplay) {
-        return nullptr;
-    }
-    for (const auto& day : arena.driveDays) {
-        if (pathMentionsDay(arena.sourcePath, day)) {
-            return &day;
-        }
-    }
-    return nullptr;
-}
-
-std::string sourceStatus(const ClientArena& arena, Client::State /*state*/) {
-    // Do not gate on HelloOk: adopt writes the source as soon as hello_ack
-    // arrives, and the label must stay visible across brief reconnects.
-    if (arena.catalogPinned()) {
-        std::string label = "Replay";
-        const auto day = localYmdFromUnixMs(arena.timeline().minTimeMs);
-        if (!day.empty()) {
-            label += " · ";
-            label += day;
-        }
-        return label;
-    }
-    if (liveFeed(arena)) {
-        std::string label = "Live";
-        const auto host = sourceDisplayHost(arena.sourceHost);
-        if (!host.empty()) {
-            label += " · ";
-            label += host;
-        }
-        return label;
-    }
-    if (arena.source == ctrl::SourceKind::LogReplay || !arena.sourcePath.empty()) {
-        std::string label = "Replay";
-        if (const auto* day = replayDay(arena)) {
-            label += " · ";
-            label += day->date;
-            return label;
-        }
-        if (!arena.sourcePath.empty()) {
-            label += " · ";
-            label += std::string(baseName(arena.sourcePath));
-        }
-        return label;
-    }
-    if (!arena.haveActiveSource) {
+// The live run on the server, or "--" before hello_ack.
+std::string sourceStatus(const ClientArena& arena, bool helloOk) {
+    if (!helloOk) {
         return "--";
     }
-    return std::string(ctrl::sourceName(arena.source));
+    if (arena.server.liveRun.empty()) {
+        return "No live run";
+    }
+    return "Live · " + arena.server.liveRun;
 }
 
 void formatClock(std::uint64_t ms, char* buf, std::size_t n) {
@@ -247,7 +163,6 @@ bool App::init() {
     screens_.push_back(std::make_unique<PduScreen>());
     screens_.push_back(std::make_unique<LiveViewScreen>());
     screens_.push_back(std::make_unique<Scene3dScreen>());
-    screens_.push_back(std::make_unique<TrackSimScreen>());
     screens_.push_back(std::make_unique<CanScreen>());
     screens_.push_back(std::make_unique<NetworkScreen>());
     screens_.push_back(std::make_unique<AnalysisScreen>());
@@ -316,17 +231,9 @@ void App::frame() {
 #endif
 
     client_.tick(nowMs());
-    arena_.tickPinnedPlayback(nowMs());
     if (arena_.consumeSessionFollow()) {
         for (auto& screen : screens_) {
             screen->onSessionChanged();
-        }
-    }
-    if (arena_.consumeIndexReady() && client_.helloOk() && !arena_.catalogPinned()) {
-        const auto& tl = arena_.timeline();
-        const auto mode = static_cast<ctrl::TimelineMode>(tl.mode);
-        if (mode != ctrl::TimelineMode::Play && mode != ctrl::TimelineMode::Live) {
-            client_.sendTimeline(ctrl::TimelineMode::Play, tl.cursorMs == 0 ? tl.minTimeMs : tl.cursorMs);
         }
     }
     client_.beginInterest();
@@ -391,7 +298,7 @@ void App::drawShell() {
     const ImVec2 rest = ImGui::GetContentRegionAvail();
     UiContext ctx{arena_, client_};
     ImGui::SetCursorScreenPos(ImGui::GetCursorScreenPos());
-    logDrawer_.draw(ctx, rest);
+    logDrawer_.draw(rest);
     const float drawerW = logDrawer_.occupiedWidth();
     ImGui::SetCursorPos(ImVec2(drawerW, barH + alarmH));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, theme::kContentWindowPadding);
@@ -408,10 +315,9 @@ void App::drawShell() {
     }
     ImGui::EndChild();
     ImGui::End();
-    logDrawer_.drawExportPopup(ctx);
     const bool popupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
     setMaps3dInteractive(!popupOpen);
-    if (logDrawer_.exportDialogOpen() || mapsOverlayHoldOff()) {
+    if (mapsOverlayHoldOff()) {
         hideMaps3d();
     }
 }
@@ -462,24 +368,13 @@ void App::drawTitlebar(ImVec2 size) {
     ImGui::EndGroup();
 
     const auto& tl = arena_.timeline();
-    const bool onLive = liveFeed(arena_);
     char clock[48];
-    formatClock(onLive ? liveTitlebarClockMs(tl.cursorMs) : arena_.displayCursorMs(), clock, sizeof(clock));
-    const auto* day = replayDay(arena_);
-    const std::string source = sourceStatus(arena_, client_.state());
-    const char* mode = timelineLabel(tl.mode);
-    const bool buffering = tl.mode == static_cast<std::uint8_t>(proto::TimelineMode::Buffering);
-    const bool showTransport = !onLive;
-    const bool showMode = !onLive || buffering;
-    const ImVec4 modeColor = buffering ? theme::warning() : theme::foreground();
+    formatClock(liveTitlebarClockMs(tl.cursorMs), clock, sizeof(clock));
+    const std::string source = sourceStatus(arena_, client_.helloOk());
 
     const float clusterGap = 8.0f;
-    const float liveW = 52.0f;
-    const float playW = 52.0f;
-    const float pauseW = 58.0f;
     const ImVec2 stateSz = ImGui::CalcTextSize(client_.stateLabel());
     const ImVec2 sourceSz = ImGui::CalcTextSize(source.c_str());
-    const ImVec2 modeSz = showMode ? ImGui::CalcTextSize(mode) : ImVec2(0.0f, 0.0f);
     const ctrl::CatalogSignal* antenna = findAntennaSignal(arena_);
     char antBuf[72];
     if (antenna != nullptr) {
@@ -496,100 +391,13 @@ void App::drawTitlebar(ImVec2 size) {
     }
     const ImVec2 antSz = ImGui::CalcTextSize(antBuf);
     const ImVec2 clockSz = ImGui::CalcTextSize(clock);
-    const ImVec2 indexSz = buffering ? ImGui::CalcTextSize("indexing log") : ImVec2(0.0f, 0.0f);
     const float themeW = 64.0f;
-    std::vector<std::string> dayChoices;
-    dayChoices.reserve(arena_.driveDays.size() + 8);
-    for (const auto& row : arena_.driveDays) {
-        if (isReplayLogDate(row.date)) {
-            dayChoices.push_back(row.date);
-        }
-    }
-    for (const auto& row : client_.historyCatalog()) {
-        if (row.maxMs <= row.minMs) {
-            continue;
-        }
-        const auto a = localYmdFromUnixMs(row.minMs);
-        const auto b = localYmdFromUnixMs(row.maxMs);
-        if (isReplayLogDate(a)) {
-            dayChoices.push_back(a);
-        }
-        if (isReplayLogDate(b) && b != a) {
-            dayChoices.push_back(b);
-        }
-    }
-    std::sort(dayChoices.begin(), dayChoices.end());
-    dayChoices.erase(std::unique(dayChoices.begin(), dayChoices.end()), dayChoices.end());
-    const std::string pinnedDay =
-        arena_.catalogPinned() ? localYmdFromUnixMs(arena_.timeline().minTimeMs) : std::string();
-    const float dayW = dayChoices.empty() ? 0.0f : 128.0f;
-    const float clusterW = themeW + clusterGap + (dayW > 0.0f ? dayW + clusterGap : 0.0f) + liveW +
-                           (showTransport ? playW + pauseW + clusterGap : 0.0f) + clusterGap * 2.0f + clusterGap +
-                           stateSz.x + clusterGap + sourceSz.x + clusterGap + antSz.x +
-                           (showMode ? clusterGap + modeSz.x : 0.0f) +
-                           (buffering ? clusterGap + indexSz.x : 0.0f) + clusterGap + clockSz.x;
+    const float clusterW = themeW + clusterGap + stateSz.x + clusterGap + sourceSz.x + clusterGap + antSz.x +
+                           clusterGap + clockSz.x;
     ImGui::SetCursorScreenPos(ImVec2(p1.x - clusterW - pad.x, p0.y + pad.y));
     ImGui::BeginGroup();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(clusterGap, 0.0f));
     theme::drawSwitcher(ImVec2(themeW, btnH));
-    if (!dayChoices.empty()) {
-        ImGui::SameLine();
-        const char* preview = onLive ? "Live"
-                                     : (day != nullptr ? day->date.c_str()
-                                                       : (!pinnedDay.empty() ? pinnedDay.c_str() : "Replay"));
-        ImGui::SetNextItemWidth(dayW);
-        if (ImGui::BeginCombo("##drive_day", preview)) {
-            if (ImGui::Selectable("Live", onLive)) {
-                client_.goLive();
-                arena_.setPreviewCursor(0, false);
-                for (auto& screen : screens_) {
-                    screen->onPlayOrLive();
-                }
-            }
-            for (const auto& date : dayChoices) {
-                const bool sel =
-                    (day != nullptr && day->date == date) || (!onLive && pinnedDay == date);
-                if (ImGui::Selectable(date.c_str(), sel)) {
-                    client_.playDate(date);
-                    arena_.setPreviewCursor(0, false);
-                    for (auto& screen : screens_) {
-                        screen->onPlayOrLive();
-                    }
-                }
-            }
-            ImGui::EndCombo();
-        }
-    }
-    ImGui::SameLine();
-    if (onLive) {
-        ImGui::PushStyleColor(ImGuiCol_Button, theme::withAlpha(theme::primary(), 0.28f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme::withAlpha(theme::primary(), 0.38f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme::withAlpha(theme::primary(), 0.45f));
-    }
-    if (ImGui::Button("Live", ImVec2(liveW, btnH))) {
-        client_.goLive();
-        arena_.setPreviewCursor(0, false);
-        for (auto& screen : screens_) {
-            screen->onPlayOrLive();
-        }
-    }
-    if (onLive) {
-        ImGui::PopStyleColor(3);
-    }
-    if (showTransport) {
-        ImGui::SameLine();
-        if (ImGui::Button("Play", ImVec2(playW, btnH))) {
-            client_.sendTimeline(ctrl::TimelineMode::Play, tl.cursorMs);
-            arena_.setPreviewCursor(0, false);
-            for (auto& screen : screens_) {
-                screen->onPlayOrLive();
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Pause", ImVec2(pauseW, btnH))) {
-            client_.sendTimeline(ctrl::TimelineMode::Pause, tl.cursorMs);
-        }
-    }
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(stateColor(client_.state()), "%s", client_.stateLabel());
@@ -597,14 +405,6 @@ void App::drawTitlebar(ImVec2 size) {
     ImGui::TextColored(theme::primary(), "%s", source.c_str());
     ImGui::SameLine();
     ImGui::TextColored(antenna != nullptr ? theme::success() : theme::mutedFg(), "%s", antBuf);
-    if (showMode) {
-        ImGui::SameLine();
-        ImGui::TextColored(modeColor, "%s", mode);
-    }
-    if (buffering) {
-        ImGui::SameLine();
-        ImGui::TextColored(theme::warning(), "indexing log");
-    }
     ImGui::SameLine();
     ImGui::TextUnformatted(clock);
     ImGui::PopStyleVar();

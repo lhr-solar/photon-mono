@@ -69,8 +69,7 @@ bool SignalRing::interpolate(double tMs, double& value) const {
     return interp::interpolate(t.data(), v.data(), count, cap, write, tMs, value);
 }
 
-ClientArena::ClientArena() {
-    wsUrl = pageLiveUrl();
+void ClientArena::addDefaultRings() {
     for (const auto& desc : kCatalog) {
         SignalRing ring;
         ring.id = desc.id;
@@ -79,6 +78,11 @@ ClientArena::ClientArena() {
         ring.v.reserve(4096);
         rings_.emplace(desc.id, std::move(ring));
     }
+}
+
+ClientArena::ClientArena() {
+    wsUrl = pageLiveUrl();
+    addDefaultRings();
 }
 
 void ClientArena::syncRingSeams() {
@@ -106,7 +110,6 @@ void ClientArena::clearTelemetry() {
         ring.hasLatest = false;
     }
     tiles_.clearRingOldest();
-    can_.clear();
     timeline_ = proto::TimelineStatus{};
     alarms_.resetRuntime();
     primedHistoryKey_.clear();
@@ -114,7 +117,7 @@ void ClientArena::clearTelemetry() {
 }
 
 void ClientArena::ingestTelemetry(std::span<const proto::TelemetryBlock> blocks) {
-    if (catalogPinned_) {
+    if (catalogPinned()) {
         return;
     }
     for (const auto& block : blocks) {
@@ -155,7 +158,7 @@ void ClientArena::ingestTelemetry(std::span<const proto::TelemetryBlock> blocks)
             }
             dst.push(block.timestamps[i], block.values[i]);
         }
-        if (!catalogPinned_ && dst.count > 0) {
+        if (!catalogPinned() && dst.count > 0) {
             const double ts = dst.firstTs();
             if (std::isfinite(ts) && ts > 0.0) {
                 tiles_.updateRingOldest(block.signalId, static_cast<std::uint64_t>(ts));
@@ -164,128 +167,70 @@ void ClientArena::ingestTelemetry(std::span<const proto::TelemetryBlock> blocks)
     }
 }
 
-void ClientArena::ingestCan(std::span<const proto::CanMonitorItem> items) {
-    if (catalogPinned_) {
-        return;
-    }
-    for (const auto& item : items) {
-        CanRow& row = can_[item.canId];
-        row.canId = item.canId;
-        row.dlc = item.dlc;
-        row.flags = item.flags;
-        std::copy(item.data, item.data + 8, row.data);
-        row.lastTsMs = item.timestampMs;
-        ++row.count;
-        if (row.windowStartMs == 0 || item.timestampMs < row.windowStartMs) {
-            row.windowStartMs = item.timestampMs;
-            row.windowCount = 0;
-        }
-        ++row.windowCount;
-        const std::uint64_t dt = item.timestampMs - row.windowStartMs;
-        if (dt >= 1000) {
-            row.rateHz = static_cast<float>(row.windowCount) * 1000.0f / static_cast<float>(dt);
-            row.windowCount = 0;
-            row.windowStartMs = item.timestampMs;
-        }
+void ClientArena::ingestGap(std::int64_t fromNs, std::int64_t toNs) {
+    gaps_.push_back(GapSpan{fromNs, toNs});
+    constexpr std::size_t kMaxGaps = 256;
+    if (gaps_.size() > kMaxGaps) {
+        gaps_.erase(gaps_.begin(), gaps_.begin() + static_cast<std::ptrdiff_t>(gaps_.size() - kMaxGaps));
     }
 }
 
-void ClientArena::pinCatalogSession(const ctrl::Message::CatalogSession& row) {
-    catalogPinned_ = true;
-    pinnedCatalogId_ = row.id;
-    timeline_.minTimeMs = row.minMs;
-    timeline_.maxTimeMs = row.maxMs;
-    // Start at the beginning so Play can walk the run. Pinning at maxMs left
-    // the playhead at EOF (PAUSE forever, CAN Hz frozen).
-    timeline_.cursorMs = row.minMs != 0 ? row.minMs : row.maxMs;
-    timeline_.mode = static_cast<std::uint8_t>(proto::TimelineMode::Play);
-    pinnedPlayWallMs_ = 0.0;
-    setPreviewCursor(0, false);
-    setVideoFollowMs(timeline_.cursorMs);
-    tiles_.setSession(row.id, row.dbcHash, row.minMs, row.maxMs);
-    tiles_.setCompactFetch(true);
-    tiles_.clearRingOldest();
-    primedHistoryKey_.clear();
-    sessionFollowPulse_ = true;
-    // Drop live/synth rings so gauges and 3D cannot mix DAQ with the log.
-    for (auto& [id, live] : rings_) {
+void ClientArena::setLiveCursor(std::uint64_t serverNowMs) {
+    // Live: the cursor is the server's now. min is the oldest sample the rings
+    // hold, so the timeline never reads as empty while data arrives.
+    std::uint64_t oldest = serverNowMs;
+    for (const auto& [id, ring] : rings_) {
         (void)id;
-        live.resetSeries();
-        live.hasLatest = false;
-        live.latest = 0.0;
-        live.latestTs = 0.0;
+        if (ring.count == 0) {
+            continue;
+        }
+        const double ts = ring.firstTs();
+        if (std::isfinite(ts) && ts > 0.0) {
+            oldest = std::min(oldest, static_cast<std::uint64_t>(ts));
+        }
     }
-    can_.clear();
-    holdReplayCells();
-    pushLog(std::string("catalog pin ") + row.id);
-}
-
-void ClientArena::clearCatalogPin() {
-    const bool wasPinned = catalogPinned_;
-    catalogPinned_ = false;
-    pinnedCatalogId_.clear();
-    pinnedPlayWallMs_ = 0.0;
-    tiles_.setCompactFetch(false);
-    sessionFollowPulse_ = true;
-    if (wasPinned) {
-        // Drop the run playhead immediately. Leaving min/max/cursor on the pin
-        // made Live chrome still read 10:36 until (or unless) a hub tick arrived.
-        timeline_.mode = static_cast<std::uint8_t>(proto::TimelineMode::Live);
-        timeline_.cursorMs = wallMs();
-        timeline_.minTimeMs = 0;
-        timeline_.maxTimeMs = 0;
-        setPreviewCursor(0, false);
-        clearVideoFollow();
-    }
-}
-
-void ClientArena::applyPinnedTimeline(proto::TimelineMode mode, std::uint64_t cursorMs) {
-    if (!catalogPinned_) {
-        return;
-    }
-    if (timeline_.minTimeMs != 0 && cursorMs < timeline_.minTimeMs) {
-        cursorMs = timeline_.minTimeMs;
-    }
-    if (timeline_.maxTimeMs != 0 && cursorMs > timeline_.maxTimeMs) {
-        cursorMs = timeline_.maxTimeMs;
-    }
-    timeline_.cursorMs = cursorMs;
-    timeline_.mode = static_cast<std::uint8_t>(mode);
-    setVideoFollowMs(cursorMs);
-    if (mode != proto::TimelineMode::Play) {
-        pinnedPlayWallMs_ = 0.0;
-    }
+    timeline_.mode = static_cast<std::uint8_t>(proto::TimelineMode::Live);
+    timeline_.cursorMs = serverNowMs;
+    timeline_.minTimeMs = oldest;
+    timeline_.maxTimeMs = serverNowMs;
     setPreviewCursor(0, false);
 }
 
-void ClientArena::tickPinnedPlayback(double nowMs) {
-    if (!catalogPinned_) {
-        return;
+CatalogChange ClientArena::applyCatalog(const ctrl2::Catalog& catalog) {
+    CatalogTable table = buildCatalogTable(catalog);
+    CatalogChange change;
+    change.serverCount = table.serverCount;
+    change.duplicates = table.duplicates;
+    if (haveSignalCatalog && catalog.sha == catalogSha) {
+        // The same catalog again (a reconnect): the ids still mean the same signals.
+        return change;
     }
-    if (static_cast<proto::TimelineMode>(timeline_.mode) != proto::TimelineMode::Play) {
-        pinnedPlayWallMs_ = 0.0;
-        return;
+    change.changed = true;
+    change.remap = remapIds(signalCatalog, table.signals);
+    if (table.duplicates > 0) {
+        pushLog("catalog has " + std::to_string(table.duplicates) + " repeated signal name(s), first " +
+                    table.firstDuplicate + "; keeping the first of each",
+                true);
     }
-    if (pinnedPlayWallMs_ <= 0.0) {
-        pinnedPlayWallMs_ = nowMs;
-        return;
+
+    // Ids changed meaning: rings, the signal map and the alarms start again.
+    rings_.clear();
+    addDefaultRings();
+    signalCatalog = std::move(table.signals);
+    signalExtra = std::move(table.extra);
+    catalogBuses = std::move(table.buses);
+    catalogSha = catalog.sha;
+    haveSignalCatalog = true;
+    for (const auto& sig : signalCatalog) {
+        SignalRing& ring = rings_[sig.id];
+        ring.id = sig.id;
+        ring.name = sig.message.empty() ? sig.name : sig.message + "." + sig.name;
     }
-    const double dt = nowMs - pinnedPlayWallMs_;
-    pinnedPlayWallMs_ = nowMs;
-    if (!(dt > 0.0) || dt > 250.0) {
-        return;
-    }
-    const auto step = static_cast<std::uint64_t>(dt + 0.5);
-    const std::uint64_t next = timeline_.cursorMs + step;
-    if (timeline_.maxTimeMs != 0 && next >= timeline_.maxTimeMs) {
-        timeline_.cursorMs = timeline_.maxTimeMs;
-        setVideoFollowMs(timeline_.maxTimeMs);
-        timeline_.mode = static_cast<std::uint8_t>(proto::TimelineMode::Pause);
-        pinnedPlayWallMs_ = 0.0;
-        return;
-    }
-    timeline_.cursorMs = next;
-    setVideoFollowMs(next);
+    clearTelemetry();
+    resetSignalMap();
+    signalMap_.resolve(signalCatalog, *this);
+    alarms_.resolve(signalCatalog, *this);
+    return change;
 }
 
 float ClientArena::historyRateHz(std::uint32_t signalId) const {
@@ -315,92 +260,6 @@ float ClientArena::historyRateHz(std::uint32_t signalId) const {
         return 0.0f;
     }
     return static_cast<float>(static_cast<double>(n - 1) * 1000.0 / (t1 - t0));
-}
-
-void ClientArena::ingestTimeline(const proto::TimelineStatus& status) {
-    if (catalogPinned_) {
-        return;
-    }
-    const bool wasBuffering = timeline_.mode == static_cast<std::uint8_t>(proto::TimelineMode::Buffering);
-    timeline_ = status;
-    if (status.mode == static_cast<std::uint8_t>(proto::TimelineMode::Live)) {
-        setPreviewCursor(0, false);
-    }
-    if (wasBuffering && status.mode != static_cast<std::uint8_t>(proto::TimelineMode::Buffering) &&
-        status.maxTimeMs > status.minTimeMs) {
-        indexReadyPulse_ = true;
-        pushLog("log_replay index ready");
-    }
-    syncRingSeams();
-    if (status.maxTimeMs > status.minTimeMs) {
-        std::string id = tiles_.sessionId();
-        if (id.empty() || id == "default") {
-            for (const auto& day : driveDays) {
-                for (const auto& sess : day.sessions) {
-                    if (sess.id.empty() || sess.startMs == 0) {
-                        continue;
-                    }
-                    const auto end = sess.startMs + static_cast<std::uint64_t>(sess.durationS * 1000.0);
-                    if (status.minTimeMs >= sess.startMs && status.minTimeMs <= end) {
-                        id = sess.id;
-                    }
-                }
-            }
-        }
-        tiles_.setSession(id, dbcId.empty() ? tiles_.dbcHash() : dbcId, status.minTimeMs, status.maxTimeMs);
-        syncRingSeams();
-    }
-}
-
-void ClientArena::ingestVideo(const proto::VideoFrame& frame) {
-    video.lastTsMs = frame.timestampMs;
-    video.lastFrameArrivalMs = wallMs();
-    // SPS/PPS are restamped on every access unit. Counting them made a 30 fps
-    // camera read as ~90 fps. Config NALs are not pictures.
-    if (proto::videoConfig(frame.flags)) {
-        return;
-    }
-    if (video.fpsHaveLast && frame.timestampMs == video.fpsLastPictureMs) {
-        return;
-    }
-    // Arrival time is not the frame rate: a GOP lands in one burst, and the
-    // camera also pauses. The picture timestamp step is the rate.
-    if (video.fpsHaveLast && frame.timestampMs + 2000 < video.fpsLastPictureMs) {
-        video.fpsDeltaN = 0;
-        video.fpsDeltaI = 0;
-    } else if (video.fpsHaveLast && frame.timestampMs > video.fpsLastPictureMs) {
-        const auto d = frame.timestampMs - video.fpsLastPictureMs;
-        if (d >= 8 && d <= 200) {
-            video.fpsDeltaMs[video.fpsDeltaI] = static_cast<std::uint32_t>(d);
-            video.fpsDeltaI = (video.fpsDeltaI + 1) % VideoState::kFpsDeltas;
-            if (video.fpsDeltaN < VideoState::kFpsDeltas) {
-                ++video.fpsDeltaN;
-            }
-        }
-    }
-    video.fpsLastPictureMs = frame.timestampMs;
-    video.fpsHaveLast = true;
-    ++video.frames;
-    if (video.fpsDeltaN >= 5) {
-        std::uint32_t tmp[VideoState::kFpsDeltas];
-        std::copy_n(video.fpsDeltaMs, video.fpsDeltaN, tmp);
-        std::sort(tmp, tmp + video.fpsDeltaN);
-        const std::uint32_t mid = tmp[video.fpsDeltaN / 2];
-        if (mid > 0) {
-            video.fps = 1000.0 / static_cast<double>(mid);
-        }
-    }
-}
-
-void ClientArena::applyVideoStatus(const ctrl::Message& msg) {
-    video.connected = msg.videoConnected;
-    video.host = msg.host;
-    video.port = msg.port;
-    video.mode = std::string(ctrl::videoModeName(msg.videoMode));
-    video.lastTsMs = msg.lastTsMs;
-    video.frames = msg.videoFrames;
-    video.dropped = msg.videoDropped;
-    video.haveStatus = true;
 }
 
 void ClientArena::holdReplayCells() {
@@ -436,85 +295,6 @@ void ClientArena::pushLog(std::string text, bool error) {
     }
 }
 
-void ClientArena::applyTrackSimList(const ctrl::Message& msg) {
-    trackSim.tracks = msg.tracks;
-    trackSim.measured = msg.measured;
-    trackSim.catalogReady = true;
-    trackSim.catalogPending = false;
-}
-
-void ClientArena::applyTrackSimResult(const ctrl::Message& msg) {
-    trackSim.solving = false;
-    trackSim.haveResult = true;
-    trackSim.error.clear();
-    trackSim.trackId = msg.trackId;
-    trackSim.feasible = msg.feasible;
-    trackSim.totalTimeS = msg.totalTimeS;
-    trackSim.energyWh = msg.energyWh;
-    trackSim.endSoc = msg.endSoc;
-    trackSim.dEdT = msg.dEdT;
-    trackSim.segments = msg.trackSegments;
-}
-
-void ClientArena::applyControlError(const ctrl::Message& msg) {
-    if (!trackSim.solving && !trackSim.catalogPending) {
-        return;
-    }
-    trackSim.solving = false;
-    trackSim.catalogPending = false;
-    if (!msg.code.empty() && !msg.message.empty()) {
-        trackSim.error = msg.code + ": " + msg.message;
-    } else if (!msg.message.empty()) {
-        trackSim.error = msg.message;
-    } else if (!msg.code.empty()) {
-        trackSim.error = msg.code;
-    } else {
-        trackSim.error = "error_alert";
-    }
-}
-
-void ClientArena::resetTrackSimCatalog() {
-    trackSim.catalogReady = false;
-    trackSim.catalogPending = false;
-}
-
-void ClientArena::beginTrackSimSolve(double timeBudgetS) {
-    trackSim.solving = true;
-    trackSim.error.clear();
-    trackSim.timeBudgetS = timeBudgetS;
-}
-
-void ClientArena::applySignalCatalog(const ctrl::Message& msg) {
-    const bool switched = haveSignalCatalog && !msg.dbcId.empty() && !dbcId.empty() && msg.dbcId != dbcId;
-    if (switched) {
-        rings_.clear();
-        can_.clear();
-        resetSignalMap();
-        alarms_.resetRuntime();
-    }
-    if (!msg.dbcId.empty()) {
-        dbcId = msg.dbcId;
-    }
-    if (!msg.dbcPath.empty()) {
-        dbcPath = msg.dbcPath;
-    }
-    signalCatalog = msg.catalog;
-    haveSignalCatalog = true;
-    for (const auto& sig : signalCatalog) {
-        SignalRing& ring = rings_[sig.id];
-        ring.id = sig.id;
-        if (ring.name.empty()) {
-            ring.name = sig.message.empty() ? sig.name : sig.message + "." + sig.name;
-        }
-    }
-    signalMap_.resolve(signalCatalog, *this);
-    alarms_.resolve(signalCatalog, *this);
-    if (tiles_.sessionMaxMs() > tiles_.sessionMinMs()) {
-        tiles_.setSession(tiles_.sessionId(), dbcId.empty() ? tiles_.dbcHash() : dbcId, tiles_.sessionMinMs(),
-                          tiles_.sessionMaxMs());
-    }
-}
-
 void ClientArena::resetSignalMap() {
     signalMap_.reset();
     alarms_.resetResolve();
@@ -535,7 +315,7 @@ void ClientArena::maybePrimeHistory(HistoryIO& io) {
     // prime on the first BUFFERING timeline (min/max still growing) and abort.
     // Catalog pin is Pause + a known session window: prime that cursor only.
     const auto mode = static_cast<proto::TimelineMode>(timeline_.mode);
-    if (!catalogPinned_ && (mode == proto::TimelineMode::Live || mode == proto::TimelineMode::Buffering ||
+    if (!catalogPinned() && (mode == proto::TimelineMode::Live || mode == proto::TimelineMode::Buffering ||
                             mode == proto::TimelineMode::Unknown)) {
         return;
     }
@@ -587,7 +367,7 @@ void ClientArena::maybePrimeHistory(HistoryIO& io) {
     ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
     // Stay on the playhead. A one-shot prime at session minMs misses the first
     // samples, and a failed hop (history-remote down) used to never retry.
-    if (catalogPinned_) {
+    if (catalogPinned()) {
         if (!urgent.empty()) {
             tiles_.requestCursorWindow(io, urgent, effectiveCursorMs());
         }
@@ -596,7 +376,7 @@ void ClientArena::maybePrimeHistory(HistoryIO& io) {
     if (key == primedHistoryKey_) {
         return;
     }
-    if (catalogPinned_ && !gpsIds.empty() && tiles_.sessionMaxMs() > tiles_.sessionMinMs()) {
+    if (catalogPinned() && !gpsIds.empty() && tiles_.sessionMaxMs() > tiles_.sessionMinMs()) {
         tiles_.requestWindow(io, gpsIds, tiles_.sessionMinMs(), tiles_.sessionMaxMs(), 4000, false);
         std::fprintf(stderr, "[maps] prime GPS ids=%zu session=%s %llu..%llu\n", gpsIds.size(),
                      tiles_.sessionId().c_str(),
@@ -607,7 +387,7 @@ void ClientArena::maybePrimeHistory(HistoryIO& io) {
         }
         std::fflush(stderr);
     }
-    if (catalogPinned_) {
+    if (catalogPinned()) {
         // First minutes are often empty at minMs (video/CAN start skew). Pull
         // L0 tiles, not a 4k-point rollup. Mux tap index averaged over 4 s
         // cannot rebuild the 32-cell pack.
@@ -700,7 +480,7 @@ double ClientArena::readout(std::uint32_t id, double fallback) const {
 }
 
 bool ClientArena::cursorValue(std::uint32_t id, double& value) const {
-    if (catalogPinned_) {
+    if (catalogPinned()) {
         const auto t = effectiveCursorMs();
         return t != 0 && tiles_.sampleNear(id, t, value);
     }
@@ -739,7 +519,7 @@ bool ClientArena::interpolate(std::uint32_t id, double tMs, double& value) const
 }
 
 bool ClientArena::has(std::uint32_t id) const {
-    if (catalogPinned_) {
+    if (catalogPinned()) {
         double v = 0.0;
         const auto t = effectiveCursorMs();
         return t != 0 && tiles_.sampleNear(id, t, v);

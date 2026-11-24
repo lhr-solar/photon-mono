@@ -127,11 +127,16 @@ void resolveFormulaIds(AnalysisFormulaSpec* spec, const std::vector<ctrl::Catalo
         }
         return 0;
     };
-    if (spec->leftId == 0 && !spec->leftIsConst) {
-        spec->leftId = findId(spec->leftName);
+    // Names first, every time. The stored id stays only when no name matches.
+    if (!spec->leftIsConst) {
+        if (const std::uint32_t found = findId(spec->leftName); found != 0) {
+            spec->leftId = found;
+        }
     }
-    if (spec->rightId == 0 && !spec->rightIsConst) {
-        spec->rightId = findId(spec->rightName);
+    if (!spec->rightIsConst) {
+        if (const std::uint32_t found = findId(spec->rightName); found != 0) {
+            spec->rightId = found;
+        }
     }
 }
 

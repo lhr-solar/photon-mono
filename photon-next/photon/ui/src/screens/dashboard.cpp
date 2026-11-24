@@ -1,4 +1,5 @@
 #include "photon_ui/alarms.hpp"
+#include "photon_ui/catalog.hpp"
 #include "photon_ui/client.hpp"
 #include "photon_ui/screen.hpp"
 #include "photon_ui/signal_map.hpp"
@@ -810,13 +811,20 @@ void drawFaultBanner(const DashView& d) {
 void drawCamera(const char* id, const char* label, ImVec2 size, ImVec4 bg, bool video, bool mirror) {
     beginPanel(id, size, bg, ImVec2(0.0f, 0.0f));
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    if (video && videoDecoder().hasFrame() && videoDecoder().width() > 0 && videoDecoder().height() > 0) {
+    if (video && kVideoEnabled && videoDecoder().hasFrame() && videoDecoder().width() > 0 &&
+        videoDecoder().height() > 0) {
         (void)mirror;
         // The screen already polled once this frame. A second poll consumes
         // another decoded picture, so live video runs ahead and then freezes.
         blitDecodedVideo(avail);
-    } else if (video) {
+    } else if (video && kVideoEnabled) {
         drawVideoBuffering(avail);
+    } else if (video) {
+        // Video is off in this step: a note, not a spinner that never ends.
+        const char* note = "video coming back";
+        const ImVec2 noteSize = ImGui::CalcTextSize(note);
+        ImGui::SetCursorPos(ImVec2((avail.x - noteSize.x) * 0.5f, (avail.y - noteSize.y) * 0.5f));
+        ImGui::TextColored(theme::mutedFg(), "%s", note);
     } else {
         const char* space = std::strchr(label, ' ');
         ImGui::PushStyleColor(ImGuiCol_Text, theme::mutedFg());
@@ -1539,13 +1547,11 @@ void drawCluster(const DashView& d) {
 }  // namespace
 
 void DashboardScreen::draw(UiContext& ui) {
-    ui.client.markVideoWanted();
-    if (ui.client.helloOk() && !ui.arena.video.subscribed && !ui.arena.catalogPinned()) {
-        ui.client.goLive();
-    }
     ui.arena.signalMap().subscribe(ui.client, MapScreen::Pit | MapScreen::Dashboard);
-    videoDecoder().syncToCursor(ui.arena);
-    videoDecoder().poll();
+    if (kVideoEnabled) {
+        videoDecoder().syncToCursor(ui.arena);
+        videoDecoder().poll();
+    }
 
     heartbeat_ = static_cast<std::uint8_t>((heartbeat_ + 1) % 256);
     DashView view = fillView(ui, heartbeat_);

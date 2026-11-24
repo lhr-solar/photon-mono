@@ -9,10 +9,6 @@
 namespace photon::ui {
 namespace {
 
-bool hostIsLoopback(std::string_view host) {
-    return host.empty() || host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]";
-}
-
 }  // namespace
 
 #ifdef __EMSCRIPTEN__
@@ -23,14 +19,46 @@ std::string pageLiveUrl() {
         {
             var url = (typeof window !== "undefined" && window.photonLiveUrl)
                           ? window.photonLiveUrl()
-                          : "ws://127.0.0.1:8765";
+                          : "ws://127.0.0.1:6900/v2";
             stringToUTF8(url, $0, $1);
         },
         buf, static_cast<int>(sizeof(buf)));
     if (buf[0] != '\0') {
         return std::string(buf);
     }
-    return "ws://127.0.0.1:8765";
+    return "ws://127.0.0.1:6900/v2";
+}
+
+std::string pageStoredToken() {
+    char buf[512] = {};
+    MAIN_THREAD_EM_ASM(
+        {
+            var token = "";
+            try {
+                token = window.photonStoredToken ? window.photonStoredToken() : "";
+            } catch (e) {
+                token = "";
+            }
+            stringToUTF8(token, $0, $1);
+        },
+        buf, static_cast<int>(sizeof(buf)));
+    return std::string(buf);
+}
+
+std::string pageAskToken() {
+    char buf[512] = {};
+    MAIN_THREAD_EM_ASM(
+        {
+            var token = "";
+            try {
+                token = window.photonAskToken ? window.photonAskToken() : "";
+            } catch (e) {
+                token = "";
+            }
+            stringToUTF8(token, $0, $1);
+        },
+        buf, static_cast<int>(sizeof(buf)));
+    return std::string(buf);
 }
 
 bool pageIsSharedConsole() {
@@ -67,18 +95,14 @@ std::string pagePublicHost() {
 
 std::string pageLiveUrl() { return nativePageOptions().liveUrl; }
 
+std::string pageStoredToken() { return nativePassword(); }
+
+std::string pageAskToken() { return {}; }
+
 bool pageIsSharedConsole() { return nativePageOptions().sharedConsole; }
 
 std::string pagePublicHost() { return nativePageOptions().publicHost; }
 
 #endif
-
-std::string sourceDisplayHost(std::string_view backendHost) {
-    if (pageIsSharedConsole() && hostIsLoopback(backendHost)) {
-        const auto pub = pagePublicHost();
-        return pub.empty() ? "150.136.85.207" : pub;
-    }
-    return std::string(backendHost);
-}
 
 }  // namespace photon::ui

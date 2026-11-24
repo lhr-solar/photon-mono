@@ -1577,47 +1577,34 @@
           }
         } catch (e) {}
       }
+      // Protocol v2 lives at /v2 on the page's own origin (ws or wss to match the page).
       window.photonLiveUrl = function() {
         try {
-          var host = location.hostname || '';
           var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-          if (!host || location.protocol === 'file:') {
-            return 'ws://127.0.0.1:8765';
+          if (!location.host || location.protocol === 'file:') {
+            return 'ws://127.0.0.1:6900/v2';
           }
-          var local = host === '127.0.0.1' || host === 'localhost' || host === '[::1]';
-          var port = location.port || '';
-          if (local && port !== '' && port !== '8080' && port !== '80' && port !== '443') {
-            return 'ws://127.0.0.1:8765';
-          }
-          return proto + '//' + location.host + '/ws';
+          return proto + '//' + location.host + '/v2';
         } catch (e) {
-          return 'ws://127.0.0.1:8765';
+          return 'ws://127.0.0.1:6900/v2';
         }
+      };
+      // The LAN password, remembered in this browser (localStorage "photon.token").
+      // Cloudflare users never reach these: the server does not ask for one.
+      window.photonStoredToken = function() {
+        try { return localStorage.getItem('photon.token') || ''; } catch (e) { return ''; }
+      };
+      window.photonAskToken = function() {
+        var typed = null;
+        try { typed = window.prompt('This Photon server needs its LAN password:', ''); } catch (e) { typed = null; }
+        if (typed === null || typed === '') return '';
+        try { localStorage.setItem('photon.token', typed); } catch (e) {}
+        return typed;
       };
       window.photonSharedConsole = function() {
         var host = (location.hostname || '').toLowerCase();
         return host !== '' && host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]';
       };
-      (function() {
-        var Native = window.WebSocket;
-        if (!Native) return;
-        function remap(u) {
-          u = String(u || '');
-          if (/wss?:\/\/(127\.0\.0\.1|localhost)(:8765)?(\/|$)/i.test(u) && window.photonSharedConsole()) {
-            return window.photonLiveUrl();
-          }
-          return u;
-        }
-        function Wrap(u, p) {
-          return p !== undefined ? new Native(remap(u), p) : new Native(remap(u));
-        }
-        Wrap.prototype = Native.prototype;
-        Wrap.CONNECTING = Native.CONNECTING;
-        Wrap.OPEN = Native.OPEN;
-        Wrap.CLOSING = Native.CLOSING;
-        Wrap.CLOSED = Native.CLOSED;
-        window.WebSocket = Wrap;
-      })();
       window.photonAssetUrl = function(path) {
         var name = String(path || '');
         try {

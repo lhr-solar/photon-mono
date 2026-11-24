@@ -6,10 +6,12 @@
 
 namespace photon::ui {
 
-inline constexpr std::uint32_t kSignalRpm = 1;
-inline constexpr std::uint32_t kSignalSpeed = 2;
-inline constexpr std::uint32_t kSignalSoc = 3;
-inline constexpr std::uint32_t kSignalTemp = 4;
+// Synthetic fallback signals. They sit far above the catalog range (client id =
+// catalog index + 1), so they never collide with a server signal.
+inline constexpr std::uint32_t kSignalRpm = 0xFFFFFF01u;
+inline constexpr std::uint32_t kSignalSpeed = 0xFFFFFF02u;
+inline constexpr std::uint32_t kSignalSoc = 0xFFFFFF03u;
+inline constexpr std::uint32_t kSignalTemp = 0xFFFFFF04u;
 inline constexpr std::size_t kCellCount = 32;
 inline constexpr std::size_t kRingCap = 100000;
 
@@ -52,6 +54,11 @@ inline bool signalAlarmed(const SignalDesc& desc, double value) {
     return false;
 }
 
-inline std::string_view defaultWsUrl() { return "ws://127.0.0.1:8765"; }
+// Native default; the web build uses the page's own /v2 (web/shell.html).
+inline std::string_view defaultWsUrl() { return "ws://127.0.0.1:6900/v2"; }
+
+// Video is off until step 2 brings it back on the v2 socket. Every video call and
+// panel checks this flag.
+inline constexpr bool kVideoEnabled = false;
 
 }  // namespace photon::ui

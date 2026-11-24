@@ -97,7 +97,7 @@ void configureNativePage(NativePageOptions opt) {
     (void)opt;
 #else
     if (opt.liveUrl.empty()) {
-        opt.liveUrl = "ws://127.0.0.1:8765";
+        opt.liveUrl = "ws://127.0.0.1:6900/v2";
     }
     gNative = std::move(opt);
 #endif
@@ -113,17 +113,11 @@ std::string nativeScreenParam() {
 
 std::filesystem::path nativeStorePath(const char* key) { return keyFile(key); }
 
-std::string nativeWsBasicB64() {
+std::string nativePassword() {
 #ifdef __EMSCRIPTEN__
     return {};
 #else
-    if (gNative.basicPassword.empty()) {
-        return {};
-    }
-    const std::string raw = gNative.basicUser.empty() ? ("photon:" + gNative.basicPassword)
-                                                      : (gNative.basicUser + ":" + gNative.basicPassword);
-    return crypto::base64Encode(std::span<const std::uint8_t>(
-        reinterpret_cast<const std::uint8_t*>(raw.data()), raw.size()));
+    return gNative.password;
 #endif
 }
 

@@ -69,17 +69,21 @@ ViewCell lineCell(const char* id, const char* title, ViewRect rect, ViewSignal s
     return cell;
 }
 
+// Names first: a new catalog sha renumbers the ids, so the stored id is only a fallback.
 const ctrl::CatalogSignal* catalogSignal(const ClientArena& arena, const ViewSignal& src) {
-    const ctrl::CatalogSignal* byName = nullptr;
     for (const ctrl::CatalogSignal& cat : arena.signalCatalog) {
-        if (src.id != 0 && cat.id == src.id) {
+        if (!src.signalName.empty() && cat.message == src.messageName && cat.name == src.signalName) {
             return &cat;
         }
-        if (byName == nullptr && cat.message == src.messageName && cat.name == src.signalName) {
-            byName = &cat;
+    }
+    if (src.id != 0) {
+        for (const ctrl::CatalogSignal& cat : arena.signalCatalog) {
+            if (cat.id == src.id) {
+                return &cat;
+            }
         }
     }
-    return byName;
+    return nullptr;
 }
 
 bool shellButton(const char* label, bool selected, const char* id = nullptr) {
@@ -173,26 +177,6 @@ int parseYAxis(const json::Value& src) {
 
 bool cellUsesDualY(const ViewCell& cell) {
     return cell.dualY && cell.kind == ViewCellKind::Line;
-}
-
-bool pathMentionsDay(const std::string& path, const ctrl::Message::DriveDay& day) {
-    if (path.empty()) {
-        return false;
-    }
-    if (!day.path.empty() && path == day.path) {
-        return true;
-    }
-    return !day.date.empty() && path.find(day.date) != std::string::npos;
-}
-
-int currentDriveDayIndex(const ClientArena& arena) {
-    for (int i = 0; i < static_cast<int>(arena.driveDays.size()); ++i) {
-        const auto& day = arena.driveDays[static_cast<std::size_t>(i)];
-        if (arena.source == ctrl::SourceKind::LogReplay && pathMentionsDay(arena.sourcePath, day)) {
-            return i;
-        }
-    }
-    return arena.driveDays.empty() ? -1 : 0;
 }
 
 std::string sanitizeFileToken(std::string_view text) {
@@ -1558,74 +1542,14 @@ void CustomViews::subscribe(UiContext& ui) {
 
 void CustomViews::openPicker() {
     pickerOpen_ = true;
-    pickerDayIndex_ = -1;
     if (selectedCell_ < 0 && !active().cells.empty()) {
         selectedCell_ = 0;
     }
 }
 
-void CustomViews::syncPickerDay(const ClientArena& arena) {
-    pickerDayIndex_ = currentDriveDayIndex(arena);
-}
-
-bool CustomViews::drawDriveDayCombo(UiContext& ui, const char* id, float width) {
-    if (ui.arena.driveDays.empty()) {
-        ImGui::TextColored(theme::mutedFg(), "No drive days");
-        return false;
-    }
-    if (pickerDayIndex_ < 0 || pickerDayIndex_ >= static_cast<int>(ui.arena.driveDays.size())) {
-        syncPickerDay(ui.arena);
-    }
-    const auto& days = ui.arena.driveDays;
-    const char* preview = "Drive day";
-    if (pickerDayIndex_ >= 0 && pickerDayIndex_ < static_cast<int>(days.size())) {
-        preview = days[static_cast<std::size_t>(pickerDayIndex_)].date.c_str();
-    }
-    ImGui::SetNextItemWidth(width);
-    bool changed = false;
-    if (ImGui::BeginCombo(id, preview)) {
-        for (int i = 0; i < static_cast<int>(days.size()); ++i) {
-            const auto& day = days[static_cast<std::size_t>(i)];
-            const bool sel = i == pickerDayIndex_;
-            if (ImGui::Selectable(day.date.c_str(), sel)) {
-                pickerDayIndex_ = i;
-                ui.client.playDate(day.date);
-                status_ = "Drive day " + day.date;
-                changed = true;
-            }
-        }
-        ImGui::EndCombo();
-    }
-    return changed;
-}
-
-bool CustomViews::cellHasSamples(const ClientArena& arena, int index) const {
-    if (index < 0 || index >= static_cast<int>(active().cells.size())) {
-        return false;
-    }
-    const ViewCell& cell = active().cells[static_cast<std::size_t>(index)];
-    for (const ViewSignal& src : cell.sources) {
-        const SignalRing* ring = src.id != 0 ? arena.ring(src.id) : nullptr;
-        if (ring != nullptr && ring->count > 8) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void CustomViews::requestPlotPng(UiContext& ui) {
-    syncPickerDay(ui.arena);
+void CustomViews::requestPlotPng() {
     if (selectedCell_ < 0 && !active().cells.empty()) {
         selectedCell_ = 0;
-    }
-    std::string date = "live";
-    std::string path;
-    if (pickerDayIndex_ >= 0 && pickerDayIndex_ < static_cast<int>(ui.arena.driveDays.size())) {
-        const auto& day = ui.arena.driveDays[static_cast<std::size_t>(pickerDayIndex_)];
-        date = day.date.empty() ? date : day.date;
-        path = day.path;
-    } else if (!ui.arena.sourcePath.empty()) {
-        date = sanitizeFileToken(ui.arena.sourcePath);
     }
     std::string title = "plot";
     if (selectedCell_ >= 0 && selectedCell_ < static_cast<int>(active().cells.size())) {
@@ -1634,70 +1558,15 @@ void CustomViews::requestPlotPng(UiContext& ui) {
     }
     export_.active = true;
     export_.cell = selectedCell_;
-    export_.date = date;
-    export_.path = path;
-    export_.filename = "photon-" + sanitizeFileToken(date) + "-" + sanitizeFileToken(title) + ".png";
-    export_.startMs = ImGui::GetTime() * 1000.0;
-    export_.readySinceMs = 0.0;
-    export_.settleFrames = 0;
+    export_.date = "live";
+    export_.filename = "photon-live-" + sanitizeFileToken(title) + ".png";
     pickerOpen_ = false;
-    const bool dayReady =
-        path.empty() ||
-        (ui.arena.source == ctrl::SourceKind::LogReplay && pathMentionsDay(ui.arena.sourcePath, [&] {
-             ctrl::Message::DriveDay d;
-             d.date = date;
-             d.path = path;
-             return d;
-         }()));
-    if (!dayReady && !path.empty()) {
-        ui.client.selectSource(ctrl::SourceKind::LogReplay, "", 0, path);
-        export_.waitDay = true;
-        status_ = "Loading " + date + " for export…";
-        return;
-    }
-    const bool buffering =
-        ui.arena.timeline().mode == static_cast<std::uint8_t>(proto::TimelineMode::Buffering);
-    if (buffering) {
-        export_.waitDay = true;
-        status_ = "Waiting for " + date + "…";
-        return;
-    }
-    export_.waitDay = false;
     export_.settleFrames = 2;
     status_ = "Exporting " + export_.filename;
 }
 
-void CustomViews::tickPlotExport(UiContext& ui) {
+void CustomViews::tickPlotExport() {
     if (!export_.active) {
-        return;
-    }
-    const double now = ImGui::GetTime() * 1000.0;
-    if (export_.waitDay) {
-        ctrl::Message::DriveDay want;
-        want.date = export_.date;
-        want.path = export_.path;
-        const bool dayReady =
-            export_.path.empty() ||
-            (ui.arena.source == ctrl::SourceKind::LogReplay && pathMentionsDay(ui.arena.sourcePath, want));
-        const bool buffering =
-            ui.arena.timeline().mode == static_cast<std::uint8_t>(proto::TimelineMode::Buffering);
-        if (dayReady && !buffering) {
-            if (export_.readySinceMs <= 0.0) {
-                export_.readySinceMs = now;
-            }
-            if (cellHasSamples(ui.arena, export_.cell) || now - export_.readySinceMs > 1200.0) {
-                export_.waitDay = false;
-                export_.settleFrames = 2;
-                status_ = "Exporting " + export_.filename;
-            } else {
-                status_ = "Buffering " + export_.date + "…";
-            }
-        } else if (now - export_.startMs > 20000.0) {
-            status_ = "Export timed out waiting for " + export_.date;
-            export_ = {};
-        } else {
-            status_ = "Loading " + export_.date + "…";
-        }
         return;
     }
     if (export_.settleFrames > 0) {
@@ -2102,7 +1971,7 @@ void CustomViews::drawToolbar(UiContext& ui) {
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Export plot PNG")) {
-            requestPlotPng(ui);
+            requestPlotPng();
         }
         if (ImGui::MenuItem("Export")) {
             exportFile();
@@ -2168,10 +2037,8 @@ void CustomViews::drawPicker(UiContext& ui) {
     if (cell == nullptr) {
         ImGui::TextColored(theme::mutedFg(), "Select a plot first.");
         ImGui::Separator();
-        ImGui::TextColored(theme::mutedFg(), "Drive day");
-        drawDriveDayCombo(ui, "##plot-day", -1.0f);
         if (ImGui::Button("Export PNG", ImVec2(-1.0f, 0.0f))) {
-            requestPlotPng(ui);
+            requestPlotPng();
             ImGui::CloseCurrentPopup();
         }
     } else {
@@ -2218,7 +2085,7 @@ void CustomViews::drawPicker(UiContext& ui) {
         ImGui::Checkbox("Freeze", &cell->freeze);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Hold this time window. Click or drag a plot to scrub;\n"
-                              "Play / Live follows the cursor again unless Freeze is on.");
+                              "Live follows the cursor again unless Freeze is on.");
         }
         if (cell->kind != ViewCellKind::Value) {
             bool autoY = !cell->yLocked;
@@ -2238,15 +2105,12 @@ void CustomViews::drawPicker(UiContext& ui) {
             }
         }
         ImGui::Separator();
-        ImGui::TextColored(theme::mutedFg(), "Drive day");
-        drawDriveDayCombo(ui, "##plot-day", -1.0f);
         if (ImGui::Button("Export PNG", ImVec2(-1.0f, 0.0f))) {
-            requestPlotPng(ui);
+            requestPlotPng();
             ImGui::CloseCurrentPopup();
         }
         theme::pushSmallFont();
-        ImGui::TextColored(theme::mutedFg(),
-                           "Export captures this plot. Change the day first to export that date.");
+        ImGui::TextColored(theme::mutedFg(), "Export captures this plot.");
         theme::popSmallFont();
         theme::pushSmallFont();
         ImGui::TextColored(theme::mutedFg(), "Shift-drag on a line plot to pick A→B.");
@@ -2425,7 +2289,7 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
     }
     ImDrawList* draw = ImGui::GetWindowDrawList();
     std::string title = cell.title.empty() ? cell.id : cell.title;
-    if (export_.active && !export_.waitDay && export_.cell == index && !export_.date.empty()) {
+    if (export_.active && export_.cell == index && !export_.date.empty()) {
         title += "  ·  ";
         title += export_.date;
     }
@@ -2517,7 +2381,7 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
         static std::unordered_map<std::string, std::pair<std::string, GgPeaks>> heldByCell;
         const std::string imuKey = cell.sources.empty() ? "" : cell.sources[0].messageName;
         const std::string session =
-            ggPeakSessionKey(ui.arena.tiles().sessionId(), ui.arena.sourcePath) + "|" + imuKey;
+            ggPeakSessionKey(ui.arena.tiles().sessionId(), ui.arena.server.liveRun) + "|" + imuKey;
         GgPeaks& heldPeaks = heldByCell[cell.id].second;
         if (heldByCell[cell.id].first != session) {
             heldByCell[cell.id].first = session;
@@ -2931,13 +2795,6 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                 holdScrubWindow(active(), lo, hi);
                 const auto ms = static_cast<std::uint64_t>(std::max(0.0, t));
                 ui.arena.setPreviewCursor(ms, true);
-                if (!live) {
-                    const double now = ImGui::GetTime();
-                    if (lastPlotSeekS_ < 0.0 || now - lastPlotSeekS_ >= 0.08) {
-                        lastPlotSeekS_ = now;
-                        ui.client.sendTimeline(ctrl::TimelineMode::Pause, ms);
-                    }
-                }
             };
             const double axisLo = cell.freeze && cell.viewMaxMs > cell.viewMinMs ? cell.viewMinMs : xmin;
             const double axisHi = cell.freeze && cell.viewMaxMs > cell.viewMinMs ? cell.viewMaxMs : xmax;
@@ -2957,9 +2814,6 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                         t = axisHi;
                     }
                     scrubTo(t + wheelScrub);
-                    if (!live) {
-                        ui.client.sendTimeline(ctrl::TimelineMode::Pause, ui.arena.displayCursorMs());
-                    }
                     ImGui::GetIO().MouseWheel = 0.0f;
                     ImGui::GetIO().MouseWheelH = 0.0f;
                 } else if (plotWheelIsValueZoom()) {
@@ -2996,13 +2850,6 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                 }
                 const auto ms = static_cast<std::uint64_t>(std::max(0.0, cursorT));
                 ui.arena.setPreviewCursor(ms, true);
-                if (!live) {
-                    const double now = ImGui::GetTime();
-                    if (lastPlotSeekS_ < 0.0 || now - lastPlotSeekS_ >= 0.08) {
-                        lastPlotSeekS_ = now;
-                        ui.client.sendTimeline(ctrl::TimelineMode::Pause, ms);
-                    }
-                }
             };
             const ImGuiIO& io = ImGui::GetIO();
             bool leftDown = io.MouseDown[ImGuiMouseButton_Left];
@@ -3028,17 +2875,9 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                         touchDirty();
                     } else if (!doubleClick) {
                         touchDirty();
-                        if (!live) {
-                            lastPlotSeekS_ = ImGui::GetTime();
-                            ui.client.sendTimeline(ctrl::TimelineMode::Pause,
-                                                   static_cast<std::uint64_t>(std::max(0.0, plotPanGrabT_)));
-                        }
                     }
                     plotPan_ = false;
                     plotPanCell_ = -1;
-                }
-                if (plotScrubbing_ && !doubleClick && ui.arena.hasPreviewCursor() && !live) {
-                    ui.client.sendTimeline(ctrl::TimelineMode::Pause, ui.arena.displayCursorMs());
                 }
                 plotScrubbing_ = false;
             } else if (canScrub && leftClicked && !io.KeyShift) {
@@ -3245,7 +3084,7 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
     }
 
     ImGui::EndChild();
-    if (export_.active && !export_.waitDay && export_.settleFrames == 0 && export_.cell == index) {
+    if (export_.active && export_.settleFrames == 0 && export_.cell == index) {
         const ImVec2 a = ImGui::GetItemRectMin();
         const ImVec2 b = ImGui::GetItemRectMax();
         gPlotPng.ready = true;
@@ -3298,7 +3137,7 @@ void CustomViews::drawGrid(UiContext& ui, ImVec2 size) {
     ImGui::SetCursorScreenPos(ImVec2(origin.x - scroll.x, origin.y - scroll.y));
     ImGui::Dummy(ImVec2(avail.x, static_cast<float>(maxRow) * unitH));
     updateDrag(ImVec2(origin.x - scroll.x, origin.y - scroll.y), unitW, unitH);
-    if (export_.active && !export_.waitDay && export_.settleFrames == 0 && !gPlotPng.ready) {
+    if (export_.active && export_.settleFrames == 0 && !gPlotPng.ready) {
         const ImVec2 a = ImGui::GetWindowPos();
         gPlotPng.ready = true;
         gPlotPng.x = a.x;
@@ -3325,10 +3164,7 @@ void CustomViews::draw(UiContext& ui) {
         ensureDefault();
     }
     doc_.active = clampi(doc_.active, 0, static_cast<int>(doc_.views.size()) - 1);
-    if (pickerDayIndex_ < 0) {
-        syncPickerDay(ui.arena);
-    }
-    tickPlotExport(ui);
+    tickPlotExport();
 
     if (!ImGui::GetIO().WantTextInput && ImGui::GetIO().KeyCtrl &&
         ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
@@ -3340,7 +3176,7 @@ void CustomViews::draw(UiContext& ui) {
         alignScrubWindowToCursor(active(), static_cast<double>(ui.arena.effectiveCursorMs()));
     }
     drawGrid(ui, ImGui::GetContentRegionAvail());
-    if (!export_.active || export_.waitDay || export_.settleFrames > 0) {
+    if (!export_.active || export_.settleFrames > 0) {
         drawPicker(ui);
     }
     const ImGuiIO& io = ImGui::GetIO();

@@ -35,17 +35,12 @@ private:
     bool renameOpen_ = false;
     bool pickerOpen_ = false;
     std::string status_;
-    int pickerDayIndex_ = -1;
     struct PlotExportJob {
         bool active = false;
-        bool waitDay = false;
         int settleFrames = 0;
         int cell = -1;
         std::string date;
-        std::string path;
         std::string filename;
-        double startMs = 0.0;
-        double readySinceMs = 0.0;
     };
     PlotExportJob export_{};
     enum class DragKind { None, Move, Resize };
@@ -79,7 +74,6 @@ private:
     double plotPanGrabT_ = 0.0;
     float plotPanGrabX_ = 0.0f;
     float plotPanPlotW_ = 1.0f;
-    double lastPlotSeekS_ = -1.0;
 
     CustomView& active();
     const CustomView& active() const;
@@ -113,11 +107,8 @@ private:
     void drawGrid(UiContext& ui, ImVec2 size);
     void drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index);
     void updateDrag(ImVec2 origin, float unitW, float unitH);
-    void syncPickerDay(const ClientArena& arena);
-    bool drawDriveDayCombo(UiContext& ui, const char* id, float width);
-    void requestPlotPng(UiContext& ui);
-    void tickPlotExport(UiContext& ui);
-    bool cellHasSamples(const ClientArena& arena, int index) const;
+    void requestPlotPng();
+    void tickPlotExport();
 };
 
 void flushPlotImageExport();

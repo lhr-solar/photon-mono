@@ -1,3 +1,4 @@
+#include "photon_ui/catalog.hpp"
 #include "photon_ui/client.hpp"
 #include "photon_ui/scene3d.hpp"
 #include "photon_ui/screen.hpp"
@@ -57,12 +58,6 @@ void paneHeader(const char* title, bool* open) {
 }  // namespace
 
 void LiveViewScreen::draw(UiContext& ui) {
-    if (showVideo_) {
-        ui.client.markVideoWanted();
-    }
-    if (ui.client.helloOk() && showVideo_ && !ui.arena.video.subscribed && !ui.arena.catalogPinned()) {
-        ui.client.goLive();
-    }
     if (showScene_) {
         ui.arena.signalMap().subscribe(ui.client, MapScreen::Scene3d);
     }
@@ -81,38 +76,6 @@ void LiveViewScreen::draw(UiContext& ui) {
     ImGui::SameLine();
     if (paneToggle("livevid", "Video", showVideo_)) {
         showVideo_ = !showVideo_;
-        if (showVideo_ && !ui.arena.video.subscribed && !ui.arena.catalogPinned()) {
-            ui.client.goLive();
-        }
-    }
-    ImGui::SameLine();
-    ImGui::Dummy(ImVec2(12.0f, 0.0f));
-    ImGui::SameLine();
-    if (ImGui::Button("Live", ImVec2(72.0f, 0.0f))) {
-        showVideo_ = true;
-        ui.client.goLive();
-    }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(160.0f);
-    ImGui::InputScalar("##replay_ms", ImGuiDataType_U64, &replayMs_);
-    ImGui::SameLine();
-    if (ImGui::Button("Go", ImVec2(48.0f, 0.0f))) {
-        showVideo_ = true;
-        ui.arena.video.subscribed = true;
-        videoDecoder().requestLocate(replayMs_);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Stop", ImVec2(64.0f, 0.0f))) {
-        ui.client.stopVideo();
-    }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(110.0f);
-    int nudge = static_cast<int>(ui.arena.video.clockOffsetMs);
-    if (ImGui::SliderInt("A/V ms", &nudge, -5000, 5000)) {
-        ui.arena.video.clockOffsetMs = nudge;
-        ui.arena.video.clockOffsetDirty = true;
-        ui.arena.video.clockOffsetUser = true;
-        videoDecoder().setClockOffsetMs(nudge);
     }
     ImGui::SameLine();
     drawMaps3dKeyRow();
@@ -123,7 +86,9 @@ void LiveViewScreen::draw(UiContext& ui) {
     const float statusH = std::max(24.0f, ImGui::GetFontSize() + 10.0f);
     theme::beginCard("livestat", ImVec2(avail.x, statusH), theme::muted(), theme::kStripPadding,
                      theme::CardFit::Band);
-    if (!videoDecoder().supported()) {
+    if (!kVideoEnabled) {
+        ImGui::TextColored(theme::mutedFg(), "video coming back");
+    } else if (!videoDecoder().supported()) {
         ImGui::TextColored(theme::warning(), "Video decoder unavailable");
     } else if (videoDecoder().hasFrame()) {
         ImGui::TextColored(theme::success(), "video cache  %s  %0.1f fps  %zu kB", v.mode.c_str(), v.fps,
@@ -226,7 +191,11 @@ void LiveViewScreen::draw(UiContext& ui) {
         theme::beginCard("livevideo", ImVec2(videoW, stack ? videoH : bodyH), theme::background(),
                          ImVec2(0.0f, 0.0f), theme::CardFit::Band);
         paneHeader("Video", &showVideo_);
-        drawVideoImage(ui.arena, ImGui::GetContentRegionAvail());
+        if (kVideoEnabled) {
+            drawVideoImage(ui.arena, ImGui::GetContentRegionAvail());
+        } else {
+            ImGui::TextColored(theme::mutedFg(), "video coming back");
+        }
         theme::endCard();
     }
 }

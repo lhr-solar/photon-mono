@@ -1,9 +1,11 @@
 #pragma once
 
 #include "photon/control.hpp"
+#include "photon/control_v2.hpp"
 #include "photon/protocol.hpp"
 #include "photon_ui/alarms.hpp"
 #include "photon_ui/catalog.hpp"
+#include "photon_ui/live_v2.hpp"
 #include "photon_ui/signal_map.hpp"
 #include "photon_ui/tile_cache.hpp"
 
@@ -37,18 +39,6 @@ struct SignalRing {
     bool interpolate(double tMs, double& value) const;
 };
 
-struct CanRow {
-    std::uint32_t canId = 0;
-    std::uint8_t dlc = 0;
-    std::uint8_t flags = 0;
-    std::uint8_t data[8]{};
-    std::uint64_t lastTsMs = 0;
-    std::uint64_t count = 0;
-    std::uint64_t windowCount = 0;
-    std::uint64_t windowStartMs = 0;
-    float rateHz = 0.0f;
-};
-
 struct CellPack {
     std::vector<float> voltage;
     std::vector<float> temp;
@@ -68,6 +58,24 @@ struct PlotSignal {
     std::string unit;
 };
 
+// A span of live data the server skipped (protocol v2 Gap), in Unix ns. Step 2
+// fills these from tiles.
+struct GapSpan {
+    std::int64_t fromNs = 0;
+    std::int64_t toNs = 0;
+};
+
+// What the server said in hello_ack, plus the clock offset for the live cursor.
+struct ServerInfo {
+    bool helloOk = false;
+    std::string server;
+    std::string user;
+    std::string liveRun;
+    std::vector<std::int64_t> levels;
+    std::int64_t clockOffsetNs = 0;  // server_time_ns minus this machine's clock at hello_ack
+};
+
+// Video is off in this step (kVideoEnabled); nothing fills this in until step 2.
 struct VideoState {
     bool connected = false;
     std::string host;
@@ -95,22 +103,13 @@ struct VideoState {
     std::uint64_t fpsLastPictureMs = 0;
 };
 
-struct TrackSimState {
-    std::vector<tracksim::TrackInfo> tracks;
-    bool catalogReady = false;
-    bool catalogPending = false;
-    bool solving = false;
-    bool haveResult = false;
-    std::string error;
-    std::string trackId;
-    bool feasible = false;
-    double timeBudgetS = 0.0;
-    double totalTimeS = 0.0;
-    double energyWh = 0.0;
-    double endSoc = 0.0;
-    double dEdT = 0.0;
-    std::vector<tracksim::SegmentResult> segments;
-    tracksim::MeasuredDrive measured;
+// Result of applyCatalog. remap maps each old client id to the new client id of
+// the same "Message.Signal" name, for the ids that still exist.
+struct CatalogChange {
+    bool changed = false;
+    std::unordered_map<std::uint32_t, std::uint32_t> remap;
+    std::uint32_t serverCount = 0;  // signals in the server's catalog
+    std::uint32_t duplicates = 0;   // signals left out for a repeated name
 };
 
 class ClientArena {
@@ -119,29 +118,19 @@ public:
 
     void clearTelemetry();
     void ingestTelemetry(std::span<const proto::TelemetryBlock> blocks);
-    void ingestCan(std::span<const proto::CanMonitorItem> items);
-    void ingestTimeline(const proto::TimelineStatus& status);
-    void pinCatalogSession(const ctrl::Message::CatalogSession& row);
-    void clearCatalogPin();
-    bool catalogPinned() const { return catalogPinned_; }
-    bool catalogPlaying() const {
-        return catalogPinned_ && timeline_.mode == static_cast<std::uint8_t>(proto::TimelineMode::Play);
-    }
-    void applyPinnedTimeline(proto::TimelineMode mode, std::uint64_t cursorMs);
-    void tickPinnedPlayback(double nowMs);
+    void ingestGap(std::int64_t fromNs, std::int64_t toNs);
+    // Sets the live cursor to the server's now, in Unix ms. min and max come
+    // from the rings the client has.
+    void setLiveCursor(std::uint64_t serverNowMs);
+    // Replaces the catalog. A new sha clears the rings and re-resolves the
+    // signal map and the alarms by name.
+    CatalogChange applyCatalog(const ctrl2::Catalog& catalog);
+    // Runs replay returns in step 2; until then no run is pinned.
+    bool catalogPinned() const { return false; }
     float historyRateHz(std::uint32_t signalId) const;
-    const std::string& pinnedCatalogId() const { return pinnedCatalogId_; }
-    void ingestVideo(const proto::VideoFrame& frame);
-    void applyVideoStatus(const ctrl::Message& msg);
     void updatePlaceholderCells(double nowMs);
     void holdReplayCells();
     void pushLog(std::string text, bool error = false);
-    void applyTrackSimList(const ctrl::Message& msg);
-    void applyTrackSimResult(const ctrl::Message& msg);
-    void applyControlError(const ctrl::Message& msg);
-    void resetTrackSimCatalog();
-    void beginTrackSimSolve(double timeBudgetS);
-    void applySignalCatalog(const ctrl::Message& msg);
     void resetSignalMap();
     void refreshMappedCells();
     void maybePrimeHistory(HistoryIO& io);
@@ -168,7 +157,7 @@ public:
     bool cursorValue(std::uint32_t id, double& value) const;
 
     const std::unordered_map<std::uint32_t, SignalRing>& rings() const { return rings_; }
-    const std::unordered_map<std::uint32_t, CanRow>& can() const { return can_; }
+    const std::vector<GapSpan>& gaps() const { return gaps_; }
     const proto::TimelineStatus& timeline() const { return timeline_; }
     void setPreviewCursor(std::uint64_t cursorMs, bool on) {
         previewCursor_ = on;
@@ -183,15 +172,14 @@ public:
         return timeline_.mode == static_cast<std::uint8_t>(proto::TimelineMode::Live);
     }
     std::uint64_t displayCursorMs() const {
-        // Plot scrub sets a local preview; Pit/live gauges must not follow it
-        // while the server is still Live (Pause on DAQ is a no-op).
+        // Plot scrub sets a local preview; live gauges must not follow it while
+        // the cursor is live.
         if (hasPreviewCursor() && !timelineIsLive()) {
             return previewCursorMs_;
         }
         return timeline_.cursorMs;
     }
-    // Video follows the operator pointer: rail drag, Pause/Play time, or the
-    // pinned run playhead. Live t=0 is only when none of those is set.
+    // Video follows the operator pointer: rail drag, or the live cursor.
     std::uint64_t videoCursorMs() const {
         if (hasPreviewCursor()) {
             return previewCursorMs_;
@@ -215,45 +203,36 @@ public:
     const CellPack& cells() const { return cells_; }
     const std::vector<LogLine>& logs() const { return logs_; }
 
-    ctrl::SourceKind source = ctrl::SourceKind::None;
-    std::string sourceHost = "127.0.0.1";
-    std::uint16_t sourcePort = 6500;
-    std::string sourcePath;
-    bool haveActiveSource = false;
-    std::vector<ctrl::Message::DriveDay> driveDays;
     std::string wsUrl = std::string(defaultWsUrl());
-    bool txArmed = false;
-    std::string txReason;
+    ServerInfo server;
     std::vector<std::string> features;
-    TrackSimState trackSim;
-    std::vector<ctrl::CatalogSignal> signalCatalog;
+    std::vector<ctrl2::Run> runs;  // runs_list reply, newest first
+    std::vector<ctrl::CatalogSignal> signalCatalog;  // id = catalog index + 1
+    std::vector<SignalExtra> signalExtra;            // parallel to signalCatalog
+    std::vector<std::string> catalogBuses;
+    std::string catalogSha;
     bool haveSignalCatalog = false;
-    std::string dbcId;
-    std::string dbcPath;
-    std::vector<std::string> dbcs;
     VideoState video;
 
 private:
     SignalMap signalMap_;
     AlarmEngine alarms_;
     std::unordered_map<std::uint32_t, SignalRing> rings_;
-    std::unordered_map<std::uint32_t, CanRow> can_;
     proto::TimelineStatus timeline_{};
     std::uint64_t previewCursorMs_ = 0;
     bool previewCursor_ = false;
     std::uint64_t videoFollowMs_ = 0;
     CellPack cells_{};
     std::vector<LogLine> logs_;
+    std::vector<GapSpan> gaps_;
     bool indexReadyPulse_ = false;
     bool sessionFollowPulse_ = false;
     bool mapsResetPulse_ = false;
     TileCache tiles_{};
     std::string primedHistoryKey_;
-    bool catalogPinned_ = false;
-    std::string pinnedCatalogId_;
-    double pinnedPlayWallMs_ = 0.0;
 
     void syncRingSeams();
+    void addDefaultRings();
 };
 
 }  // namespace photon::ui
