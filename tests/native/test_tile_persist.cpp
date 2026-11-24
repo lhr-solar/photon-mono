@@ -1,11 +1,11 @@
-#include "photon/control.hpp"
-#include "photon/protocol.hpp"
-#include "photon/tsdb.hpp"
+#include "photon/protocol_v2.hpp"
 #include "photon_ui/history_io.hpp"
 #include "photon_ui/tile_cache.hpp"
+#include "photon_ui/tile_levels.hpp"
 #include "photon_ui/tile_store.hpp"
 #include "test_harness.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -18,15 +18,25 @@ using photon::ui::LoadedTileRange;
 using photon::ui::PersistedTile;
 using photon::ui::PersistedTileKey;
 using photon::ui::TileCache;
+using photon::ui::TileState;
+namespace proto2 = photon::proto2;
 
-constexpr std::uint64_t kL0Span = 60000;
+const std::vector<std::int64_t> kLevels = {0, 10, 100, 1000, 10000, 60000, 600000};
+constexpr std::uint32_t kId = 7;  // client signal id; the wire index is kId - 1
+constexpr std::int64_t kRawSpan = photon::ui::kRawTileSpanMs;
+constexpr std::uint8_t kSealedLast = proto2::kTileSealed | proto2::kTileLast;
+constexpr std::uint8_t kLastOnly = proto2::kTileLast;
+constexpr const char* kRun = "run-1";
+constexpr const char* kSha = "sha-a";
 
-// Storage behind the seam. Writes land synchronously so a test can inspect
-// them, but reads are delivered only when the test says so -- that is what makes
-// the asynchronous ordering in TileCache testable without a browser.
+// Storage behind the seam. Writes land synchronously so a test can inspect them.
+// Reads are answered only when the test calls deliver(), which is what makes the
+// asynchronous ordering in TileCache testable without a browser.
 struct FakeTileStore : photon::ui::TileStore {
     struct Record {
-        std::string scope;
+        std::string runId;
+        std::int64_t rev = 0;
+        std::string sha;
         std::uint32_t signalId = 0;
         std::uint8_t level = 0;
         std::int64_t tileIndex = 0;
@@ -39,28 +49,32 @@ struct FakeTileStore : photon::ui::TileStore {
         std::int64_t indexTo = 0;
     };
 
-    std::string scope;
+    std::string runId;
+    std::int64_t rev = 0;
+    std::string sha;
     std::vector<Record> records;
     std::vector<LoadedTileRange> inFlight;
     std::vector<LoadedTileRange> delivered;
     std::vector<ReadRequest> readLog;
     std::size_t putCount = 0;
-    std::size_t bytes = 0;
-    std::size_t budget = 64u * 1024u * 1024u;
     bool acceptReads = true;
     bool acceptWrites = true;
-    // Lets a test hand an out-of-scope record to TileCache so the C++ side's own
-    // scope check is exercised rather than the store's sweep.
+    // Lets a test hand an out-of-scope record to TileCache, so the cache's own scope
+    // check is exercised rather than the store's sweep.
     bool ignoreScope = false;
 
-    void setScope(const std::string& sessionId, const std::string& dbcHash) override {
-        scope = sessionId + "|" + dbcHash;
+    bool inScope(const Record& r) const { return r.runId == runId && r.rev == rev && r.sha == sha; }
+
+    void setScope(const std::string& newRun, std::int64_t newRev, const std::string& newSha) override {
+        runId = newRun;
+        rev = newRev;
+        sha = newSha;
         if (ignoreScope) {
             return;
         }
         std::vector<Record> keep;
         for (auto& r : records) {
-            if (r.scope == scope) {
+            if (inScope(r)) {
                 keep.push_back(std::move(r));
             }
         }
@@ -79,7 +93,7 @@ struct FakeTileStore : photon::ui::TileStore {
         range.indexFrom = indexFrom;
         range.indexTo = indexTo;
         for (const auto& r : records) {
-            if (!ignoreScope && r.scope != scope) {
+            if (!ignoreScope && !inScope(r)) {
                 continue;
             }
             if (r.signalId != signalId || r.level != level || r.tileIndex < indexFrom || r.tileIndex > indexTo) {
@@ -91,8 +105,8 @@ struct FakeTileStore : photon::ui::TileStore {
         return true;
     }
 
-    // Round-trips through the wire envelope the JS bridge emits, so every
-    // persistence test also covers encodeLoadedRange/decodeLoadedRange.
+    // Hands the pending reads over through the wire envelope the JS bridge emits, so every
+    // read-back test also covers encodeLoadedRange/decodeLoadedRange.
     void deliver() {
         for (const auto& range : inFlight) {
             LoadedTileRange back;
@@ -104,7 +118,7 @@ struct FakeTileStore : photon::ui::TileStore {
     }
 
     std::size_t takeCompleted(std::vector<LoadedTileRange>& out) override {
-        const auto n = delivered.size();
+        const std::size_t n = delivered.size();
         for (auto& r : delivered) {
             out.push_back(std::move(r));
         }
@@ -116,27 +130,29 @@ struct FakeTileStore : photon::ui::TileStore {
         if (!acceptWrites) {
             return false;
         }
+        ++putCount;
         for (auto& r : records) {
-            if (r.scope == scope && r.signalId == key.signalId && r.level == key.level &&
-                r.tileIndex == key.tileIndex) {
-                bytes = bytes - r.blob.size() + blob.size();
+            if (inScope(r) && r.signalId == key.signalId && r.level == key.level && r.tileIndex == key.tileIndex) {
                 r.blob = blob;
-                ++putCount;
                 return true;
             }
         }
-        records.push_back(Record{scope, key.signalId, key.level, key.tileIndex, blob});
-        bytes += blob.size();
-        ++putCount;
+        records.push_back(Record{runId, rev, sha, key.signalId, key.level, key.tileIndex, blob});
         return true;
     }
 
-    std::size_t storedBytes() const override { return bytes; }
-    std::size_t byteBudget() const override { return budget; }
+    std::size_t storedBytes() const override {
+        std::size_t n = 0;
+        for (const auto& r : records) {
+            n += r.blob.size();
+        }
+        return n;
+    }
+    std::size_t byteBudget() const override { return 64u * 1024u * 1024u; }
 
     const Record* find(std::uint32_t signalId, std::uint8_t level, std::int64_t index) const {
         for (const auto& r : records) {
-            if (r.signalId == signalId && r.level == level && r.tileIndex == index) {
+            if (inScope(r) && r.signalId == signalId && r.level == level && r.tileIndex == index) {
                 return &r;
             }
         }
@@ -146,24 +162,27 @@ struct FakeTileStore : photon::ui::TileStore {
 
 struct LoggingIO : photon::ui::HistoryIO {
     struct Req {
-        std::uint32_t queryId = 0;
-        std::uint64_t fromMs = 0;
-        std::uint64_t toMs = 0;
+        std::uint32_t qid = 0;
         std::uint32_t signalId = 0;
+        int level = 0;
+        std::int64_t index = 0;
     };
-    std::vector<Req> reqs;
-    std::vector<std::uint32_t> cancels;
+    std::vector<Req> requests;
+    bool full = false;
 
-    void requestHistory(std::uint32_t queryId, std::string, std::uint64_t fromMs, std::uint64_t toMs,
-                        std::vector<std::uint32_t> signalIds, std::uint32_t) override {
-        reqs.push_back(Req{queryId, fromMs, toMs, signalIds.empty() ? 0u : signalIds.front()});
+    void requestTile(std::uint32_t qid, const std::string&, std::uint32_t signalId, int level, std::int64_t index,
+                     bool) override {
+        requests.push_back(Req{qid, signalId, level, index});
     }
-    void cancelHistory(std::uint32_t queryId) override { cancels.push_back(queryId); }
+    void cancelTile(std::uint32_t) override {}
+    bool queueFull() const override { return full; }
 
-    std::size_t countRange(std::uint32_t signalId, std::uint64_t fromMs, std::uint64_t toMs) const {
+    std::size_t count() const { return requests.size(); }
+    std::uint32_t lastQid() const { return requests.empty() ? 0u : requests.back().qid; }
+    std::size_t countFor(std::uint32_t signalId, int level, std::int64_t index) const {
         std::size_t n = 0;
-        for (const auto& r : reqs) {
-            if (r.signalId == signalId && r.fromMs == fromMs && r.toMs == toMs) {
+        for (const auto& r : requests) {
+            if (r.signalId == signalId && r.level == level && r.index == index) {
                 ++n;
             }
         }
@@ -171,98 +190,100 @@ struct LoggingIO : photon::ui::HistoryIO {
     }
 };
 
-photon::ctrl::Message makeResult(std::uint32_t queryId, std::uint32_t signalId, int level, std::uint32_t points) {
-    photon::ctrl::Message::HistorySeries s;
-    s.signalId = signalId;
-    s.level = level;
-    s.points = points;
-    return photon::ctrl::historyResult(queryId, level, 0, 0, 1000, {s}, false);
+void configureAt(TileCache& cache, FakeTileStore& store, std::int64_t rev, const std::string& sha) {
+    cache.setTileStore(&store);
+    cache.setLevels(kLevels);
+    cache.setRun(kRun, rev, sha, 0, 600000);
 }
 
-photon::proto::HistoryChunk makeRawChunk(std::uint32_t queryId, std::uint32_t signalId, const std::vector<double>& t,
-                                         const std::vector<float>& v, bool final) {
-    photon::proto::HistoryChunk c;
-    c.queryId = queryId;
-    c.signalId = signalId;
-    c.level = 0;
-    c.fields = photon::proto::kHistRaw;
-    c.flags = photon::proto::kHistDense;
-    if (final) {
-        c.flags = static_cast<std::uint16_t>(c.flags | photon::proto::kHistFinal);
+void configure(TileCache& cache, FakeTileStore& store) {
+    configureAt(cache, store, 1, kSha);
+}
+
+// Asks for the raw tile covering cursorMs (and the one before it, near a tile start).
+std::size_t askCursor(TileCache& cache, LoggingIO& io, std::uint64_t cursorMs) {
+    const std::uint32_t ids[] = {kId};
+    const std::size_t before = io.count();
+    cache.requestCursorWindow(io, ids, cursorMs);
+    return io.count() - before;
+}
+
+// Asks for the raw tiles of [fromMs, toMs] (pixels 0 keeps the window at level 0).
+std::size_t askRaw(TileCache& cache, LoggingIO& io, std::uint64_t fromMs, std::uint64_t toMs) {
+    const std::uint32_t ids[] = {kId};
+    const std::size_t before = io.count();
+    cache.requestWindow(io, ids, fromMs, toMs, 0, false);
+    return io.count() - before;
+}
+
+// The same, sent straight to the socket. A cold store is asked first and holds the request
+// while it reads, so the writer-side helpers refuse the store's read and go to the socket.
+std::size_t askSocket(TileCache& cache, LoggingIO& io, FakeTileStore& store, std::uint64_t fromMs,
+                      std::uint64_t toMs) {
+    const bool accepting = store.acceptReads;
+    store.acceptReads = false;
+    const std::size_t n = askRaw(cache, io, fromMs, toMs);
+    store.acceptReads = accepting;
+    return n;
+}
+
+bool isState(const TileCache& cache, std::int64_t index, TileState state) {
+    const auto* tile = cache.find(kId, 0, index);
+    return tile != nullptr && tile->state == state;
+}
+
+// Ingests a sealed raw tile of three samples for tile `index` of kId.
+void ingestSealedTile(TileCache& cache, LoggingIO& io, FakeTileStore& store, std::int64_t index) {
+    const auto from = static_cast<double>(index * kRawSpan);
+    CHECK(askSocket(cache, io, store, static_cast<std::uint64_t>(from),
+                    static_cast<std::uint64_t>(from) + kRawSpan - 1) == 1);
+    const auto piece = [&] {
+        proto2::TilePiece p;
+        p.qid = io.lastQid();
+        p.signal = kId - 1;
+        p.level = 0;
+        p.flags = kSealedLast;
+        p.index = index;
+        p.offset = 0;
+        p.tMs = {from + 1000.0, from + 2000.0, from + 3000.0};
+        p.value = {1.0, 2.0, 3.0};
+        p.n = 3;
+        return p;
+    }();
+    CHECK(cache.ingestPiece(piece));
+}
+
+// A sealed raw tile with 4000 samples, so its in-memory cost is well above a small test budget.
+constexpr std::size_t kBigSamples = 4000;
+
+void ingestBigSealedTile(TileCache& cache, LoggingIO& io, FakeTileStore& store, std::int64_t index) {
+    const auto from = static_cast<double>(index * kRawSpan);
+    CHECK(askSocket(cache, io, store, static_cast<std::uint64_t>(from),
+                    static_cast<std::uint64_t>(from) + kRawSpan - 1) == 1);
+    proto2::TilePiece p;
+    p.qid = io.lastQid();
+    p.signal = kId - 1;
+    p.level = 0;
+    p.flags = kSealedLast;
+    p.index = index;
+    p.offset = 0;
+    p.n = static_cast<std::uint32_t>(kBigSamples);
+    for (std::size_t i = 0; i < kBigSamples; ++i) {
+        p.tMs.push_back(from + 1000.0 + static_cast<double>(i) * 2.0);  // 1 s .. 9 s, inside the 10 s tile
+        p.value.push_back(static_cast<double>(i));
     }
-    c.timestamps = t;
-    c.rawV = v;
-    c.slotCount = static_cast<std::uint32_t>(t.size());
-    c.valueCount = static_cast<std::uint32_t>(v.size());
-    if (!t.empty()) {
-        c.baseMs = static_cast<std::uint64_t>(t.front());
-    }
-    return c;
-}
-
-// setSession with unchanged arguments does not reset the cache; it just runs one
-// persistence pump, which is the only pump entry point that needs no HistoryIO.
-void pump(TileCache& cache, std::uint64_t minMs, std::uint64_t maxMs) {
-    cache.setSession(cache.sessionId(), cache.dbcHash(), minMs, maxMs);
-}
-
-// Ingests one complete L0 tile of raw samples covering [index*60s, index*60s+3s).
-void ingestL0Tile(TileCache& cache, std::uint32_t signalId, std::int64_t index) {
-    const auto from = static_cast<std::uint64_t>(index) * kL0Span;
-    const auto qid = cache.prepareQuery(signalId, from, from + kL0Span, 0, false, false);
-    cache.ingestResult(makeResult(qid, signalId, 0, 3));
-    cache.ingestChunk(makeRawChunk(qid, signalId,
-                                   {static_cast<double>(from + 1000), static_cast<double>(from + 2000),
-                                    static_cast<double>(from + 3000)},
-                                   {1.0f, 2.0f, 3.0f}, true));
-}
-
-// A tile whose actual byte cost is well above a small test budget, so an
-// assertion about resident bytes can genuinely fail.
-constexpr std::size_t kBigTileSamples = 4000;
-
-void ingestBigL0Tile(TileCache& cache, std::uint32_t signalId, std::int64_t index) {
-    const auto from = static_cast<std::uint64_t>(index) * kL0Span;
-    std::vector<double> t;
-    std::vector<float> v;
-    t.reserve(kBigTileSamples);
-    v.reserve(kBigTileSamples);
-    for (std::size_t i = 0; i < kBigTileSamples; ++i) {
-        t.push_back(static_cast<double>(from + 1000 + i * 10));
-        v.push_back(static_cast<float>(i));
-    }
-    const auto qid = cache.prepareQuery(signalId, from, from + kL0Span, 0, false, false);
-    cache.ingestResult(makeResult(qid, signalId, 0, static_cast<std::uint32_t>(kBigTileSamples)));
-    cache.ingestChunk(makeRawChunk(qid, signalId, t, v, true));
-}
-
-// Larger than expectedTileBytes(L0) = 96 KiB so a restore that reserved the
-// expected size can still land over a budget that only just covered the reserve.
-constexpr std::size_t kHugeTileSamples = 12000;
-
-void ingestHugeL0Tile(TileCache& cache, std::uint32_t signalId, std::int64_t index) {
-    const auto from = static_cast<std::uint64_t>(index) * kL0Span;
-    std::vector<double> t;
-    std::vector<float> v;
-    t.reserve(kHugeTileSamples);
-    v.reserve(kHugeTileSamples);
-    for (std::size_t i = 0; i < kHugeTileSamples; ++i) {
-        t.push_back(static_cast<double>(from + 1000 + i * 4));
-        v.push_back(static_cast<float>(i));
-    }
-    const auto qid = cache.prepareQuery(signalId, from, from + kL0Span, 0, false, false);
-    cache.ingestResult(makeResult(qid, signalId, 0, static_cast<std::uint32_t>(kHugeTileSamples)));
-    cache.ingestChunk(makeRawChunk(qid, signalId, t, v, true));
+    CHECK(cache.ingestPiece(p));
 }
 
 void testTileBlobRoundTrip() {
     PersistedTile p;
-    p.sessionId = "20260723-160000-03";
-    p.dbcHash = "abc123";
+    p.runId = "run-1";
+    p.rev = 1784841600123LL;
+    p.sha = "abc123";
     p.signalId = 0xDEADBEEF;
     p.level = 2;
-    p.tileIndex = 1784841600000 / 1024000;
-    p.bucketMs = 1000;
+    p.tileIndex = 1784841600000 / 102400;
+    p.bucketMs = 100;
     p.t = {1000.0, 2000.5, 3000.0};
     p.minV = {-1.5f, 0.0f, 2.5f};
     p.maxV = {1.5f, 4.0f, 9.5f};
@@ -272,20 +293,63 @@ void testTileBlobRoundTrip() {
     PersistedTile back;
     CHECK(photon::ui::decodeTile(blob, back));
     CHECK(back.formatVersion == photon::ui::kTileBlobVersion);
-    CHECK(back.sessionId == p.sessionId);
-    CHECK(back.dbcHash == p.dbcHash);
+    CHECK(back.runId == p.runId);
+    CHECK(back.rev == p.rev);
+    CHECK(back.sha == p.sha);
     CHECK(back.signalId == p.signalId);
     CHECK(back.level == 2);
     CHECK(back.tileIndex == p.tileIndex);
-    CHECK(back.bucketMs == 1000);
+    CHECK(back.bucketMs == 100);
     CHECK(back.t == p.t);
     CHECK(back.minV == p.minV);
     CHECK(back.maxV == p.maxV);
     CHECK(back.meanV == p.meanV);
     CHECK(back.rawV.empty());
 
-    // A truncated record must not decode: the recorded sample count no longer
-    // matches the payload.
+    // Level 0 carries raw values and no envelope arrays.
+    PersistedTile raw;
+    raw.runId = "run-2";
+    raw.rev = 7;
+    raw.sha = "s";
+    raw.signalId = 1;
+    raw.level = 0;
+    raw.tileIndex = 0;
+    raw.t = {1000.0};
+    raw.rawV = {5.5f};
+    PersistedTile rawBack;
+    CHECK(photon::ui::decodeTile(photon::ui::encodeTile(raw), rawBack));
+    CHECK(rawBack.level == 0);
+    CHECK(rawBack.rawV == raw.rawV);
+    CHECK(rawBack.minV.empty());
+}
+
+// Wrong magic, another format version, truncation, spliced trailing bytes and a bad level are refused.
+void testTileBlobRejectsBadRecords() {
+    PersistedTile p;
+    p.runId = "run-1";
+    p.rev = 1;
+    p.sha = "abc";
+    p.signalId = 7;
+    p.level = 2;
+    p.tileIndex = 3;
+    p.bucketMs = 100;
+    p.t = {1000.0, 2000.0, 3000.0};
+    p.minV = {1.0f, 2.0f, 3.0f};
+    p.maxV = {1.0f, 2.0f, 3.0f};
+    p.meanV = {1.0f, 2.0f, 3.0f};
+    const auto blob = photon::ui::encodeTile(p);
+    PersistedTile back;
+    CHECK(photon::ui::decodeTile(blob, back));
+
+    auto badMagic = blob;
+    badMagic[0] = 0x00;
+    CHECK(!photon::ui::decodeTile(badMagic, back));
+
+    auto badVersion = blob;
+    badVersion[4] = static_cast<std::uint8_t>(photon::ui::kTileBlobVersion + 1);
+    CHECK(!photon::ui::decodeTile(badVersion, back));
+
+    // The record's truncated payload no longer matches its counts.
     auto shortBlob = blob;
     shortBlob.resize(blob.size() - 8);
     CHECK(!photon::ui::decodeTile(shortBlob, back));
@@ -295,18 +359,9 @@ void testTileBlobRoundTrip() {
     longBlob.push_back(0);
     CHECK(!photon::ui::decodeTile(longBlob, back));
 
-    auto badMagic = blob;
-    badMagic[0] = 0x00;
-    CHECK(!photon::ui::decodeTile(badMagic, back));
-
-    // Format version is the coarse invalidation lever; a bumped writer must not
-    // be readable by this decoder.
-    auto badVersion = blob;
-    badVersion[4] = static_cast<std::uint8_t>(photon::ui::kTileBlobVersion + 1);
-    CHECK(!photon::ui::decodeTile(badVersion, back));
-
+    // Level sits after magic, version and signal id: offset 12.
     auto badLevel = blob;
-    badLevel[12] = 9;
+    badLevel[12] = static_cast<std::uint8_t>(photon::ui::kTileBlobMaxLevel + 1);
     CHECK(!photon::ui::decodeTile(badLevel, back));
 
     CHECK(!photon::ui::decodeTile({}, back));
@@ -316,7 +371,7 @@ void testRangeEnvelopeRoundTrip() {
     LoadedTileRange range;
     range.signalId = 77;
     range.level = 3;
-    range.indexFrom = -0;
+    range.indexFrom = -3;
     range.indexTo = 5;
     range.blobs.push_back({1, 2, 3});
     range.blobs.push_back({});
@@ -327,11 +382,12 @@ void testRangeEnvelopeRoundTrip() {
     CHECK(photon::ui::decodeLoadedRange(env, back));
     CHECK(back.signalId == 77);
     CHECK(back.level == 3);
+    CHECK(back.indexFrom == -3);
     CHECK(back.indexTo == 5);
     CHECK(back.blobs.size() == 3);
-    CHECK(back.blobs[0] == std::vector<std::uint8_t>({1, 2, 3}));
-    CHECK(back.blobs[1].empty());
-    CHECK(back.blobs[2] == std::vector<std::uint8_t>({9, 8}));
+    CHECK(back.blobs.size() == 3 && back.blobs[0] == std::vector<std::uint8_t>({1, 2, 3}));
+    CHECK(back.blobs.size() == 3 && back.blobs[1].empty());
+    CHECK(back.blobs.size() == 3 && back.blobs[2] == std::vector<std::uint8_t>({9, 8}));
 
     auto truncated = env;
     truncated.pop_back();
@@ -342,495 +398,395 @@ void testRangeEnvelopeRoundTrip() {
     CHECK(!photon::ui::decodeLoadedRange(badMagic, back));
 }
 
-// Cold start: a tile that was written before the reload is restored and its
-// socket request is not issued, while a neighbouring tile that was never
-// persisted still goes to the socket. Both halves matter -- the second is what
-// stops the first from passing because nothing was requested at all.
-void testColdStartRestoresAndSuppressesRequest() {
+// Cold start: a sealed tile written before the reload is restored from the store, and no
+// socket request goes out for its key.
+void testColdStartRestoresWithoutRequest() {
     FakeTileStore store;
     {
         TileCache writer;
-        writer.setTileStore(&store);
-        writer.setSession("s", "d", 0, 600000);
-        ingestL0Tile(writer, 7, 0);
-        pump(writer, 0, 600000);
+        configure(writer, store);
+        LoggingIO io;
+        ingestSealedTile(writer, io, store, 0);
+        writer.pump();
         CHECK(writer.persistWrittenCount() == 1);
-        CHECK(store.find(7, 0, 0) != nullptr);
+        CHECK(store.find(kId, 0, 0) != nullptr);
     }
 
     TileCache reader;
-    reader.setTileStore(&store);
-    reader.setSession("s", "d", 0, 600000);
+    configure(reader, store);
     LoggingIO io;
-    const std::uint32_t ids[] = {7};
-    reader.requestCursorWindow(io, ids, 30000);
+    CHECK(askCursor(reader, io, 5000) == 0);
     CHECK(reader.persistPendingReads() == 1);
-    CHECK(io.reqs.empty());
+    CHECK(io.count() == 0);  // deferred behind the disk read
 
     store.deliver();
-    reader.requestCursorWindow(io, ids, 30000);
+    reader.pump();
     CHECK(reader.persistRestoredCount() == 1);
-    CHECK(reader.persistRejectedCount() == 0);
+    CHECK(askCursor(reader, io, 5000) == 0);
+    CHECK(io.count() == 0);
+    CHECK(isState(reader, 0, TileState::Sealed));
 
-    const auto plot = reader.gatherPlot(7, 0, kL0Span - 1, 0);
+    const auto plot = reader.gatherPlot(kId, 0, kRawSpan - 1, 0);
     CHECK(plot.t.size() == 3);
-    CHECK(plot.y[0] == 1.0);
-    CHECK(plot.y[2] == 3.0);
-
-    CHECK(io.countRange(7, 0, kL0Span) == 0);
-    CHECK(io.countRange(7, kL0Span, 2 * kL0Span) == 1);
+    CHECK(plot.y.size() == 3 && plot.y[0] == 1.0 && plot.y[2] == 3.0);
 }
 
-// A pending read defers the socket request for the tiles it covers, and the
-// completion -- even an empty one -- releases it.
-void testDiskReadDefersThenReleasesNetwork() {
+// A disk read that answers with nothing releases the socket request for the tile.
+void testDiskMissReleasesNetwork() {
     FakeTileStore store;
     TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, 600000);
+    configure(cache, store);
     LoggingIO io;
-    const std::uint32_t ids[] = {7};
-
-    cache.requestCursorWindow(io, ids, 30000);
-    CHECK(io.reqs.empty());
-    cache.requestCursorWindow(io, ids, 30000);
-    CHECK(io.reqs.empty());
-    CHECK(cache.persistPendingReads() == 1);
+    CHECK(askCursor(cache, io, 5000) == 0);
+    CHECK(io.count() == 0);
+    CHECK(askCursor(cache, io, 5000) == 0);  // still pending: the store is asked once only
+    CHECK(store.readLog.size() == 1);
 
     store.deliver();
-    cache.requestCursorWindow(io, ids, 30000);
-    CHECK(cache.persistPendingReads() == 0);
-    CHECK(cache.persistRestoredCount() == 0);
-    CHECK(io.countRange(7, 0, kL0Span) == 1);
-    CHECK(io.countRange(7, kL0Span, 2 * kL0Span) == 1);
+    cache.pump();
+    CHECK(askCursor(cache, io, 5000) == 1);
+    CHECK(io.countFor(kId, 0, 0) == 1);
+    CHECK(store.readLog.size() == 1);
 }
 
-// A bridge that accepts a read and never answers must not defer the socket
-// forever.
+// A read the store accepts but never answers must not defer the socket forever.
 void testDiskDeadlineReleasesNetwork() {
     FakeTileStore store;
     TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, 600000);
+    configure(cache, store);
     LoggingIO io;
-    const std::uint32_t ids[] = {7};
-
-    cache.requestCursorWindow(io, ids, 30000);
-    CHECK(io.reqs.empty());
+    CHECK(askCursor(cache, io, 5000) == 0);
     for (std::uint64_t i = 0; i < TileCache::kDiskDeadlinePumps + 2; ++i) {
-        pump(cache, 0, 600000);
+        cache.pump();
     }
-    CHECK(cache.persistPendingReads() == 0);
-    cache.requestCursorWindow(io, ids, 30000);
-    CHECK(io.countRange(7, 0, kL0Span) == 1);
+    CHECK(askCursor(cache, io, 5000) == 1);
+    CHECK(io.countFor(kId, 0, 0) == 1);
 }
 
-// §9.5's overview-first guarantee outranks deduplication: the overview request
-// goes out on the first frame even with an L5 read outstanding.
-void testOverviewNotDeferredByPendingRead() {
+// A read the store refuses is not recorded as asked, so it is not stuck. Here the
+// network request still goes out at once.
+void testRefusedReadDoesNotDeferNetwork() {
     FakeTileStore store;
+    store.acceptReads = false;
     TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, 3'600'000);
+    configure(cache, store);
     LoggingIO io;
-    const std::uint32_t ids[] = {1};
-
-    cache.requestWindow(io, ids, 0, 120000, 2000, false);
-    CHECK(cache.persistPendingReads() > 0);
-    CHECK(cache.hasOverview(1));
-    const auto span = photon::tsdb::tileSpanMs(5);
-    CHECK(io.countRange(1, 0, span) == 1);
+    CHECK(askCursor(cache, io, 5000) == 1);
+    CHECK(io.countFor(kId, 0, 0) == 1);
+    CHECK(cache.persistPendingReads() == 0);
+    CHECK(store.readLog.empty());
 }
 
-// A tile that is still receiving chunks is not written, and the write happens as
-// soon as the final chunk lands.
+// A refused read is asked of the store again on the next call, for as long as the tile is
+// still absent. Here the transport is full, so nothing is sent and the tile stays absent.
+void testRefusedReadIsAskedAgainWhileTileAbsent() {
+    FakeTileStore store;
+    store.acceptReads = false;
+    TileCache cache;
+    configure(cache, store);
+    LoggingIO io;
+    io.full = true;
+    CHECK(askCursor(cache, io, 5000) == 0);
+    CHECK(io.count() == 0);
+
+    store.acceptReads = true;
+    io.full = false;
+    CHECK(askCursor(cache, io, 5000) == 0);
+    CHECK(store.readLog.size() == 1);
+    CHECK(store.readLog.size() == 1 && store.readLog[0].indexFrom == 0);
+    CHECK(io.count() == 0);
+}
+
+// A tile that is still receiving pieces is not written; it is written once the last piece lands.
 void testPartialTileIsNotPersisted() {
     FakeTileStore store;
     TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, 600000);
-
-    const auto qid = cache.prepareQuery(8, 0, kL0Span, 0, false, false);
-    cache.ingestResult(makeResult(qid, 8, 0, 4));
-    cache.ingestChunk(makeRawChunk(qid, 8, {1000.0, 2000.0}, {1.0f, 2.0f}, false));
-    pump(cache, 0, 600000);
+    configure(cache, store);
+    LoggingIO io;
+    CHECK(askSocket(cache, io, store, 0, 9999) == 1);
+    const auto qid = io.lastQid();
+    proto2::TilePiece first;
+    first.qid = qid;
+    first.signal = kId - 1;
+    first.index = 0;
+    first.flags = 0;
+    first.tMs = {1000.0, 2000.0};
+    first.value = {1.0, 2.0};
+    first.n = 2;
+    CHECK(cache.ingestPiece(first));
+    cache.pump();
     CHECK(store.putCount == 0);
     CHECK(cache.persistWrittenCount() == 0);
 
-    cache.ingestChunk(makeRawChunk(qid, 8, {3000.0, 4000.0}, {3.0f, 4.0f}, true));
-    pump(cache, 0, 600000);
+    proto2::TilePiece last;
+    last.qid = qid;
+    last.signal = kId - 1;
+    last.index = 0;
+    last.offset = 2;
+    last.flags = kSealedLast;
+    last.tMs = {3000.0};
+    last.value = {3.0};
+    last.n = 1;
+    CHECK(cache.ingestPiece(last));
+    cache.pump();
     CHECK(store.putCount == 1);
-    CHECK(store.find(8, 0, 0) != nullptr);
+    CHECK(store.find(kId, 0, 0) != nullptr);
 }
 
-// "Empty" is the one tile state that is a function of *when* you asked -- a live
-// tail can fill a range that was empty a minute ago -- and it is also the state
-// that most cheaply advances the seam. So a tile the server has since reported
-// empty for its range is not written, even though it still holds samples from an
-// earlier query. That is the flush-time re-validation in persistable().
-void testEmptyMarkedTileIsNotPersisted() {
+// Open (unsealed) and empty tiles are never written. A sealed tile is.
+void testOpenAndEmptyTilesAreNotWritten() {
     FakeTileStore store;
     TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, 600000);
+    configure(cache, store);
+    LoggingIO io;
 
-    ingestL0Tile(cache, 5, 0);
-    const auto qEmpty = cache.prepareQuery(5, 0, kL0Span, 0, false, false);
-    cache.ingestResult(makeResult(qEmpty, 5, 0, 0));
-    pump(cache, 0, 600000);
+    CHECK(askSocket(cache, io, store, 0, 9999) == 1);
+    proto2::TilePiece openPiece;
+    openPiece.qid = io.lastQid();
+    openPiece.signal = kId - 1;
+    openPiece.index = 0;
+    openPiece.flags = kLastOnly;
+    openPiece.tMs = {1000.0};
+    openPiece.value = {1.0};
+    openPiece.n = 1;
+    CHECK(cache.ingestPiece(openPiece));
+    CHECK(isState(cache, 0, TileState::Open));
+
+    CHECK(askSocket(cache, io, store, 10000, 19999) == 1);
+    proto2::TilePiece empty;
+    empty.qid = io.lastQid();
+    empty.signal = kId - 1;
+    empty.index = 1;
+    empty.flags = kLastOnly;
+    empty.n = 0;
+    CHECK(cache.ingestPiece(empty));
+    CHECK(isState(cache, 1, TileState::Empty));
+
+    cache.pump();
+    cache.pump();
     CHECK(store.putCount == 0);
-    CHECK(store.find(5, 0, 0) == nullptr);
     CHECK(cache.persistWrittenCount() == 0);
 
-    // Control: the same shape without the empty report does write, so the check
-    // above is not passing because nothing ever writes.
-    ingestL0Tile(cache, 6, 0);
-    pump(cache, 0, 600000);
+    // Control: a sealed tile in the same cache is written.
+    ingestSealedTile(cache, io, store, 2);
+    cache.pump();
     CHECK(store.putCount == 1);
-    CHECK(store.find(6, 0, 0) != nullptr);
+    CHECK(store.find(kId, 0, 2) != nullptr);
 }
 
-// A tile is only written once the session's write frontier has moved past its
-// end, so a range that can still grow is never frozen onto disk.
-void testTileNotPersistedUntilFrontierPasses() {
+// A record whose payload does not match the key it was filed under lands its samples at the
+// wrong time, and a record that does not decode is no record at all. Neither is restored.
+void testMisfiledAndCorruptRecordsAreRejected() {
     FakeTileStore store;
-    TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, kL0Span);
-    ingestL0Tile(cache, 7, 0);
-    pump(cache, 0, kL0Span);
-    CHECK(store.putCount == 0);
+    store.setScope(kRun, 1, kSha);
 
-    cache.setSession("s", "d", 0, 200000);
-    ingestL0Tile(cache, 7, 1);
-    pump(cache, 0, 200000);
-    CHECK(store.putCount == 1);
-    CHECK(store.find(7, 0, 1) != nullptr);
-    CHECK(store.find(7, 0, 0) == nullptr);
-}
-
-// The subtlest risk in this work: a restored tile must not claim Sealed where
-// the socket path would have said Open, because Sealed adjoining the ring
-// advances the seam and hides live samples.
-void testRestoredTileCannotAdvanceSeamAcrossLive() {
-    FakeTileStore store;
-    {
-        TileCache writer;
-        writer.setTileStore(&store);
-        writer.setSession("s", "d", 0, 600000);
-        ingestL0Tile(writer, 1, 0);
-        pump(writer, 0, 600000);
-        CHECK(writer.persistWrittenCount() == 1);
-    }
-
-    const auto restore = [&store](TileCache& cache, LoggingIO& io) {
-        const std::uint32_t ids[] = {1};
-        cache.requestCursorWindow(io, ids, 30000);
-        store.deliver();
-        cache.requestCursorWindow(io, ids, 30000);
-    };
-
-    // Ring known before the restore: tile 0 ends at 60000 and the ring starts at
-    // 30000, so the tile overlaps live and must land Open.
-    {
-        TileCache cache;
-        cache.setTileStore(&store);
-        cache.setSession("s", "d", 0, 600000);
-        cache.updateRingOldest(1, 30000);
-        LoggingIO io;
-        restore(cache, io);
-        CHECK(cache.persistRestoredCount() == 1);
-        CHECK(cache.seamFor(1) == 0);
-    }
-
-    // Ring learned after the restore: the same test has to be re-applied when
-    // updateRingOldest arrives, or the tile stays Sealed and moves the seam.
-    {
-        TileCache cache;
-        cache.setTileStore(&store);
-        cache.setSession("s", "d", 0, 600000);
-        LoggingIO io;
-        restore(cache, io);
-        CHECK(cache.persistRestoredCount() == 1);
-        cache.updateRingOldest(1, 30000);
-        CHECK(cache.seamFor(1) == 0);
-    }
-
-    // And the guard must not over-suppress: a restored tile that ends exactly at
-    // the ring does not overlap it, so the seam is allowed to advance.
-    {
-        TileCache cache;
-        cache.setTileStore(&store);
-        cache.setSession("s", "d", 0, 600000);
-        cache.updateRingOldest(1, kL0Span);
-        LoggingIO io;
-        restore(cache, io);
-        CHECK(cache.persistRestoredCount() == 1);
-        CHECK(cache.seamFor(1) == kL0Span);
-    }
-}
-
-// The 256 MiB in-memory cap stays hard. Persistence goes through the same
-// reservation path, so it cannot be a back door for resident bytes.
-void testRestoreRespectsMemoryCap() {
-    FakeTileStore store;
-    {
-        TileCache writer;
-        writer.setTileStore(&store);
-        writer.setSession("s", "d", 0, 600000);
-        for (std::int64_t i = 0; i < 4; ++i) {
-            ingestBigL0Tile(writer, 7, i);
-        }
-        pump(writer, 0, 600000);
-        CHECK(writer.persistWrittenCount() == 4);
-    }
-
-    // The second drain is a bare pump rather than another requestCursorWindow, so
-    // the resident-byte assertions below measure the restore path itself and are
-    // not rescued by the eviction that an enqueue would trigger.
-    const auto restoreWindow = [&store](TileCache& cache) {
-        LoggingIO io;
-        const std::uint32_t ids[] = {7};
-        cache.requestCursorWindow(io, ids, kL0Span + 30000);
-        store.deliver();
-        pump(cache, 0, 600000);
-    };
-
-    {
-        TileCache tight;
-        tight.setTileStore(&store);
-        tight.setBudget(8 * 1024);
-        tight.setSession("s", "d", 0, 600000);
-        restoreWindow(tight);
-        CHECK(tight.persistRefusedCount() > 0);
-        CHECK(tight.persistRestoredCount() == 0);
-        // Each stored tile is ~48 kB of samples against an 8 kB budget, so this
-        // is a real bound and not a tautology.
-        CHECK(tight.residentBytes() <= tight.budget());
-    }
-    {
-        TileCache roomy;
-        roomy.setTileStore(&store);
-        roomy.setSession("s", "d", 0, 600000);
-        restoreWindow(roomy);
-        CHECK(roomy.persistRefusedCount() == 0);
-        CHECK(roomy.persistRestoredCount() == 3);
-        CHECK(roomy.residentBytes() > 3 * kBigTileSamples * sizeof(double));
-        CHECK(roomy.residentBytes() <= roomy.budget());
-    }
-}
-
-void testRestoreDropsWhenActualExceedsReserve() {
-    FakeTileStore store;
-    {
-        TileCache writer;
-        writer.setTileStore(&store);
-        writer.setSession("s", "d", 0, 600000);
-        ingestHugeL0Tile(writer, 9, 0);
-        pump(writer, 0, 600000);
-        CHECK(writer.persistWrittenCount() == 1);
-    }
-
-    TileCache tight;
-    tight.setTileStore(&store);
-    // Fits the 96 KiB L0 reserve, not the ~144 KiB decoded tile.
-    tight.setBudget(110 * 1024);
-    tight.setSession("s", "d", 0, 600000);
-    LoggingIO io;
-    const std::uint32_t ids[] = {9};
-    tight.requestCursorWindow(io, ids, kL0Span / 2);
-    store.deliver();
-    pump(tight, 0, 600000);
-    CHECK(tight.persistRefusedCount() > 0);
-    CHECK(tight.persistRestoredCount() == 0);
-    CHECK(tight.residentBytes() <= tight.budget());
-}
-
-// The same signal id under a different DBC is a different signal, so a record
-// from another scope must be rejected by the cache itself and not only by the
-// store's own sweep.
-void testStaleScopeRecordIsRejected() {
-    FakeTileStore store;
-    {
-        TileCache writer;
-        writer.setTileStore(&store);
-        writer.setSession("s", "d1", 0, 600000);
-        ingestL0Tile(writer, 7, 0);
-        pump(writer, 0, 600000);
-        CHECK(writer.persistWrittenCount() == 1);
-    }
-
-    store.ignoreScope = true;
-    TileCache reader;
-    reader.setTileStore(&store);
-    reader.setSession("s", "d2", 0, 600000);
-    LoggingIO io;
-    const std::uint32_t ids[] = {7};
-    reader.requestCursorWindow(io, ids, 30000);
-    store.deliver();
-    reader.requestCursorWindow(io, ids, 30000);
-    CHECK(reader.persistRejectedCount() > 0);
-    CHECK(reader.persistRestoredCount() == 0);
-    const auto plot = reader.gatherPlot(7, 0, kL0Span - 1, 0);
-    CHECK(plot.incomplete);
-}
-
-// A record whose payload does not match the key it was filed under would land
-// its samples at the wrong time. Reject it.
-void testMisfiledRecordIsRejected() {
-    FakeTileStore store;
-    store.scope = "s|d";
     PersistedTile p;
-    p.sessionId = "s";
-    p.dbcHash = "d";
-    p.signalId = 7;
+    p.runId = kRun;
+    p.rev = 1;
+    p.sha = kSha;
+    p.signalId = kId;
     p.level = 0;
-    p.tileIndex = 99;
+    p.tileIndex = 99;  // filed under index 0
     p.t = {1000.0};
     p.rawV = {5.0f};
-    store.records.push_back(FakeTileStore::Record{"s|d", 7, 0, 0, photon::ui::encodeTile(p)});
+    const PersistedTileKey misfiledKey{kId, 0, 0};
+    const PersistedTileKey corruptKey{kId, 0, 1};
+    const std::vector<std::uint8_t> garbage = {0xde, 0xad, 0xbe, 0xef};
+    CHECK(store.put(misfiledKey, photon::ui::encodeTile(p)));
+    CHECK(store.put(corruptKey, garbage));
 
     TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, 600000);
+    configure(cache, store);
     LoggingIO io;
-    const std::uint32_t ids[] = {7};
-    cache.requestCursorWindow(io, ids, 30000);
+    const std::uint32_t ids[] = {kId};
+    cache.requestWindow(io, ids, 0, 19999, 0, false);
+    CHECK(io.count() == 0);  // both reads are deferred behind the store
     store.deliver();
-    cache.requestCursorWindow(io, ids, 30000);
-    CHECK(cache.persistRejectedCount() == 1);
+    cache.pump();
     CHECK(cache.persistRestoredCount() == 0);
+    CHECK(cache.find(kId, 0, 0) == nullptr);
+    CHECK(cache.find(kId, 0, 1) == nullptr);
+
+    // Once the disk has answered with nothing usable, both tiles go to the socket.
+    cache.requestWindow(io, ids, 0, 19999, 0, false);
+    CHECK(io.countFor(kId, 0, 0) == 1);
+    CHECK(io.countFor(kId, 0, 1) == 1);
 }
 
-// The store's own budget is separate and larger, but it is still a budget: once
-// the store reports itself over, the backlog is shed rather than grown.
-void testWritesStopWhenStoreOverBudget() {
+// A record from another rev or another catalog sha is not restored. The store sweeps
+// records of a previous scope; when it does not, the cache checks the record itself.
+void testRecordFromAnotherRevOrShaIsNotRestored() {
     FakeTileStore store;
-    store.budget = 128;
-    store.bytes = 4096;
-    TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, 600000);
-    ingestL0Tile(cache, 7, 0);
-    pump(cache, 0, 600000);
-    CHECK(store.putCount == 0);
-    CHECK(cache.persistDroppedCount() > 0);
-    CHECK(cache.persistWrittenCount() == 0);
+    {
+        TileCache writer;
+        configure(writer, store);
+        LoggingIO io;
+        ingestSealedTile(writer, io, store, 0);
+        writer.pump();
+        CHECK(writer.persistWrittenCount() == 1);
+    }
+
+    // Rev 2: the store drops the rev 1 record when the scope changes.
+    {
+        TileCache reader;
+        configureAt(reader, store, 2, kSha);
+        LoggingIO io;
+        CHECK(askCursor(reader, io, 5000) == 0);
+        store.deliver();
+        reader.pump();
+        CHECK(reader.persistRestoredCount() == 0);
+        CHECK(askCursor(reader, io, 5000) == 1);
+        CHECK(io.countFor(kId, 0, 0) == 1);
+    }
+
+    // The store keeps the rev 1 record and hands it over anyway: the cache rejects it.
+    store.ignoreScope = true;
+    {
+        TileCache reader;
+        configureAt(reader, store, 1, "sha-b");
+        LoggingIO io;
+        CHECK(askCursor(reader, io, 5000) == 0);
+        store.deliver();
+        reader.pump();
+        CHECK(reader.persistRestoredCount() == 0);
+        CHECK(askCursor(reader, io, 5000) == 1);
+        CHECK(io.countFor(kId, 0, 0) == 1);
+    }
+    store.ignoreScope = false;
 }
 
-// Tiles are re-filed whenever a second query overlaps them -- the level+/-1
-// prefetch does exactly that -- so a tile already in the store must not be
-// rewritten on every such query.
-void testTileWrittenOnlyOnce() {
-    FakeTileStore store;
-    TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, 600000);
-    ingestL0Tile(cache, 7, 0);
-    pump(cache, 0, 600000);
-    CHECK(store.putCount == 1);
-
-    ingestL0Tile(cache, 7, 0);
-    pump(cache, 0, 600000);
-    CHECK(store.putCount == 1);
-    CHECK(cache.persistWrittenCount() == 1);
-}
-
-// A cold start must not write back what it just read: a restored tile is already
-// in the store, so even when a later socket chunk re-files it, it is not
-// rewritten.
+// A restored tile is already in the store, so it is not written back by a pump.
 void testRestoredTileIsNotRewritten() {
     FakeTileStore store;
     {
         TileCache writer;
-        writer.setTileStore(&store);
-        writer.setSession("s", "d", 0, 600000);
-        ingestL0Tile(writer, 7, 0);
-        pump(writer, 0, 600000);
+        configure(writer, store);
+        LoggingIO io;
+        ingestSealedTile(writer, io, store, 0);
+        writer.pump();
         CHECK(store.putCount == 1);
     }
 
     TileCache reader;
-    reader.setTileStore(&store);
-    reader.setSession("s", "d", 0, 600000);
+    configure(reader, store);
     LoggingIO io;
-    const std::uint32_t ids[] = {7};
-    reader.requestCursorWindow(io, ids, 30000);
+    CHECK(askCursor(reader, io, 5000) == 0);
     store.deliver();
-    reader.requestCursorWindow(io, ids, 30000);
+    reader.pump();
     CHECK(reader.persistRestoredCount() == 1);
-    ingestL0Tile(reader, 7, 0);
-    pump(reader, 0, 600000);
+    reader.pump();
+    reader.pump();
     CHECK(store.putCount == 1);
     CHECK(reader.persistWrittenCount() == 0);
 }
 
-// A tile index already read from disk is not read again, so a steady window does
-// not re-issue the same range every frame.
-void testDiskRangeAskedOnce() {
+// Each tile is written once it is sealed; a second pump writes nothing more.
+void testSealedTileWrittenOnce() {
     FakeTileStore store;
     TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, 600000);
+    configure(cache, store);
     LoggingIO io;
-    const std::uint32_t ids[] = {7};
-
-    cache.requestCursorWindow(io, ids, 30000);
-    CHECK(store.readLog.size() == 1);
-    CHECK(store.readLog[0].indexFrom == 0);
-    CHECK(store.readLog[0].indexTo == 1);
-    store.deliver();
-    cache.requestCursorWindow(io, ids, 30000);
-    CHECK(store.readLog.size() == 1);
-
-    // A window that moves past the asked span reads only the new indices.
-    cache.requestCursorWindow(io, ids, 3 * kL0Span);
-    CHECK(store.readLog.size() == 2);
-    CHECK(store.readLog[1].indexFrom == 2);
-    CHECK(store.readLog[1].indexTo == 4);
+    ingestSealedTile(cache, io, store, 0);
+    cache.pump();
+    CHECK(store.putCount == 1);
+    cache.pump();
+    CHECK(store.putCount == 1);
+    CHECK(cache.persistWrittenCount() == 1);
 }
 
-// A read the store refuses must not be recorded as asked, or the tile would be
-// neither read from disk nor fetched from the socket.
-void testRefusedReadIsRetried() {
+// The write queue drains at most kWritesPerPump tiles per pump; the rest wait for the next one.
+void testWritesAreBatchedPerPump() {
     FakeTileStore store;
-    store.acceptReads = false;
     TileCache cache;
-    cache.setTileStore(&store);
-    cache.setSession("s", "d", 0, 600000);
+    configure(cache, store);
     LoggingIO io;
-    const std::uint32_t ids[] = {7};
+    for (std::int64_t i = 0; i < 30; ++i) {
+        ingestSealedTile(cache, io, store, i);
+    }
+    cache.pump();
+    CHECK(store.putCount == TileCache::kWritesPerPump);
+    cache.pump();
+    CHECK(store.putCount == 30);
+    CHECK(cache.persistWrittenCount() == 30);
+}
 
-    cache.requestCursorWindow(io, ids, 30000);
-    CHECK(cache.persistPendingReads() == 0);
-    CHECK(io.countRange(7, 0, kL0Span) == 1);
+// A write the store refuses is dropped, not retried.
+void testRefusedWriteIsDropped() {
+    FakeTileStore store;
+    store.acceptWrites = false;
+    TileCache cache;
+    configure(cache, store);
+    LoggingIO io;
+    ingestSealedTile(cache, io, store, 0);
+    cache.pump();
+    CHECK(store.putCount == 0);
+    CHECK(cache.persistWrittenCount() == 0);
 
-    store.acceptReads = true;
-    cache.requestCursorWindow(io, ids, 30000);
-    CHECK(store.readLog.size() == 1);
-    CHECK(store.readLog[0].indexFrom == 0);
+    store.acceptWrites = true;
+    cache.pump();
+    CHECK(store.putCount == 0);
+}
+
+// A restore goes through the same budget as a socket tile: a tight budget evicts what it
+// admits, and the resident bytes never pass the budget.
+void testRestoreStaysWithinMemoryBudget() {
+    FakeTileStore store;
+    {
+        TileCache writer;
+        configure(writer, store);
+        LoggingIO io;
+        for (std::int64_t i = 0; i < 4; ++i) {
+            ingestBigSealedTile(writer, io, store, i);
+        }
+        writer.pump();
+        CHECK(writer.persistWrittenCount() == 4);
+    }
+
+    const auto restoreWindow = [&store](TileCache& cache) {
+        LoggingIO io;
+        const std::uint32_t ids[] = {kId};
+        cache.requestWindow(io, ids, 0, 4 * static_cast<std::uint64_t>(kRawSpan) - 1, 0, false);
+        store.deliver();
+        cache.pump();
+    };
+
+    {
+        TileCache tight;
+        tight.setBudget(8 * 1024);
+        configure(tight, store);
+        restoreWindow(tight);
+        CHECK(tight.residentBytes() <= tight.budget());
+        CHECK(tight.tileCount() == 0);
+    }
+    {
+        TileCache roomy;
+        configure(roomy, store);
+        restoreWindow(roomy);
+        CHECK(roomy.persistRestoredCount() == 4);
+        CHECK(roomy.tileCount() == 4);
+        CHECK(roomy.residentBytes() > 4 * kBigSamples * sizeof(double));
+        CHECK(roomy.residentBytes() <= roomy.budget());
+    }
 }
 
 }  // namespace
 
 void runTilePersistTests() {
     testTileBlobRoundTrip();
+    testTileBlobRejectsBadRecords();
     testRangeEnvelopeRoundTrip();
-    testColdStartRestoresAndSuppressesRequest();
-    testDiskReadDefersThenReleasesNetwork();
+    testColdStartRestoresWithoutRequest();
+    testDiskMissReleasesNetwork();
     testDiskDeadlineReleasesNetwork();
-    testOverviewNotDeferredByPendingRead();
+    testRefusedReadDoesNotDeferNetwork();
+    testRefusedReadIsAskedAgainWhileTileAbsent();
     testPartialTileIsNotPersisted();
-    testEmptyMarkedTileIsNotPersisted();
-    testTileNotPersistedUntilFrontierPasses();
-    testRestoredTileCannotAdvanceSeamAcrossLive();
-    testRestoreRespectsMemoryCap();
-    testRestoreDropsWhenActualExceedsReserve();
-    testStaleScopeRecordIsRejected();
-    testMisfiledRecordIsRejected();
-    testWritesStopWhenStoreOverBudget();
-    testTileWrittenOnlyOnce();
+    testOpenAndEmptyTilesAreNotWritten();
+    testMisfiledAndCorruptRecordsAreRejected();
+    testRecordFromAnotherRevOrShaIsNotRestored();
     testRestoredTileIsNotRewritten();
-    testDiskRangeAskedOnce();
-    testRefusedReadIsRetried();
+    testSealedTileWrittenOnce();
+    testWritesAreBatchedPerPump();
+    testRefusedWriteIsDropped();
+    testRestoreStaysWithinMemoryBudget();
 }

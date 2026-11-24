@@ -1,3 +1,5 @@
+# test_session_history.cpp and test_log_switch.cpp drive photon-backend over the v1 protocol.
+# They are skipped until step 3 (cleanup removes the v1 backend); the files are kept.
 add_executable(photon-tests
     test_main.cpp
     test_cli.cpp
@@ -20,9 +22,7 @@ add_executable(photon-tests
     test_analysis_overlay.cpp
     test_plot_axis.cpp
     test_tile_persist.cpp
-    test_session_history.cpp
     test_replay_views.cpp
-    test_log_switch.cpp
     test_live_fanout.cpp
     ${CMAKE_SOURCE_DIR}/tools/photon-index/live_fanout.cpp
     test_video.cpp
@@ -72,6 +72,7 @@ add_executable(photon-v2-probe
     ${CMAKE_SOURCE_DIR}/photon/ui/src/theme.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/tile_cache.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/tile_store.cpp
+    ${CMAKE_SOURCE_DIR}/photon/ui/src/analysis_runtime.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/page_url.cpp
     ${CMAKE_SOURCE_DIR}/photon/ui/src/platform.cpp
 )

@@ -1,8 +1,8 @@
-#include "photon/control.hpp"
-#include "photon/protocol.hpp"
+#include "photon/protocol_v2.hpp"
 #include "photon_ui/analysis_eval.hpp"
 #include "photon_ui/analysis_runtime.hpp"
 #include "photon_ui/analysis_workbook.hpp"
+#include "photon_ui/history_io.hpp"
 #include "photon_ui/tile_cache.hpp"
 #include "test_harness.hpp"
 
@@ -18,69 +18,88 @@ namespace {
 using photon::ui::AnalysisBoundRun;
 using photon::ui::AnalysisEvent;
 using photon::ui::AnalysisFormulaSpec;
+using photon::ui::AnalysisHistoryIO;
 using photon::ui::AnalysisRunBinding;
 using photon::ui::AnalysisRunRole;
 using photon::ui::AnalysisRuntime;
 using photon::ui::AnalysisTransform;
-using photon::ui::TileCache;
 using photon::ui::kAnalysisEventManual;
 using photon::ui::kAnalysisEventThreshold;
+namespace proto2 = photon::proto2;
 
-photon::ctrl::Message makeResult(std::uint32_t queryId, std::uint32_t signalId, int level, std::uint32_t points,
-                                 std::uint64_t fromMs = 0, std::uint64_t toMs = 1000) {
-    photon::ctrl::Message::HistorySeries s;
-    s.signalId = signalId;
-    s.level = level;
-    s.points = points;
-    return photon::ctrl::historyResult(queryId, level, 0, fromMs, toMs, {s}, false);
-}
+// Bucket widths as hello_ack carries them (photon-next/docs/protocol-v2.md).
+const std::vector<std::int64_t> kLevels = {0, 10, 100, 1000, 10000, 60000, 600000};
+constexpr std::int64_t kRawSpanMs = 10000;
+constexpr std::uint8_t kSealedLast = proto2::kTileSealed | proto2::kTileLast;
 
-photon::proto::HistoryChunk makeRawChunk(std::uint32_t queryId, std::uint32_t signalId, std::uint8_t level,
-                                         const std::vector<double>& t, const std::vector<float>& v, bool final) {
-    photon::proto::HistoryChunk c;
-    c.queryId = queryId;
-    c.signalId = signalId;
-    c.level = level;
-    c.fields = photon::proto::kHistRaw;
-    c.flags = photon::proto::kHistDense;
-    if (final) {
-        c.flags = static_cast<std::uint16_t>(c.flags | photon::proto::kHistFinal);
+// The query id of the most recent request for (signalId, level, index) on io, or 0.
+std::uint32_t qidOf(const AnalysisHistoryIO& io, std::uint32_t signalId, int level, std::int64_t index) {
+    const auto& reqs = io.requests();
+    for (auto it = reqs.rbegin(); it != reqs.rend(); ++it) {
+        if (it->signalId == signalId && it->level == level && it->index == index) {
+            return it->queryId;
+        }
     }
-    c.timestamps = t;
-    c.rawV = v;
-    c.slotCount = static_cast<std::uint32_t>(t.size());
-    c.valueCount = static_cast<std::uint32_t>(v.size());
-    if (!t.empty()) {
-        c.baseMs = static_cast<std::uint64_t>(t.front());
+    return 0;
+}
+
+// A raw tile of signalId as one sealed piece. The wire index is the client id less one.
+proto2::TilePiece rawPiece(std::uint32_t qid, std::uint32_t signalId, std::int64_t index,
+                           const std::vector<double>& t, const std::vector<double>& v) {
+    proto2::TilePiece p;
+    p.qid = qid;
+    p.signal = signalId - 1;
+    p.level = 0;
+    p.flags = kSealedLast;
+    p.index = index;
+    p.offset = 0;
+    p.n = static_cast<std::uint32_t>(t.size());
+    p.tMs = t;
+    p.value = v;
+    return p;
+}
+
+// Asks the run's cache for raw tile `index` of signalId (a cursor in the middle of that
+// tile asks for that tile only), then delivers the tile as one piece.
+void deliverRaw(AnalysisBoundRun& run, std::uint32_t signalId, std::int64_t index, const std::vector<double>& t,
+                const std::vector<double>& v) {
+    const std::uint32_t ids[] = {signalId};
+    run.requestCursorWindow(ids, static_cast<std::uint64_t>(index * kRawSpanMs + kRawSpanMs / 2));
+    const std::uint32_t qid = qidOf(run.io(), signalId, 0, index);
+    CHECK(qid != 0);
+    if (qid != 0) {
+        CHECK(run.cache().ingestPiece(rawPiece(qid, signalId, index, t, v)));
     }
-    return c;
 }
 
-void ingestRaw(TileCache& cache, std::uint32_t signalId, const std::vector<double>& t, const std::vector<float>& v) {
-    const auto qid = cache.prepareQuery(signalId, 0, 120000, 0, false, false);
-    cache.ingestResult(makeResult(qid, signalId, 0, static_cast<std::uint32_t>(t.size()), 0, 120000));
-    cache.ingestChunk(makeRawChunk(qid, signalId, 0, t, v, true));
-}
-
-void ingestEnvelope(TileCache& cache, std::uint32_t signalId) {
-    photon::proto::HistoryChunk coarse;
-    coarse.queryId = cache.prepareQuery(signalId, 0, 120000, 1, false, false);
-    cache.ingestResult(makeResult(coarse.queryId, signalId, 1, 3, 0, 120000));
-    coarse.signalId = signalId;
-    coarse.level = 1;
-    coarse.bucketMs = 1000;
-    coarse.baseMs = 10000;
-    coarse.slotCount = 3;
-    coarse.valueCount = 3;
-    coarse.flags = static_cast<std::uint16_t>(photon::proto::kHistDense | photon::proto::kHistFinal);
-    coarse.minV = {1.0f, 2.0f, 3.0f};
-    coarse.maxV = {2.0f, 4.0f, 6.0f};
-    coarse.meanV = {1.5f, 3.0f, 4.5f};
-    cache.ingestChunk(coarse);
+// Asks the run's cache for a level 1 tile (10 ms buckets) of signalId at index 0, the
+// way a 0..10 s window at 200 pixels asks for it, then delivers it with min/max/mean.
+void deliverEnvelope(AnalysisBoundRun& run, std::uint32_t signalId) {
+    const std::uint32_t ids[] = {signalId};
+    run.requestWindow(ids, 0, 9999, 200, false);
+    const std::uint32_t qid = qidOf(run.io(), signalId, 1, 0);
+    CHECK(qid != 0);
+    if (qid == 0) {
+        return;
+    }
+    proto2::TilePiece p;
+    p.qid = qid;
+    p.signal = signalId - 1;
+    p.level = 1;
+    p.flags = kSealedLast;
+    p.index = 0;
+    p.offset = 0;
+    p.n = 3;
+    p.tMs = {1000.0, 1010.0, 1020.0};
+    p.min = {1.0, 2.0, 3.0};
+    p.max = {2.0, 4.0, 6.0};
+    p.mean = {1.5, 3.0, 4.5};
+    CHECK(run.cache().ingestPiece(p));
 }
 
 void testOverlayQueriesAreDistinct() {
     AnalysisRuntime runtime;
+    runtime.setLevels(kLevels);
     AnalysisRunBinding primary;
     primary.sessionId = "p";
     primary.dbcHash = "dbc";
@@ -95,21 +114,28 @@ void testOverlayQueriesAreDistinct() {
     auto* b = runtime.bind(std::move(overlay));
     CHECK(a != nullptr);
     CHECK(b != nullptr);
+    if (a == nullptr || b == nullptr) {
+        return;
+    }
     CHECK(a->queryOrigin() != b->queryOrigin());
 
     const std::uint32_t ids[] = {3};
     runtime.requestWindow(ids, 5000, 30000, 200, false);
     CHECK(!a->io().requests().empty());
     CHECK(!b->io().requests().empty());
+    if (a->io().requests().empty() || b->io().requests().empty()) {
+        return;
+    }
     CHECK(a->io().requests().front().queryId != b->io().requests().front().queryId);
     CHECK(photon::ui::isAnalysisQueryId(a->io().requests().front().queryId));
     CHECK(photon::ui::isAnalysisQueryId(b->io().requests().front().queryId));
-    CHECK(b->io().requests().front().sessionId == "o");
-    CHECK(a->io().requests().front().sessionId == "p");
+    CHECK(b->io().requests().front().runId == "o");
+    CHECK(a->io().requests().front().runId == "p");
 }
 
 void testOffsetRealignsWithoutRefetch() {
     AnalysisRuntime runtime;
+    runtime.setLevels(kLevels);
     AnalysisRunBinding primary;
     primary.sessionId = "p";
     primary.dbcHash = "dbc";
@@ -124,38 +150,44 @@ void testOffsetRealignsWithoutRefetch() {
     overlay.maxMs = 120000;
     auto* b = runtime.bind(std::move(overlay));
     CHECK(b != nullptr);
-    ingestRaw(b->cache(), 1, {10.0, 20.0, 30.0}, {1.0f, 2.0f, 3.0f});
+    if (b == nullptr) {
+        return;
+    }
+    deliverRaw(*b, 1, 0, {10.0, 20.0, 30.0}, {1.0, 2.0, 3.0});
 
     const std::uint32_t ids[] = {1};
     runtime.requestWindow(ids, 0, 60000, 200, false);
     const auto n = b->io().requests().size();
 
-    const auto aligned = runtime.gatherOverlayPlot(1, 0, 60000, 0);
-    CHECK(aligned.t.size() == 3);
-    CHECK(aligned.t[0] == 10.0);
-    CHECK(aligned.y[1] == 2.0);
+    const auto aligned = runtime.gatherOverlayPlot(1, 0, 9999, 0);
+    CHECK(aligned.t.size() == 3 && aligned.y.size() == 3 && aligned.t[0] == 10.0 && aligned.y[1] == 2.0);
 
     runtime.setOverlayOffsetMs(5000);
     CHECK(b->io().requests().size() == n);
-    CHECK(b->cache().sessionId() == "o");
-    const auto shifted = runtime.gatherOverlayPlot(1, 0, 60000, 0);
-    CHECK(shifted.t.size() == 3);
-    CHECK(shifted.t[0] == 5010.0);
-    CHECK(shifted.t[2] == 5030.0);
-    CHECK(shifted.y[2] == 3.0);
+    CHECK(b->cache().runId() == "o");
+    // The overlay's native 0..9999 ms shows at 5000..14999 ms of the primary's time.
+    const auto shifted = runtime.gatherOverlayPlot(1, 0, 14999, 0);
+    CHECK(shifted.t.size() == 3 && shifted.t[0] == 5010.0 && shifted.t[2] == 5030.0 && shifted.y[2] == 3.0);
     CHECK(runtime.overlayOffsetMs() == 5000);
 }
 
 void testGatherL0IgnoresEnvelope() {
-    TileCache cache;
-    cache.setSession("s", "dbc", 0, 120000);
-    ingestRaw(cache, 4, {10.0, 20.0}, {5.0f, 6.0f});
-    ingestEnvelope(cache, 4);
-    const auto l0 = cache.gatherL0(4, 0, 120000);
+    AnalysisRuntime runtime;
+    runtime.setLevels(kLevels);
+    AnalysisRunBinding bind;
+    bind.sessionId = "l0";
+    bind.dbcHash = "dbc";
+    bind.maxMs = 120000;
+    auto* run = runtime.bind(std::move(bind));
+    CHECK(run != nullptr);
+    if (run == nullptr) {
+        return;
+    }
+    deliverRaw(*run, 4, 0, {10.0, 20.0}, {5.0, 6.0});
+    deliverEnvelope(*run, 4);
+    const auto l0 = run->gatherL0(4, 0, 120000);
     CHECK(!l0.envelope);
-    CHECK(l0.t.size() == 2);
-    CHECK(l0.y[0] == 5.0);
-    CHECK(l0.y[1] == 6.0);
+    CHECK(l0.t.size() == 2 && l0.y.size() == 2 && l0.y[0] == 5.0 && l0.y[1] == 6.0);
     for (double y : l0.y) {
         CHECK(y != 1.5 && y != 3.0 && y != 4.5);
     }
@@ -163,14 +195,18 @@ void testGatherL0IgnoresEnvelope() {
 
 void testFormulaSampleAligned() {
     AnalysisRuntime runtime;
+    runtime.setLevels(kLevels);
     AnalysisRunBinding bind;
     bind.sessionId = "f";
     bind.dbcHash = "dbc";
     bind.maxMs = 120000;
     auto* run = runtime.bind(std::move(bind));
     CHECK(run != nullptr);
-    ingestRaw(run->cache(), 7, {10.0, 20.0, 30.0}, {2.0f, 4.0f, 6.0f});
-    ingestRaw(run->cache(), 8, {10.0, 20.0, 30.0}, {1.0f, 1.0f, 2.0f});
+    if (run == nullptr) {
+        return;
+    }
+    deliverRaw(*run, 7, 0, {10.0, 20.0, 30.0}, {2.0, 4.0, 6.0});
+    deliverRaw(*run, 8, 0, {10.0, 20.0, 30.0}, {1.0, 1.0, 2.0});
 
     AnalysisFormulaSpec spec;
     CHECK(photon::ui::parseFormulaSpec("7 + 8", &spec));
@@ -178,29 +214,31 @@ void testFormulaSampleAligned() {
     CHECK(spec.rightId == 8);
     const auto out = photon::ui::evaluateFormula(*run, spec, 0, 60000);
     CHECK(!out.decimated);
-    CHECK(out.plot.t.size() == 3);
-    CHECK(out.plot.y[0] == 3.0);
-    CHECK(out.plot.y[1] == 5.0);
-    CHECK(out.plot.y[2] == 8.0);
+    CHECK(out.plot.t.size() == 3 && out.plot.y.size() == 3);
+    CHECK(out.plot.y.size() == 3 && out.plot.y[0] == 3.0 && out.plot.y[1] == 5.0 && out.plot.y[2] == 8.0);
 
     AnalysisFormulaSpec scale;
     CHECK(photon::ui::parseFormulaSpec("$7 * 0.5", &scale));
     const auto scaled = photon::ui::evaluateFormula(*run, scale, 0, 60000);
-    CHECK(scaled.plot.y.size() == 3);
-    CHECK(scaled.plot.y[1] == 2.0);
+    CHECK(scaled.plot.y.size() == 3 && scaled.plot.y[1] == 2.0);
 }
 
 void testFormulaOnEnvelopeIsLabeled() {
     AnalysisRuntime runtime;
+    runtime.setLevels(kLevels);
     AnalysisRunBinding bind;
     bind.sessionId = "dec";
     bind.dbcHash = "dbc";
     bind.maxMs = 120000;
     auto* run = runtime.bind(std::move(bind));
     CHECK(run != nullptr);
-    ingestEnvelope(run->cache(), 9);
+    if (run == nullptr) {
+        return;
+    }
+    deliverEnvelope(*run, 9);
     AnalysisFormulaSpec spec;
     CHECK(photon::ui::parseFormulaSpec("9 + 1.0", &spec));
+    // No raw tile exists, so the formula falls back to the envelope, which is labeled.
     const auto out = photon::ui::evaluateFormula(*run, spec, 0, 120000);
     CHECK(out.decimated);
     CHECK(!out.plot.t.empty());
@@ -208,14 +246,18 @@ void testFormulaOnEnvelopeIsLabeled() {
 
 void testThresholdUsesL0Only() {
     AnalysisRuntime runtime;
+    runtime.setLevels(kLevels);
     AnalysisRunBinding bind;
     bind.sessionId = "thr";
     bind.dbcHash = "dbc";
     bind.maxMs = 120000;
     auto* run = runtime.bind(std::move(bind));
     CHECK(run != nullptr);
-    ingestRaw(run->cache(), 5, {10.0, 20.0, 30.0, 40.0}, {1.0f, 2.0f, 10.0f, 2.0f});
-    ingestEnvelope(run->cache(), 5);
+    if (run == nullptr) {
+        return;
+    }
+    deliverRaw(*run, 5, 0, {10.0, 20.0, 30.0, 40.0}, {1.0, 2.0, 10.0, 2.0});
+    deliverEnvelope(*run, 5);
 
     AnalysisTransform xf;
     xf.id = "t1";
@@ -227,10 +269,13 @@ void testThresholdUsesL0Only() {
 
     const auto evs = photon::ui::extractThresholdEvents(*run, xf, 0, 60000);
     CHECK(evs.size() == 1);
+    if (evs.size() != 1) {
+        return;
+    }
     CHECK(evs[0].tMs == 30);
     CHECK(evs[0].source == kAnalysisEventThreshold);
     CHECK(evs[0].value.has_value());
-    CHECK(*evs[0].value == 10.0);
+    CHECK(evs[0].value.has_value() && *evs[0].value == 10.0);
 
     const auto l0 = run->gatherL0(5, 0, 60000);
     std::size_t manual = 0;
@@ -245,13 +290,17 @@ void testThresholdUsesL0Only() {
 
 void testEnvelopeCannotProduceThresholdEvents() {
     AnalysisRuntime runtime;
+    runtime.setLevels(kLevels);
     AnalysisRunBinding bind;
     bind.sessionId = "env";
     bind.dbcHash = "dbc";
     bind.maxMs = 120000;
     auto* run = runtime.bind(std::move(bind));
     CHECK(run != nullptr);
-    ingestEnvelope(run->cache(), 6);
+    if (run == nullptr) {
+        return;
+    }
+    deliverEnvelope(*run, 6);
     AnalysisTransform xf;
     xf.signalId = 6;
     xf.kind = "threshold";
@@ -291,8 +340,8 @@ void testManualAndSeek() {
     extracted.push_back(next);
     photon::ui::replaceThresholdEvents(&events, std::move(extracted));
     CHECK(events.size() == 2);
-    CHECK(events[0].source == kAnalysisEventManual);
-    CHECK(events[1].id == "new");
+    CHECK(events.size() == 2 && events[0].source == kAnalysisEventManual);
+    CHECK(events.size() == 2 && events[1].id == "new");
 }
 
 void testRejectsOverlayOfPrimarySession() {

@@ -1,7 +1,9 @@
+#include "photon/control_v2.hpp"
 #include "photon/tsdb.hpp"
 #include "photon_ui/analysis_workbook.hpp"
 #include "test_harness.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -177,18 +179,47 @@ void testYLockedRoundTrip() {
     CHECK(found);
 }
 
-void testCatalogMatchAndBinding() {
-    photon::ctrl::Message::CatalogSession row;
+void testRunMatchAndBinding() {
+    photon::ctrl2::Run row;
     row.id = "20260904-090000-00";
-    row.minMs = 10;
-    row.maxMs = 90;
-    row.dbcHash = "abc";
-    CHECK(photon::ui::catalogMatchesListing(row, "20260904-090000-00", 10, 90, "abc"));
-    CHECK(!photon::ui::catalogMatchesListing(row, "other", 10, 90, "abc"));
-    const auto bind = photon::ui::bindingFromCatalog(row);
+    row.startMs = 10;
+    row.endMs = 90;
+    row.dbcSha = "abc";
+    row.rev = 7;
+
+    photon::ui::AnalysisRunBinding same;
+    same.sessionId = row.id;
+    same.dbcHash = "abc";
+    CHECK(photon::ui::runMatchesBinding(row, same));
+
+    // The same id with another catalog sha is another recording.
+    photon::ui::AnalysisRunBinding otherSha = same;
+    otherSha.dbcHash = "def";
+    CHECK(!photon::ui::runMatchesBinding(row, otherSha));
+
+    photon::ui::AnalysisRunBinding otherId = same;
+    otherId.sessionId = "other";
+    CHECK(!photon::ui::runMatchesBinding(row, otherId));
+
+    // A binding without a sha matches on the id alone.
+    photon::ui::AnalysisRunBinding noSha = same;
+    noSha.dbcHash.clear();
+    CHECK(photon::ui::runMatchesBinding(row, noSha));
+
+    const auto bind = photon::ui::bindingFromRun(row);
     CHECK(bind.sessionId == row.id);
-    CHECK(bind.dbcHash == row.dbcHash);
+    CHECK(bind.dbcHash == row.dbcSha);
+    CHECK(bind.rev == 7);
     CHECK(bind.role == AnalysisRunRole::Primary);
+    CHECK(bind.minMs == 10);
+    CHECK(bind.maxMs == 90);
+    CHECK(photon::ui::runMatchesBinding(row, bind));
+
+    // Bounds that are not positive start at 0.
+    row.startMs = -5;
+    row.endMs = 0;
+    const auto open = photon::ui::bindingFromRun(row);
+    CHECK(open.minMs == 0 && open.maxMs == 0);
 }
 
 void testListCatalogMatchesJson() {
@@ -243,6 +274,21 @@ void testListCatalogMatchesJson() {
     CHECK(listed[0].hasVideo);
     CHECK(photon::tsdb::videoVptOverlapsRange(root / "20260904-090000-00" / "video.vpt", 1000, 50000));
     CHECK(!photon::tsdb::videoVptOverlapsRange(root / "20260904-090000-00" / "video.vpt", 80000, 90000));
+    if (!listed.empty()) {
+        // The listed session is a runs_list row: its binding and its match come from the row.
+        photon::ctrl2::Run row;
+        row.id = listed[0].id;
+        row.startMs = static_cast<std::int64_t>(listed[0].minMs);
+        row.endMs = static_cast<std::int64_t>(listed[0].maxMs);
+        row.dbcSha = listed[0].dbcSha;
+        row.rev = 1;
+        const auto bind = photon::ui::bindingFromRun(row);
+        CHECK(bind.minMs == 1000 && bind.maxMs == 50000);
+        CHECK(bind.dbcHash == "deadbeef");
+        CHECK(photon::ui::runMatchesBinding(row, bind));
+        row.dbcSha = "cafe";
+        CHECK(!photon::ui::runMatchesBinding(row, bind));
+    }
     fs::remove_all(root);
 }
 
@@ -477,7 +523,7 @@ void runAnalysisWorkbookTests() {
     testAcceptsV1ShapedUpgrade();
     testSkipsUnknownKinds();
     testYLockedRoundTrip();
-    testCatalogMatchAndBinding();
+    testRunMatchAndBinding();
     testListCatalogMatchesJson();
     testEmptyCatalogIsEmpty();
     testLosslessV2Fields();
