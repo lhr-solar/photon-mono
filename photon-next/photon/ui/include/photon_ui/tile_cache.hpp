@@ -182,7 +182,14 @@ public:
 
     std::size_t persistRestoredCount() const { return persistRestored_; }
     std::size_t persistWrittenCount() const { return persistWritten_; }
-    std::size_t persistPendingReads() const { return disk_.size(); }
+    std::size_t persistPendingReads() const {
+        std::size_t n = 0;
+        for (const auto& [key, read] : disk_) {
+            (void)key;
+            n += read.pending ? 1 : 0;
+        }
+        return n;
+    }
 
 private:
     struct InFlight {

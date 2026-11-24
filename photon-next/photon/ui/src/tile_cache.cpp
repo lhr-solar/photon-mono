@@ -66,7 +66,11 @@ double medianSpacing(const std::vector<double>& t) {
 void appendTile(PlotArrays& out, const Tile& tile, int level, double lo, double hi, double periodMs,
                 double bucketMs, GapState& gs) {
     const bool env = level > 0;
-    double limit = periodMs > 0.0 ? 3.0 * periodMs : 3.0 * medianSpacing(tile.t);
+    // The period rule is for raw samples only: a bucket's neighbours are a bucket apart, not a period.
+    double limit = 0.0;
+    if (!env) {
+        limit = periodMs > 0.0 ? 3.0 * periodMs : 3.0 * medianSpacing(tile.t);
+    }
     for (std::size_t k = 0; k < tile.t.size(); ++k) {
         const double t = tile.t[k];
         if (t < lo || t > hi) {
@@ -117,20 +121,30 @@ void foldPlot(PlotArrays& a, std::uint32_t maxPoints) {
         PlotArrays next;
         next.envelope = true;
         next.incomplete = a.incomplete;
-        for (std::size_t i = 0; i < a.t.size(); i += 2) {
-            if (i + 1 >= a.t.size()) {
+        const std::size_t n = a.t.size();
+        for (std::size_t i = 0; i < n;) {
+            // A break (non-finite point) is kept as it is, and a point beside one is not
+            // averaged with it: a fold never bridges a gap.
+            const bool beside = !std::isfinite(a.y[i]) || (i + 1 < n && !std::isfinite(a.y[i + 1]));
+            if (i + 1 >= n || beside) {
                 next.t.push_back(a.t[i]);
                 next.y.push_back(a.y[i]);
                 next.yMin.push_back(a.yMin[i]);
                 next.yMax.push_back(a.yMax[i]);
-                break;
+                i += 1;
+                continue;
             }
             next.t.push_back(a.t[i]);
             next.y.push_back((a.y[i] + a.y[i + 1]) * 0.5);
             next.yMin.push_back(std::min(a.yMin[i], a.yMin[i + 1]));
             next.yMax.push_back(std::max(a.yMax[i], a.yMax[i + 1]));
+            i += 2;
         }
+        const bool shrunk = next.t.size() < a.t.size();
         a = std::move(next);
+        if (!shrunk) {
+            break;
+        }
     }
 }
 
@@ -309,7 +323,8 @@ void TileCache::setSettledState(Tile& tile) {
         tile.state = TileState::Unknown;
         return;
     }
-    tile.state = tile.sealed ? TileState::Sealed : (tile.t.empty() ? TileState::Empty : TileState::Open);
+    // Empty is a complete response with no samples, sealed or not; only a sealed tile with samples is Sealed.
+    tile.state = tile.t.empty() ? TileState::Empty : (tile.sealed ? TileState::Sealed : TileState::Open);
 }
 
 bool TileCache::askDisk(const TileKey& key) {
@@ -824,6 +839,10 @@ std::uint64_t TileCache::pump() {
                 p.level > levels_.top()) {
                 continue;
             }
+            // The bucket width is the level's: a blob written with another width is not this tile.
+            if (p.bucketMs != (p.level > 0 ? static_cast<std::uint32_t>(levels_.bucketMs(p.level)) : 0u)) {
+                continue;
+            }
             admitPersisted(p);
         }
     }
@@ -858,6 +877,15 @@ std::uint64_t TileCache::pump() {
             ++persistWritten_;
         }
         ++written;
+    }
+    // A read that has been answered and whose tile is here no longer needs its entry.
+    for (auto it = disk_.begin(); it != disk_.end();) {
+        const auto tit = tiles_.find(it->first);
+        if (!it->second.pending && tit != tiles_.end() && tit->second.haveData) {
+            it = disk_.erase(it);
+        } else {
+            ++it;
+        }
     }
     return pumps_;
 }

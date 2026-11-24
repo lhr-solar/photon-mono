@@ -43,6 +43,7 @@ AnalysisBoundRun::AnalysisBoundRun(AnalysisRunBinding binding, std::uint32_t que
 }
 
 void AnalysisBoundRun::rebind(AnalysisRunBinding binding) {
+    cache_.cancelAll(io_);
     binding_ = std::move(binding);
     cache_.setQueryOrigin(queryOrigin_);
     applySession();
@@ -109,6 +110,17 @@ AnalysisBoundRun* AnalysisRuntime::bind(AnalysisRunBinding binding) {
             return nullptr;
         }
     }
+    // The same run already bound in the other role leaves that role: it is replaced below.
+    const auto sameRunOtherRole = [&binding](const std::unique_ptr<AnalysisBoundRun>& run) {
+        return run->binding().sessionId == binding.sessionId && run->binding().role != binding.role;
+    };
+    std::erase_if(runs_, [&](const std::unique_ptr<AnalysisBoundRun>& run) {
+        if (!sameRunOtherRole(run)) {
+            return false;
+        }
+        run->cache().cancelAll(run->io());
+        return true;
+    });
     if (auto* existing = find(binding.sessionId)) {
         existing->rebind(std::move(binding));
         if (existing->binding().role == AnalysisRunRole::Primary) {
@@ -121,16 +133,14 @@ AnalysisBoundRun* AnalysisRuntime::bind(AnalysisRunBinding binding) {
         syncBudgets();
         return existing;
     }
-    if (binding.role == AnalysisRunRole::Primary) {
-        std::erase_if(runs_, [](const std::unique_ptr<AnalysisBoundRun>& run) {
-            return run->binding().role == AnalysisRunRole::Primary;
-        });
-    }
-    if (binding.role == AnalysisRunRole::Overlay) {
-        std::erase_if(runs_, [](const std::unique_ptr<AnalysisBoundRun>& run) {
-            return run->binding().role == AnalysisRunRole::Overlay;
-        });
-    }
+    // A new primary (or overlay) replaces the one it had: its requests are cancelled first.
+    std::erase_if(runs_, [&binding](const std::unique_ptr<AnalysisBoundRun>& run) {
+        if (run->binding().role != binding.role) {
+            return false;
+        }
+        run->cache().cancelAll(run->io());
+        return true;
+    });
     const std::uint32_t origin = nextQueryOrigin_;
     nextQueryOrigin_ += kAnalysisQueryStride;
     auto run = std::make_unique<AnalysisBoundRun>(std::move(binding), origin);

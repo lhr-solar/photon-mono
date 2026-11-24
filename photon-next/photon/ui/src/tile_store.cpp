@@ -175,6 +175,12 @@ bool decodeTile(const std::vector<std::uint8_t>& blob, PersistedTile& out) {
         !takeF32Array(blob, off, rawCount, t.rawV)) {
         return false;
     }
+    // Each level has its own arrays: raw carries value, a bucketed level carries min, max and mean.
+    const bool raw = t.level == 0;
+    if (raw ? (rawCount != sampleCount || minCount != 0 || maxCount != 0 || meanCount != 0)
+            : (rawCount != 0 || minCount != sampleCount || maxCount != sampleCount || meanCount != sampleCount)) {
+        return false;
+    }
     if (t.t.size() != sampleCount || off != blob.size()) {
         return false;
     }
