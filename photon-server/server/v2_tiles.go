@@ -312,7 +312,9 @@ func spanOf(c cachedSpan, live bool) runSpan {
 // clampToRun returns the part of [fromNS, toNS) that the run can hold, as the bounds
 // of its query: its span, from the second of its first frame to one second past its
 // last. inRun is false when none of the window is in the run. A run with no session
-// row is not clamped.
+// row is not clamped. The live run is clamped at its end only: its start may be
+// older than the frames it gets, and an empty tile of the live run may be cached, so
+// its window must not be cut short at the start.
 func (h *v2Hub) clampToRun(ctx context.Context, run string, fromNS, toNS int64) (lo, hi int64, inRun bool, err error) {
 	span, known, err := h.runSpanOf(ctx, run)
 	if err != nil {
@@ -322,6 +324,9 @@ func (h *v2Hub) clampToRun(ctx context.Context, run string, fromNS, toNS int64) 
 		return fromNS, toNS, true, nil
 	}
 	lo, hi = max(fromNS, span.startNS), min(toNS, span.endNS+rollupNS)
+	if run == h.liveRun() {
+		lo = fromNS
+	}
 	return lo, hi, lo < hi, nil
 }
 

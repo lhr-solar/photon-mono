@@ -229,3 +229,19 @@ func slicesEqual(a, b []float64) bool {
 	}
 	return true
 }
+
+// The live run's window is not cut at its start: a tile before the start is still
+// queried, so an empty live tile is never cached for want of its frames.
+func TestLiveRunWindowIsNotClampedAtItsStart(t *testing.T) {
+	signal, ts := plainSignal(t)
+	index := pastIndex(0)
+	from, to := tileBounds(0, index)
+	msFrom := from / nsPerMs
+	f := &fakeQueries{span: spanReply(msFrom+20000, msFrom+30000)}
+	conn := tileConn(t, newTileHub(t, f, fixedLive(tileTestRun)))
+	requestTile(t, conn, 1, tileTestRun, signal, 0, index)
+	readTile(t, conn, 1)
+	if qs := f.queries(); len(qs) != 1 || qs[0].SQL != wantTileSQL(ts, 0, from, to) {
+		t.Fatalf("queries %+v, want the tile's own window", qs)
+	}
+}
