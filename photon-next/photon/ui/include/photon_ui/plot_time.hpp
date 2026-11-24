@@ -65,23 +65,28 @@ inline void capPlotArrays(PlotArrays& a, std::uint32_t maxPoints) {
     }
 }
 
-inline bool plotArraysAllFinite(const PlotArrays& hist, int n) {
+// True when the first n points can be drawn. A NaN point is a break in the line (a
+// gap, or a span not loaded yet): ImPlot draws nothing there, so it is allowed. An
+// infinite value is not, and at least one point must be finite.
+inline bool plotArraysDrawable(const PlotArrays& hist, int n) {
     if (n <= 0 || static_cast<std::size_t>(n) > hist.t.size() || static_cast<std::size_t>(n) > hist.y.size()) {
         return false;
     }
+    bool anyFinite = false;
     for (int i = 0; i < n; ++i) {
-        if (!std::isfinite(hist.t[static_cast<std::size_t>(i)]) ||
-            !std::isfinite(hist.y[static_cast<std::size_t>(i)])) {
+        const auto k = static_cast<std::size_t>(i);
+        if (std::isinf(hist.t[k]) || std::isinf(hist.y[k])) {
             return false;
         }
-        if (hist.envelope && static_cast<std::size_t>(i) < hist.yMin.size() &&
-            static_cast<std::size_t>(i) < hist.yMax.size() &&
-            (!std::isfinite(hist.yMin[static_cast<std::size_t>(i)]) ||
-             !std::isfinite(hist.yMax[static_cast<std::size_t>(i)]))) {
+        if (std::isfinite(hist.t[k]) && std::isfinite(hist.y[k])) {
+            anyFinite = true;
+        }
+        if (hist.envelope && k < hist.yMin.size() && k < hist.yMax.size() &&
+            (std::isinf(hist.yMin[k]) || std::isinf(hist.yMax[k]))) {
             return false;
         }
     }
-    return true;
+    return anyFinite;
 }
 
 inline void padPlotAxis(double& lo, double& hi) {

@@ -2674,6 +2674,15 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
             if (dualY && haveY2 && autoY) {
                 ImPlot::SetupAxisLimits(ImAxis_Y2, ymin2, ymax2, ImPlotCond_Always);
             }
+            // A span not loaded yet is marked, so the plot does not read as empty.
+            bool loading = false;
+            for (const LineSeriesDraw& row : series) {
+                loading = loading || row.hist.incomplete;
+            }
+            if (loading) {
+                ImPlot::GetPlotDrawList()->AddText(ImVec2(ImPlot::GetPlotPos().x + 8.0f, ImPlot::GetPlotPos().y + 6.0f),
+                                                   ImGui::GetColorU32(theme::mutedFg()), "loading");
+            }
             bool legendHot = false;
             for (const LineSeriesDraw& row : series) {
                 ViewSignal& src = cell.sources[row.index];
@@ -2687,7 +2696,7 @@ void CustomViews::drawCell(UiContext& ui, ViewCell& cell, ImVec2 size, int index
                     continue;
                 }
                 const int n = static_cast<int>(std::min(row.hist.t.size(), row.hist.y.size()));
-                if (n <= 0 || !plotArraysAllFinite(row.hist, n)) {
+                if (n <= 0 || !plotArraysDrawable(row.hist, n)) {
                     continue;
                 }
                 const bool envelope = row.hist.envelope &&

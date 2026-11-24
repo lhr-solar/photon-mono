@@ -678,7 +678,7 @@ void drawLineCell(AnalysisRuntime& runtime, AnalysisScreen::State& st, ViewCell&
                 continue;
             }
             const int n = static_cast<int>(std::min(row.hist.t.size(), row.hist.y.size()));
-            if (n <= 0 || !plotArraysAllFinite(row.hist, n)) {
+            if (n <= 0 || !plotArraysDrawable(row.hist, n)) {
                 continue;
             }
             const std::string name = cellLabel(src);
