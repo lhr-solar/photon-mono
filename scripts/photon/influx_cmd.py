@@ -150,7 +150,11 @@ def main(words) -> None:
         if edition != "enterprise":
             cmd += CORE_MEMORY_CAPS
     if edition == "enterprise":
-        cmd += ["--cluster-id", CLUSTER_ID, "--num-cores", ENTERPRISE_CORES]
+        cmd += ["--cluster-id", CLUSTER_ID]
+        # --num-cores must be 2 or more and at most the machine's cores, so it is only
+        # needed (and only allowed) on a machine with more cores than the licence.
+        if (os.cpu_count() or 1) > int(ENTERPRISE_CORES):
+            cmd += ["--num-cores", ENTERPRISE_CORES]
         if caps:
             cmd += ENTERPRISE_MEMORY_CAPS
         licence = data / CLUSTER_ID / "trial_or_home_license"
