@@ -124,8 +124,18 @@ func (c *canDecoder) goodClock(id uint32, bus string, data []byte, tNS int64) {
 		canStats.badClock.Add(1)
 		return
 	}
-	if c.can0Bit && bus == "can0" {
-		id |= canpBus0Bit
+	// Look the frame up the way the live path does (LookupWire): a can0 frame
+	// keeps its bit 12 when the DBC uses it (HighNoon 2026) and falls back to the
+	// plain ID when the DBC defines the message without it (a 2027 spec), so the
+	// rows and the live values always name the same message.
+	wire := id
+	if bus == "can0" {
+		wire |= canpBus0Bit
+	}
+	if m := c.catalog.LookupWire(wire); m != nil {
+		id = m.ID
+	} else if c.can0Bit && bus == "can0" {
+		id = wire
 	}
 	c.dec.Decode(id, bus, data, tNS)
 	if c.session == nil {

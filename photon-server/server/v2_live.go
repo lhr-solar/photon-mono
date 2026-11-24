@@ -189,10 +189,19 @@ func (c *v2Client) pushLive(h *v2Hub) {
 		last    int64        // car time of the last frame read, or the end of the last gap; 0 for none
 		samples []liveSample // what the frames read decode to; reused
 	)
-	// reload takes a new subscription, which starts at the oldest frame in the ring.
+	// reload takes a new subscription. It starts the live window (-live-seconds)
+	// before the newest frame, which covers InfluxDB's write delay, rather than at
+	// the oldest frame: at a low frame rate the ring reaches back much further, and
+	// every subscribe would resend all of it. With no window set, the oldest frame.
 	reload := func() {
 		sub = c.sub.Load()
 		cursor = ring.oldest()
+		if h.liveWindow > 0 {
+			if _, head := ring.stats(); head > cursor {
+				newest := ring.timeAt(head - 1)
+				cursor = ring.firstAtOrAfter(newest - h.liveWindow.Nanoseconds())
+			}
+		}
 	}
 	for {
 		select {

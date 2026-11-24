@@ -40,6 +40,7 @@ type v2Hub struct {
 	webDir      string          // static bundle served at /; empty for none
 	liveRun     func() string   // the frame session ID, or "" when there is none
 	ring        *liveRing       // the recent CAN frames that live clients read
+	liveWindow  time.Duration   // how far back a new subscription starts (-live-seconds); 0 = the oldest frame
 	querier     *influxQuerier  // history queries; nil when InfluxDB is off
 	tiles       *tileCache      // the sealed tiles of the live run
 	tilesServed atomic.Uint64   // tile requests answered
@@ -79,6 +80,7 @@ func newV2Hub(cfg *Config, gate *ClientGate, liveRun func() string, ring *liveRi
 		webDir:       cfg.WebDir,
 		liveRun:      liveRun,
 		ring:         ring,
+		liveWindow:   cfg.LiveSeconds,
 		querier:      querier,
 		video:        video,
 		tiles:        newTileCache(),

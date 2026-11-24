@@ -729,3 +729,26 @@ func TestWriterSendsControlThenLiveThenBulk(t *testing.T) {
 	}
 }
 
+
+// With a live window set, a new subscription starts that far before the newest
+// frame, not at the oldest frame: at a low frame rate the ring reaches back much
+// further, and each subscribe would otherwise resend all of it.
+func TestLiveJoinsAtTheLiveWindow(t *testing.T) {
+	cat := liveCatalog(t)
+	ix := sigIndexer(t, cat)
+	h := newLiveHub(t, 1<<14)
+	h.liveWindow = 5 * time.Second
+	h.SetCatalog(cat)
+	now := nowMS()
+	// One frame a second for the last 60 s, valued by its age in seconds.
+	for age := 59; age >= 0; age-- {
+		h.ring.appendBuffer(frameBatch(now-uint64(age)*1000, testFrame{id: 0x100, data: []byte{byte(age)}}))
+	}
+	conn := liveConn(t, h)
+	subscribeTo(t, conn, ix("Std100", "A"))
+	recs := collectSamples(t, conn, 6) // ages 5, 4, 3, 2, 1, 0
+	if recs[0].Value != 5 || recs[5].Value != 0 {
+		t.Fatalf("first and last values %v, %v; want 5 then 0", recs[0].Value, recs[5].Value)
+	}
+	expectNothingElse(t, conn)
+}

@@ -115,6 +115,24 @@ func (r *liveRing) timeAt(seq uint64) int64 {
 }
 
 // oldest is the oldest sequence still in the ring.
+// firstAtOrAfter returns the sequence of the oldest frame still in the ring whose
+// car time is at or after tNS, or the head when there is none. Frame times only
+// roughly increase, so it is a starting point, not an exact cut.
+func (r *liveRing) firstAtOrAfter(tNS int64) uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	lo, hi := r.oldestLocked(), r.head
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if r.slots[mid%uint64(len(r.slots))].tNS < tNS {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
 func (r *liveRing) oldest() uint64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

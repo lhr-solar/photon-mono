@@ -117,3 +117,24 @@ func TestLiveRingKeepsCan0Bit(t *testing.T) {
 		t.Errorf("subscription to 0x1123 should match it and not 0x123")
 	}
 }
+
+// A can0 frame whose message a DBC defines without bit 12 (a 2027 spec) is decoded
+// into rows, as the live path shows it: both look it up with LookupWire.
+func TestDecoderCan0FrameWithoutTheBit(t *testing.T) {
+	dir := t.TempDir()
+	dbcText := "BO_ 291 Plain123: 1 Node\n SG_ X : 0|8@1+ (1,0) [0|255] \"\" Node\n"
+	if err := os.WriteFile(filepath.Join(dir, "CarCAN.dbc"), []byte(dbcText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sink := &recordSink{}
+	now := testNow
+	c := newTestDecoder(t, dir, newTestSession(sink, &now))
+	c.decode(frameBatch(testTSMS, testFrame{id: 0x123 | canpBus0Bit, data: []byte{42}}))
+	rows := rowsWithPrefix(sink.lines(t), "frame,")
+	if len(rows) != 1 || !strings.Contains(rows[0], ",msg=Plain123 X=42i ") {
+		t.Fatalf("rows = %q, want one Plain123 X=42 row", rows)
+	}
+	if s := c.dec.Stats; s.UnknownID != 0 {
+		t.Errorf("stats = %+v, want no unknown IDs", s)
+	}
+}
