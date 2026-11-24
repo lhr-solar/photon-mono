@@ -69,6 +69,7 @@ class FanoutProbe:
         self.sock.close()
 
 
+@unittest.skip("protocol v2 step 1: the UI talks to photon-server /v2, not photon-backend v1; step 3 rewrites this test")
 class Station(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

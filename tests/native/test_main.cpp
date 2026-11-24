@@ -35,6 +35,9 @@ void runAnalysisComputeTests();
 void runAnalysisWorkbookTests();
 void runAnalysisOverlayTests();
 void runPlotAxisTests();
+void runProtocolV2Tests();
+void runControlV2Tests();
+void runLiveV2Tests();
 
 namespace {
 
@@ -628,6 +631,9 @@ int main() {
     runAnalysisWorkbookTests();
     runAnalysisOverlayTests();
     runPlotAxisTests();
+    runProtocolV2Tests();
+    runControlV2Tests();
+    runLiveV2Tests();
 
     std::fprintf(stdout, "photon-tests: %d passed, %d failed\n", gPassed, gFailed);
     return gFailed == 0 ? 0 : 1;
